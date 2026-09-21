@@ -1,0 +1,7 @@
+# Local dev secrets — copy to .dev.vars (gitignored) and fill in real values.
+MESSENGER_APP_SECRET=
+MESSENGER_VERIFY_TOKEN=
+BETTER_AUTH_SECRET=
+BETTER_AUTH_URL=http://localhost:8787
+# Comma-separated origins allowed to authenticate (web app dev origin, prod domain).
+BETTER_AUTH_TRUSTED_ORIGINS=http://localhost:5174

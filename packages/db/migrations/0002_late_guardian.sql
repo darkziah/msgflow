@@ -1,0 +1,1 @@
+ALTER TABLE `scheduled_messages` ADD `attempts` integer DEFAULT 0 NOT NULL;

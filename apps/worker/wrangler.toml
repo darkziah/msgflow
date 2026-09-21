@@ -1,0 +1,33 @@
+name = "msgflow-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "msgflow"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[durable_objects.bindings]]
+name = "CONVERSATION_DO"
+class_name = "ConversationDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ConversationDO"]
+
+[[send_email]]
+name = "EMAIL"
+
+# Send-later: every minute, delivers due scheduled_messages rows (ADR 0013).
+[triggers]
+crons = ["* * * * *"]
+
+# Inbound email routing (Cloudflare Email Service → email() handler) is enabled
+# per-domain in the dashboard: Email Service > Email Routing > route to this Worker.
+
+# Auth: BETTER_AUTH_SECRET is set via `wrangler secret put` (or .dev.vars locally);
+# BETTER_AUTH_URL is the Worker's public base URL. See apps/worker/.dev.vars.example.

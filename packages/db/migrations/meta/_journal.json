@@ -1,0 +1,41 @@
+{
+	"version": "7",
+	"dialect": "sqlite",
+	"entries": [
+		{
+			"idx": 0,
+			"version": "6",
+			"when": 1789733723117,
+			"tag": "0000_tiresome_hawkeye",
+			"breakpoints": true
+		},
+		{
+			"idx": 1,
+			"version": "6",
+			"when": 1789738773698,
+			"tag": "0001_ancient_ben_urich",
+			"breakpoints": true
+		},
+		{
+			"idx": 2,
+			"version": "6",
+			"when": 1789785703483,
+			"tag": "0002_late_guardian",
+			"breakpoints": true
+		},
+		{
+			"idx": 3,
+			"version": "6",
+			"when": 1789789211407,
+			"tag": "0003_0003_phase2_org_channels_rules",
+			"breakpoints": true
+		},
+		{
+			"idx": 4,
+			"version": "6",
+			"when": 1789828119828,
+			"tag": "0004_inbox_routing_sidebar",
+			"breakpoints": true
+		}
+	]
+}

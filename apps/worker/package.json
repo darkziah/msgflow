@@ -1,0 +1,38 @@
+{
+	"name": "@msgflow/worker",
+	"version": "0.1.0",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./client": {
+			"types": "./dist/client.d.ts",
+			"default": "./dist/client.js"
+		}
+	},
+	"scripts": {
+		"build": "tsc",
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"type-check": "tsc --noEmit",
+		"test": "bun test",
+		"smoke": "bun scripts/smoke.ts",
+		"smoke-routing": "bun scripts/smoke-routing.ts"
+	},
+	"dependencies": {
+		"@msgflow/auth": "workspace:*",
+		"@msgflow/contracts": "workspace:*",
+		"@msgflow/db": "workspace:*",
+		"drizzle-orm": "^0.45.2",
+		"hono": "^4.10.8",
+		"postal-mime": "^3.0.0"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20260918.1",
+		"typescript": "^5.8.3",
+		"wrangler": "^4.134.0"
+	}
+}
