@@ -6,6 +6,8 @@ import {
 } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { useSession } from "@/lib/auth-client";
+import { AppShellV2 } from "@/components/v2/AppShellV2";
+import "@/styles/theme-v2.css";
 
 export const Route = createRootRoute({
 	component: Root,
@@ -27,7 +29,9 @@ function Root() {
 	}
 	return (
 		<>
-			<Outlet />
+			<AppShellV2>
+				<Outlet />
+			</AppShellV2>
 			<TanStackRouterDevtools />
 		</>
 	);
