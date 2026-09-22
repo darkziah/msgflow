@@ -1,7 +1,8 @@
 import type { ConversationSummary } from "@msgflow/contracts";
 import { Mail, MessageCircle } from "lucide-react";
-import { contactName, initials, timeAgo } from "@/lib/format";
+import { contactName, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { ContactAvatar } from "./ContactAvatar";
 import { TagChip } from "./TagChip";
 
 interface Props {
@@ -38,9 +39,11 @@ export function ConversationList({
 								selected ? "bg-primary/10" : "hover:bg-accent",
 							)}
 						>
-							<span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-full bg-gray-200 text-xs font-semibold text-gray-600">
-								{initials(name)}
-							</span>
+							<ContactAvatar
+								name={name}
+								avatarUrl={conversation.contact.avatarUrl}
+								className="mt-0.5 size-9"
+							/>
 							<span className="min-w-0 flex-1">
 								<span className="flex items-baseline justify-between gap-2">
 									<span className="truncate text-sm font-semibold">{name}</span>

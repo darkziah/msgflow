@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, conversationSocketUrl } from "@/lib/api";
 import { contactName, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { ContactAvatar } from "./ContactAvatar";
 import { Composer } from "./Composer";
 import { ConversationActions } from "./ConversationActions";
 import { TagPicker } from "./TagPicker";
@@ -106,14 +107,21 @@ export function ConversationThread({
 	return (
 		<div className="flex h-full flex-col">
 			<header className="flex items-center justify-between gap-3 border-b px-4 py-3">
-				<div className="min-w-0">
-					<h2 className="truncate text-base font-bold">
-						{contactName(conversation.contact)}
-					</h2>
-					<p className="truncate text-xs text-gray-500">
-						{conversation.channelDisplayName}
-						{conversation.subject ? ` · ${conversation.subject}` : ""}
-					</p>
+				<div className="flex min-w-0 items-center gap-3">
+					<ContactAvatar
+						name={contactName(conversation.contact)}
+						avatarUrl={conversation.contact.avatarUrl}
+						className="size-9"
+					/>
+					<div className="min-w-0">
+						<h2 className="truncate text-base font-bold">
+							{contactName(conversation.contact)}
+						</h2>
+						<p className="truncate text-xs text-gray-500">
+							{conversation.channelDisplayName}
+							{conversation.subject ? ` · ${conversation.subject}` : ""}
+						</p>
+					</div>
 				</div>
 				<div className="flex shrink-0 items-center gap-3">
 					<TagPicker conversationId={conversationId} tags={conversation.tags} />

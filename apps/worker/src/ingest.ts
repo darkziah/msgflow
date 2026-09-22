@@ -1,18 +1,18 @@
-import { and, eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
+import type { NormalizedInbound } from "@msgflow/channel";
 import type { Message } from "@msgflow/contracts";
 import { parseConversationId } from "@msgflow/contracts";
-import type { NormalizedInbound } from "@msgflow/channel";
 import {
 	channels,
 	contactIdentities,
 	contacts,
-	conversationTags,
 	conversations,
+	conversationTags,
 	inboxChannels,
 	inboxes,
 	processedMessages,
 } from "@msgflow/db";
+import { and, eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
 import type { Env } from "./env";
 import { evaluateRules } from "./rules";
 import { getOrCreateWorkspace } from "./workspace";
@@ -21,6 +21,43 @@ const DEFAULT_INBOX_NAMES: Record<string, string> = {
 	facebook_page: "Facebook Support",
 	email: "Support",
 };
+
+interface FacebookProfile {
+	displayName: string | null;
+	avatarUrl: string | null;
+}
+
+/**
+ * Fetch a Messenger user's profile (name + avatar) from the Graph API.
+ * Meta webhook messaging events carry only the PSID — the name must be
+ * resolved separately. Best-effort: any failure returns null so ingest
+ * never breaks because a name lookup failed. Channels without a page
+ * access token (lazily-created, never connected) simply skip this.
+ */
+async function fetchFacebookProfile(
+	psid: string,
+	accessToken: string,
+): Promise<FacebookProfile | null> {
+	try {
+		const url =
+			`https://graph.facebook.com/v21.0/${encodeURIComponent(psid)}` +
+			`?fields=name,picture.type(large)&access_token=${encodeURIComponent(accessToken)}`;
+		const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+		if (!response.ok) return null;
+		const data = (await response.json()) as {
+			name?: string;
+			picture?: { data?: { url?: string } };
+			error?: { message?: string };
+		};
+		if (data.error) return null;
+		return {
+			displayName: data.name ?? null,
+			avatarUrl: data.picture?.data?.url ?? null,
+		};
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Ingest routing (ADR 0009): resolve workspace → channel → contact identity →
@@ -56,6 +93,12 @@ export async function routeInbound(
 	);
 
 	// 3. Contact via its channel identity (PSIDs are Page-scoped → keyed by channel).
+	//    Meta webhooks carry only the PSID — resolve the display name/avatar via
+	//    the Graph API when the channel has a token (best-effort, never fatal).
+	const profile =
+		channelType === "facebook_page" && channel.accessToken
+			? await fetchFacebookProfile(inbound.senderId, channel.accessToken)
+			: null;
 	const contact = await getOrCreateContact(
 		db,
 		workspace.id,
@@ -63,6 +106,7 @@ export async function routeInbound(
 		channelType,
 		inbound.senderId,
 		now,
+		profile,
 	);
 
 	// 4. Default inbox for the channel (each channel has exactly one default, ADR 0008).
@@ -256,6 +300,7 @@ async function getOrCreateContact(
 	channelType: "facebook_page" | "email",
 	externalUserId: string,
 	now: string,
+	profile?: FacebookProfile | null,
 ): Promise<typeof contacts.$inferSelect> {
 	const identity = await db
 		.select({ contactId: contactIdentities.contactId })
@@ -273,7 +318,29 @@ async function getOrCreateContact(
 			.from(contacts)
 			.where(eq(contacts.id, identity.contactId))
 			.get();
-		if (contact) return contact;
+		if (contact) {
+			// Fill only missing provider fields when a channel gains a token after
+			// the contact was created. A partial Graph response must never erase
+			// an already-resolved name or avatar.
+			const displayName = contact.displayName ?? profile?.displayName ?? null;
+			const avatarUrl = contact.avatarUrl ?? profile?.avatarUrl ?? null;
+			if (
+				profile &&
+				(displayName !== contact.displayName || avatarUrl !== contact.avatarUrl)
+			) {
+				await db
+					.update(contacts)
+					.set({
+						displayName,
+						avatarUrl,
+						updatedAt: now,
+					})
+					.where(eq(contacts.id, contact.id))
+					.run();
+				return { ...contact, displayName, avatarUrl };
+			}
+			return contact;
+		}
 	}
 
 	const contactId = crypto.randomUUID();
@@ -282,6 +349,10 @@ async function getOrCreateContact(
 		.values({
 			id: contactId,
 			workspaceId,
+			displayName:
+				channelType === "facebook_page" ? (profile?.displayName ?? null) : null,
+			avatarUrl:
+				channelType === "facebook_page" ? (profile?.avatarUrl ?? null) : null,
 			primaryEmail: channelType === "email" ? externalUserId : null,
 			createdAt: now,
 			updatedAt: now,
