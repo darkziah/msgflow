@@ -108,6 +108,27 @@ _Avoid_: Google Workspace domain, shared DNS zone
 - An **Agent** has exactly one stable **Username**.
 - A **Workspace Owner** administers one **Workspace** without implicit access to its **Private Mailboxes**.
 
+## Runtime boundary contracts
+
+- Use `effect/Schema` from the `effect` package for new runtime validation and
+  serialization contracts. Put browser/Worker-safe schemas in
+  `@msgflow/contracts`; do not add the deprecated `@effect/schema` package.
+- Decode untrusted HTTP JSON once with `decodeJsonBody()` in
+  `apps/worker/src/validation.ts`, then pass only decoded client-controlled
+  fields to existing services. Keep server-generated IDs, workspace/actor
+  ownership, delivery state, authorization, encryption, and business rules out
+  of public DTOs.
+- Drizzle/D1 remain the source of truth for relational tables, migrations,
+  constraints, and queries. Use Effect schemas for untrusted boundaries and
+  durable flexible JSON/event shapes, not as generated public database-insert
+  payloads.
+- Version Durable Object and persisted JSON contracts before changing shapes
+  that survive deployments. Provider ingress schemas must tolerate extensions
+  while validating the fields MsgFlow actually consumes.
+- Preserve existing API status/error behavior with parity tests when migrating a
+  route. See `docs/adr/0022-effect-schema-boundaries.md` and
+  `docs/effect-schema-rollout.md` for the rollout inventory and conventions.
+
 ## Example dialogue
 
 > **Dev:** "When an agent posts an internal note, is that a Message?"
