@@ -15,6 +15,7 @@ import {
 import type { Env } from "./env";
 import { decryptChannelToken } from "./channel-token-crypto";
 import { readAttachment } from "./attachments";
+import { parseStoredAttachments } from "./persistence";
 
 export interface SendParams {
 	conversationId: string;
@@ -120,7 +121,7 @@ export async function sendOutbound(
 		return { ok: false, error: context.error, retryable: true };
 	}
 
-	const result = context.send({ to: context.to, text: intent.text, subject: intent.subject ?? undefined, idempotencyKey: id, attachments: parseAttachments(intent.attachmentsJson) });
+	const result = context.send({ to: context.to, text: intent.text, subject: intent.subject ?? undefined, idempotencyKey: id, attachments: parseStoredAttachments(intent.attachmentsJson) });
 	const provider = await result;
 	if (!provider.ok) {
 		const uncertain = provider.failureKind === "uncertain";
@@ -184,7 +185,7 @@ async function reconcileProviderSent(env: Env, intent: typeof outboundIntents.$i
 		senderId: intent.senderId,
 		text: intent.text,
 		payload: intent.subject ? { subject: intent.subject } : null,
-		attachments: parseAttachments(intent.attachmentsJson),
+		attachments: parseStoredAttachments(intent.attachmentsJson),
 		createdAt: intent.providerSentAt ?? intent.createdAt,
 	};
 	try {
@@ -230,15 +231,6 @@ async function resolveProviderContext(env: Env, conversationId: string, threadKe
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-
-function parseAttachments(value: string): Message["attachments"] {
-	try {
-		const parsed = JSON.parse(value);
-		return Array.isArray(parsed) ? parsed : [];
-	} catch {
-		return [];
-	}
-}
 
 async function getMessageFromDo(env: Env, conversationId: string, messageId: string): Promise<Message | null> {
 	const stub = env.CONVERSATION_DO.get(env.CONVERSATION_DO.idFromName(conversationId));

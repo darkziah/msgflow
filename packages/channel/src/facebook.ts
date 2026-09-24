@@ -1,4 +1,8 @@
-import { facebookConversationId } from "@msgflow/contracts";
+import { Either, Schema } from "effect";
+import {
+	facebookConversationId,
+	FacebookGraphSendResponseSchema,
+} from "@msgflow/contracts";
 import type {
 	ChannelAdapter,
 	NormalizedInbound,
@@ -17,11 +21,6 @@ interface MessengerEvent {
 		text?: string;
 		attachments?: Array<{ type?: string; payload?: { url?: string } }>;
 	};
-}
-interface GraphSendResponse {
-	recipient_id?: string;
-	message_id?: string;
-	error?: { message?: string; code?: number; error_subcode?: number };
 }
 function isMessengerWebhook(raw: unknown): raw is { entry?: MessengerWebhookEntry[] } {
 	return typeof raw === "object" && raw !== null && "entry" in raw && Array.isArray((raw as { entry?: unknown }).entry);
@@ -69,10 +68,15 @@ async function graphSend(token: string, body: unknown): Promise<ProviderSendResu
 	} catch (err) {
 		return { ok: false, providerMessageId: null, error: `graph api request failed: ${err instanceof Error ? err.message : String(err)}`, failureKind: "uncertain" };
 	}
-	let json: GraphSendResponse;
-	try { json = (await response.json()) as GraphSendResponse; } catch {
+	let raw: unknown;
+	try { raw = await response.json(); } catch {
 		return { ok: false, providerMessageId: null, error: `graph api returned non-JSON (HTTP ${response.status})`, failureKind: response.ok ? "uncertain" : "definitive" };
 	}
+	const decoded = Schema.decodeUnknownEither(FacebookGraphSendResponseSchema)(raw);
+	if (Either.isLeft(decoded)) {
+		return { ok: false, providerMessageId: null, error: `graph api returned invalid JSON (HTTP ${response.status})`, failureKind: response.ok ? "uncertain" : "definitive" };
+	}
+	const json = decoded.right;
 	if (!response.ok || json.error || !json.message_id) {
 		const code = json.error?.code;
 		const detail = json.error?.message ?? `HTTP ${response.status}`;

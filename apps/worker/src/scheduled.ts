@@ -5,6 +5,7 @@ import type { Env } from "./env";
 import { sendOutbound } from "./outbound";
 import { reviveDueSnoozes } from "./snooze";
 import { claimScheduledMessage } from "./scheduled-claim";
+import { parseStoredAttachments } from "./persistence";
 
 export { reviveDueSnoozes } from "./snooze";
 export { claimScheduledMessage, SCHEDULED_CLAIM_LEASE_MS } from "./scheduled-claim";
@@ -26,7 +27,7 @@ export async function deliverScheduledMessages(env: Env, now: string): Promise<v
 		const result = await sendOutbound(env, {
 			conversationId: row.conversationId,
 			text: row.text,
-			attachments: JSON.parse(row.attachmentsJson),
+			attachments: parseStoredAttachments(row.attachmentsJson),
 			senderId: row.createdBy ?? "system",
 			clientMessageId: row.id,
 		}, { allowQueued: true, retryDefinitiveFailure: true });

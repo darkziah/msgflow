@@ -1,3 +1,4 @@
+import { Either, Schema } from "effect";
 import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type {
@@ -13,6 +14,10 @@ import type {
 	SidebarSection,
 	SidebarTagItem,
 	WorkspaceSummary,
+} from "@msgflow/contracts";
+import {
+	SidebarItemOrderSchema,
+	SidebarStringListSchema,
 } from "@msgflow/contracts";
 import {
 	channels,
@@ -459,30 +464,11 @@ async function loadPreferences(
 }
 
 function parseJsonArray(raw: string): string[] {
-	try {
-		const value = JSON.parse(raw);
-		return Array.isArray(value)
-			? value.filter((v) => typeof v === "string")
-			: [];
-	} catch {
-		return [];
-	}
+	return [...decodeStoredJson(raw, SidebarStringListSchema, [])];
 }
 
 function parseJsonRecord(raw: string): Record<string, number> {
-	try {
-		const value = JSON.parse(raw);
-		if (value && typeof value === "object" && !Array.isArray(value)) {
-			const out: Record<string, number> = {};
-			for (const [key, v] of Object.entries(value)) {
-				if (typeof v === "number" && Number.isFinite(v)) out[key] = v;
-			}
-			return out;
-		}
-		return {};
-	} catch {
-		return {};
-	}
+	return { ...decodeStoredJson(raw, SidebarItemOrderSchema, {}) };
 }
 
 export async function updateSidebarPreferences(
@@ -742,4 +728,17 @@ export async function listWorkspacesForUser(
 	const access = await getWorkspaceAccess(db, ws.id, userId);
 	if (!access) return [];
 	return [{ id: ws.id, name: ws.name, slug: ws.slug, role: access.role }];
+}
+
+function decodeStoredJson<A, I>(
+	raw: string,
+	schema: Schema.Schema<A, I, never>,
+	fallback: A,
+): A {
+	try {
+		const decoded = Schema.decodeUnknownEither(schema)(JSON.parse(raw));
+		return Either.isRight(decoded) ? decoded.right : fallback;
+	} catch {
+		return fallback;
+	}
 }

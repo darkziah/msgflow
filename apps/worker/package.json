@@ -27,6 +27,7 @@
 		"@msgflow/contracts": "workspace:*",
 		"@msgflow/db": "workspace:*",
 		"drizzle-orm": "^0.45.2",
+		"effect": "^3.22.2",
 		"hono": "^4.10.8",
 		"postal-mime": "^3.0.0"
 	},

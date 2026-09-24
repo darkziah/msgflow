@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { Either, Schema } from "effect";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { conversations, messagesSummary } from "@msgflow/db";
@@ -9,7 +10,19 @@ import type {
 	Message,
 	PresenceEntry,
 } from "@msgflow/contracts";
+import {
+	ConversationUpdatedEventSchema,
+	TimelineActivityDetailsSchema,
+	TimelineActivitySchema,
+	TimelineAttachmentsSchema,
+	TimelineCommentSchema,
+	TimelineMentionsSchema,
+	TimelineMessageSchema,
+	TimelinePayloadSchema,
+	WebSocketClientEventSchema,
+} from "@msgflow/contracts";
 import type { Env } from "./env";
+import { decodeJsonBody } from "./validation";
 
 interface WebSocketAttachment {
 	agentId: string;
@@ -133,7 +146,9 @@ export class ConversationDO extends DurableObject<Env> {
 	}
 
 	private async appendMessage(request: Request): Promise<Response> {
-		const message = (await request.json()) as Message;
+		const decoded = await decodeJsonBody(request, TimelineMessageSchema);
+		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
+		const message = decoded.value as Message;
 
 		// Idempotency: dedup by providerMessageId (webhook replays) and by message
 		// id (client retries / scheduled-message retries) before appending.
@@ -205,7 +220,9 @@ export class ConversationDO extends DurableObject<Env> {
 	}
 
 	private async appendComment(request: Request): Promise<Response> {
-		const comment = (await request.json()) as Comment;
+		const decoded = await decodeJsonBody(request, TimelineCommentSchema);
+		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
+		const comment = decoded.value as Comment;
 		this.sql.exec(
 			"INSERT INTO comments (id, author_id, text, mentions, created_at) VALUES (?, ?, ?, ?, ?)",
 			comment.id,
@@ -219,7 +236,9 @@ export class ConversationDO extends DurableObject<Env> {
 	}
 
 	private async appendActivity(request: Request): Promise<Response> {
-		const activity = (await request.json()) as Activity;
+		const decoded = await decodeJsonBody(request, TimelineActivitySchema);
+		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
+		const activity = decoded.value as Activity;
 		this.sql.exec(
 			"INSERT INTO activities (id, action, actor_id, details, created_at) VALUES (?, ?, ?, ?, ?)",
 			activity.id,
@@ -279,10 +298,9 @@ export class ConversationDO extends DurableObject<Env> {
 	 * messages/comments go through their own append endpoints.
 	 */
 	private async broadcastEvent(request: Request): Promise<Response> {
-		const event = (await request.json()) as ConversationEvent;
-		if (event.type !== "conversation-updated") {
-			return new Response("invalid event", { status: 400 });
-		}
+		const decoded = await decodeJsonBody(request, ConversationUpdatedEventSchema);
+		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
+		const event = decoded.value as ConversationEvent;
 		await this.broadcast(event);
 		return new Response("ok", { status: 200 });
 	}
@@ -297,10 +315,10 @@ export class ConversationDO extends DurableObject<Env> {
 			providerMessageId: (row.provider_message_id as string | null) ?? null,
 			senderId: row.sender_id as string,
 			text: row.text as string,
-			payload: row.payload ? JSON.parse(row.payload as string) : null,
-			attachments: row.attachments
-				? JSON.parse(row.attachments as string)
-				: [],
+			payload: decodeStoredJson(row.payload, TimelinePayloadSchema, null),
+			attachments: [
+				...decodeStoredJson(row.attachments, TimelineAttachmentsSchema, []),
+			],
 			createdAt: row.created_at as string,
 			seq: row.seq as number,
 		};
@@ -312,7 +330,7 @@ export class ConversationDO extends DurableObject<Env> {
 			conversationId: this.ctx.id.name ?? "",
 			authorId: row.author_id as string,
 			text: row.text as string,
-			mentions: JSON.parse(row.mentions as string) as string[],
+			mentions: [...decodeStoredJson(row.mentions, TimelineMentionsSchema, [])],
 			createdAt: row.created_at as string,
 		};
 	}
@@ -323,7 +341,7 @@ export class ConversationDO extends DurableObject<Env> {
 			conversationId: this.ctx.id.name ?? "",
 			action: row.action as Activity["action"],
 			actorId: (row.actor_id as string | null) ?? null,
-			details: JSON.parse(row.details as string) as Record<string, unknown>,
+			details: decodeStoredJson(row.details, TimelineActivityDetailsSchema, {}),
 			createdAt: row.created_at as string,
 		};
 	}
@@ -374,12 +392,15 @@ export class ConversationDO extends DurableObject<Env> {
 			| undefined;
 		const agentId = attachment?.agentId ?? "anonymous";
 
-		let event: { type: string; isTyping?: boolean };
+		let raw: unknown;
 		try {
-			event = JSON.parse(message);
+			raw = JSON.parse(message);
 		} catch {
 			return;
 		}
+		const decoded = Schema.decodeUnknownEither(WebSocketClientEventSchema)(raw);
+		if (Either.isLeft(decoded)) return;
+		const event = decoded.right;
 
 		switch (event.type) {
 			case "draft:opened":
@@ -420,5 +441,19 @@ export class ConversationDO extends DurableObject<Env> {
 
 	async webSocketError(_ws: WebSocket, _error: unknown): Promise<void> {
 		// no-op for the skeleton
+	}
+}
+
+function decodeStoredJson<A, I>(
+	value: unknown,
+	schema: Schema.Schema<A, I, never>,
+	fallback: A,
+): A {
+	if (typeof value !== "string") return fallback;
+	try {
+		const decoded = Schema.decodeUnknownEither(schema)(JSON.parse(value));
+		return Either.isRight(decoded) ? decoded.right : fallback;
+	} catch {
+		return fallback;
 	}
 }

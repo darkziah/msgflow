@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { Either, Schema } from "effect";
 import type { Context } from "hono";
 import PostalMime from "postal-mime";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
@@ -8,25 +9,34 @@ import type {
 	Comment,
 	CommentNotificationsResponse,
 	ConversationEvent,
-	ConversationTagRequest,
-	ConversationUpdateRequest,
 	ConversationUpdateResponse,
-	CreateCommentRequest,
 	CreateCommentResponse,
-	InboxChannelRequest,
-	InboxReorderRequest,
-	MarkReadRequest,
 	SavedFilterCreateRequest,
-	SendMessageRequest,
 	SendMessageResult,
-	SetDefaultInboxRequest,
 	SidebarPreferencesUpdate,
 	TimelineResponse,
 	UserSummary,
 } from "@msgflow/contracts";
 import {
 	ChannelConnectRequestSchema,
+	ConversationTagRequestSchema,
+	ConversationUpdateRequestSchema,
+	CreateCommentRequestSchema,
+	CannedReplyWriteRequestSchema,
 	InboxCreateRequestSchema,
+	InboxChannelRequestSchema,
+	InboxMemberRequestSchema,
+	InboxReorderRequestSchema,
+	InboxUpdateRequestSchema,
+	MarkReadRequestSchema,
+	MessengerWebhookEnvelopeSchema,
+	RuleWriteRequestSchema,
+	SavedFilterCreateRequestSchema,
+	SendMessageRequestSchema,
+	SetDefaultInboxRequestSchema,
+	SidebarPreferencesUpdateSchema,
+	TagCreateRequestSchema,
+	TagUpdateRequestSchema,
 } from "@msgflow/contracts";
 import { createAuth } from "@msgflow/auth";
 import { drizzle } from "drizzle-orm/d1";
@@ -148,12 +158,10 @@ app.post("/api/conversations/:id/messages", async (c) => {
 		return c.json({ success: false, error: "unauthorized" }, 401);
 	}
 
-	const body = (await c.req
-		.json()
-		.catch(() => null)) as SendMessageRequest | null;
-	if (!body || typeof body.text !== "string") {
-		return c.json({ success: false, error: "text is required" }, 400);
-	}
+	const decoded = await decodeJsonBody(c.req.raw, SendMessageRequestSchema);
+	if (!decoded.ok)
+		return c.json({ success: false, error: decoded.error }, 400);
+	const body = decoded.value;
 	let attachments: Attachment[];
 	try { attachments = validateAttachments(c.env, body.attachments ?? []); }
 	catch (err) { return c.json({ success: false, error: err instanceof Error ? err.message : "invalid attachments" }, 400); }
@@ -337,25 +345,14 @@ app.post("/api/conversations/:id/comments", async (c) => {
 		);
 		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
 
-		const body = (await c.req
-			.json()
-			.catch(() => null)) as CreateCommentRequest | null;
-		if (!body || typeof body.text !== "string" || !body.text.trim()) {
-			return c.json({ success: false, error: "text is required" }, 400);
-		}
-		if (
-			body.mentions !== undefined &&
-			(!Array.isArray(body.mentions) ||
-				body.mentions.some((mention) => typeof mention !== "string"))
-		) {
-			return c.json({ success: false, error: "mentions must be an array of strings" }, 400);
-		}
+		const decoded = await decodeJsonBody(c.req.raw, CreateCommentRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
 		const mentions = [...new Set(body.mentions ?? [])].filter(
 			(mention) => mention !== session.user.id,
 		);
-		if (mentions.length > 20) {
-			return c.json({ success: false, error: "a comment can mention at most 20 teammates" }, 400);
-		}
+
 		if (mentions.length > 0) {
 			const members = await db
 				.select({ userId: workspaceMembers.userId })
@@ -457,10 +454,10 @@ app.post("/api/conversations/:id/read", async (c) => {
 		);
 		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
 
-		const body = (await c.req.json().catch(() => null)) as MarkReadRequest | null;
-		if (!body || !Number.isInteger(body.lastReadSeq) || body.lastReadSeq < 0) {
-			return c.json({ success: false, error: "invalid lastReadSeq" }, 400);
-		}
+		const decoded = await decodeJsonBody(c.req.raw, MarkReadRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
 
 		await drizzle(c.env.DB)
 			.insert(conversationReads)
@@ -517,16 +514,16 @@ app.patch("/api/conversations/:id", async (c) => {
 			return c.json({ success: false, error: "not found" }, 404);
 		}
 
-		const body = (await c.req
-			.json()
-			.catch(() => null)) as ConversationUpdateRequest | null;
-		if (!body) return c.json({ success: false, error: "invalid body" }, 400);
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			ConversationUpdateRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
 
 		const patch: Record<string, unknown> = {};
 		if (body.status !== undefined) {
-			if (body.status !== "open" && body.status !== "archived") {
-				return c.json({ success: false, error: "invalid status" }, 400);
-			}
 			patch.status = body.status;
 		}
 		if (body.assigneeId !== undefined) {
@@ -744,11 +741,14 @@ app.patch("/api/inboxes/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = await defaultWorkspaceId(c.env);
+		const decoded = await decodeJsonBody(c.req.raw, InboxUpdateRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const inbox = await updateInbox(
 			c.env,
 			workspaceId,
 			c.req.param("id"),
-			await c.req.json(),
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ inbox });
@@ -775,12 +775,14 @@ app.post("/api/inboxes/:id/channels", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = await defaultWorkspaceId(c.env);
-		const body = (await c.req.json()) as InboxChannelRequest;
+		const decoded = await decodeJsonBody(c.req.raw, InboxChannelRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		await linkChannelToInbox(
 			c.env,
 			workspaceId,
 			c.req.param("id"),
-			body,
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ success: true });
@@ -815,10 +817,11 @@ app.post("/api/inboxes/:id/members", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = await defaultWorkspaceId(c.env);
-		const body = (await c.req.json().catch(() => null)) as {
-			userId?: string;
-		} | null;
-		if (body?.userId) {
+		const decoded = await decodeJsonBody(c.req.raw, InboxMemberRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
+		if (body.userId) {
 			await addInboxMember(
 				c.env,
 				workspaceId,
@@ -840,10 +843,11 @@ app.delete("/api/inboxes/:id/members", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = await defaultWorkspaceId(c.env);
-		const body = (await c.req.json().catch(() => null)) as {
-			userId?: string;
-		} | null;
-		if (body?.userId) {
+		const decoded = await decodeJsonBody(c.req.raw, InboxMemberRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
+		if (body.userId) {
 			await removeInboxMember(
 				c.env,
 				workspaceId,
@@ -936,11 +940,14 @@ app.patch("/api/workspaces/:workspaceId/inboxes/:inboxId", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
+		const decoded = await decodeJsonBody(c.req.raw, InboxUpdateRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const inbox = await updateInbox(
 			c.env,
 			c.req.param("workspaceId"),
 			c.req.param("inboxId"),
-			await c.req.json(),
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ inbox });
@@ -974,12 +981,14 @@ app.post(
 		const session = await getSession(c);
 		if (!session) return unauthorized(c);
 		try {
-			const body = (await c.req.json()) as InboxChannelRequest;
+			const decoded = await decodeJsonBody(c.req.raw, InboxChannelRequestSchema);
+			if (!decoded.ok)
+				return c.json({ success: false, error: decoded.error }, 400);
 			await linkChannelToInbox(
 				c.env,
 				c.req.param("workspaceId"),
 				c.req.param("inboxId"),
-				body,
+				decoded.value,
 				session.user.id,
 			);
 			return c.json({ success: true });
@@ -1018,15 +1027,14 @@ app.post(
 		const session = await getSession(c);
 		if (!session) return unauthorized(c);
 		try {
-			const body = (await c.req.json()) as SetDefaultInboxRequest;
-			if (!body || typeof body.inboxId !== "string") {
-				return c.json({ success: false, error: "inboxId is required" }, 400);
-			}
+			const decoded = await decodeJsonBody(c.req.raw, SetDefaultInboxRequestSchema);
+			if (!decoded.ok)
+				return c.json({ success: false, error: decoded.error }, 400);
 			await setDefaultInbox(
 				c.env,
 				c.req.param("workspaceId"),
 				c.req.param("channelId"),
-				body.inboxId,
+				decoded.value.inboxId,
 				session.user.id,
 			);
 			return c.json({ success: true });
@@ -1041,11 +1049,13 @@ app.patch("/api/workspaces/:workspaceId/inboxes/reorder", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const body = (await c.req.json()) as InboxReorderRequest;
+		const decoded = await decodeJsonBody(c.req.raw, InboxReorderRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		await reorderInboxes(
 			c.env,
 			c.req.param("workspaceId"),
-			body.inboxIds,
+			[...decoded.value.inboxIds],
 			session.user.id,
 		);
 		return c.json({ success: true });
@@ -1059,12 +1069,17 @@ app.patch("/api/workspaces/:workspaceId/sidebar-preferences", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const body = (await c.req.json()) as SidebarPreferencesUpdate;
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			SidebarPreferencesUpdateSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const preferences = await updateSidebarPreferences(
 			c.env,
 			c.req.param("workspaceId"),
 			session.user.id,
-			body,
+			decoded.value as SidebarPreferencesUpdate,
 		);
 		return c.json({ preferences });
 	} catch (err) {
@@ -1094,12 +1109,17 @@ app.post("/api/workspaces/:workspaceId/views", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const body = (await c.req.json()) as SavedFilterCreateRequest;
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			SavedFilterCreateRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const view = await createSavedFilter(
 			c.env,
 			c.req.param("workspaceId"),
 			session.user.id,
-			body,
+			decoded.value as SavedFilterCreateRequest,
 		);
 		return c.json({ view }, 201);
 	} catch (err) {
@@ -1150,10 +1170,13 @@ app.post("/api/tags", async (c) => {
 			drizzle(c.env.DB),
 			session.user.id,
 		);
+		const decoded = await decodeJsonBody(c.req.raw, TagCreateRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const tag = await createTag(
 			c.env,
 			workspaceId,
-			await c.req.json(),
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ tag }, 201);
@@ -1170,11 +1193,14 @@ app.patch("/api/tags/:id", async (c) => {
 			drizzle(c.env.DB),
 			session.user.id,
 		);
+		const decoded = await decodeJsonBody(c.req.raw, TagUpdateRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const tag = await updateTag(
 			c.env,
 			workspaceId,
 			c.req.param("id"),
-			await c.req.json(),
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ tag });
@@ -1218,12 +1244,10 @@ app.post("/api/conversations/:id/tags", async (c) => {
 		);
 		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
 
-		const body = (await c.req
-			.json()
-			.catch(() => null)) as ConversationTagRequest | null;
-		if (!body || typeof body.tagId !== "string" || !body.tagId) {
-			return c.json({ success: false, error: "tagId is required" }, 400);
-		}
+		const decoded = await decodeJsonBody(c.req.raw, ConversationTagRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
 		const tag = await drizzle(c.env.DB)
 			.select({
 				id: tags.id,
@@ -1347,10 +1371,18 @@ app.post("/api/rules", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = await defaultWorkspaceId(c.env);
+		const decoded = await decodeJsonBody(c.req.raw, RuleWriteRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = {
+			...decoded.value,
+			conditions: decoded.value.conditions.map((condition) => ({ ...condition })),
+			actions: decoded.value.actions.map((action) => ({ ...action })),
+		};
 		const rule = await createRule(
 			c.env,
 			workspaceId,
-			await c.req.json(),
+			body,
 			session.user.id,
 		);
 		return c.json({ rule }, 201);
@@ -1364,11 +1396,19 @@ app.patch("/api/rules/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = await defaultWorkspaceId(c.env);
+		const decoded = await decodeJsonBody(c.req.raw, RuleWriteRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = {
+			...decoded.value,
+			conditions: decoded.value.conditions.map((condition) => ({ ...condition })),
+			actions: decoded.value.actions.map((action) => ({ ...action })),
+		};
 		const rule = await updateRule(
 			c.env,
 			workspaceId,
 			c.req.param("id"),
-			await c.req.json(),
+			body,
 			session.user.id,
 		);
 		return c.json({ rule });
@@ -1417,10 +1457,13 @@ app.post("/api/canned-replies", async (c) => {
 			drizzle(c.env.DB),
 			session.user.id,
 		);
+		const decoded = await decodeJsonBody(c.req.raw, CannedReplyWriteRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const reply = await createCannedReply(
 			c.env,
 			workspaceId,
-			await c.req.json(),
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ cannedReply: reply }, 201);
@@ -1437,11 +1480,14 @@ app.patch("/api/canned-replies/:id", async (c) => {
 			drizzle(c.env.DB),
 			session.user.id,
 		);
+		const decoded = await decodeJsonBody(c.req.raw, CannedReplyWriteRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const reply = await updateCannedReply(
 			c.env,
 			workspaceId,
 			c.req.param("id"),
-			await c.req.json(),
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ cannedReply: reply });
@@ -1493,14 +1539,16 @@ app.post("/webhooks/messenger", async (c) => {
 		return c.text("invalid signature", 403);
 	}
 
-	let body: unknown;
+	let raw: unknown;
 	try {
-		body = JSON.parse(rawBody);
+		raw = JSON.parse(rawBody);
 	} catch {
 		return c.text("invalid json", 400);
 	}
+	const decoded = Schema.decodeUnknownEither(MessengerWebhookEnvelopeSchema)(raw);
+	if (Either.isLeft(decoded)) return c.text("invalid json", 400);
 
-	const inbound = normalizeFacebookWebhook(body);
+	const inbound = normalizeFacebookWebhook(decoded.right);
 	for (const message of inbound) {
 		await routeInbound(c.env, message);
 	}

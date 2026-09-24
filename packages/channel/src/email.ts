@@ -1,4 +1,8 @@
-import { emailConversationId } from "@msgflow/contracts";
+import { Either, Schema } from "effect";
+import {
+	emailConversationId,
+	ParsedEmailSchema,
+} from "@msgflow/contracts";
 import type { Attachment } from "@msgflow/contracts";
 import type { ChannelAdapter, NormalizedInbound, OutboundContext, OutboundMessage, ProviderSendResult } from "./types";
 
@@ -60,7 +64,10 @@ export async function buildEmailRaw(input: {
 export const emailAdapter: ChannelAdapter = {
 	channel: "email",
 	normalizeInbound(raw: unknown): NormalizedInbound[] {
-		const result = normalizeEmailMessage(raw as ParsedEmail); return result ? [result] : [];
+		const decoded = Schema.decodeUnknownEither(ParsedEmailSchema)(raw);
+		if (Either.isLeft(decoded)) return [];
+		const result = normalizeEmailMessage(decoded.right as ParsedEmail);
+		return result ? [result] : [];
 	},
 	async sendOutbound(ctx: OutboundContext, message: OutboundMessage): Promise<ProviderSendResult> {
 		if (!ctx.emailSender || !ctx.from || !ctx.threadKey) return { ok: false, providerMessageId: null, error: "missing email send context" };
