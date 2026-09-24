@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type {
 	SavedFilterCreateRequest,
@@ -77,6 +77,13 @@ export async function getSidebar(
 	if (!ws) throw new ManageError("workspace not found", 404);
 
 	const now = new Date().toISOString();
+	// Future-snoozed open conversations are counted only by the Snoozed virtual
+	// queue. Archived work remains visible in Closed even with a stale snooze.
+	const visibleOutsideSnoozedQueue = or(
+		eq(conversations.status, "archived"),
+		isNull(conversations.snoozedUntil),
+		lte(conversations.snoozedUntil, now),
+	);
 
 	const allInboxes = await db
 		.select()
@@ -161,20 +168,26 @@ export async function getSidebar(
 				and(
 					inArray(conversations.inboxId, [...countInboxIds]),
 					eq(conversations.status, "open"),
+					visibleOutsideSnoozedQueue,
 				),
 			)
 			.groupBy(conversations.inboxId)
 			.all(),
-		countWhere(db, [inArray(conversations.inboxId, [...countInboxIds])]),
+		countWhere(db, [
+			inArray(conversations.inboxId, [...countInboxIds]),
+			visibleOutsideSnoozedQueue,
+		]),
 		countWhere(db, [
 			inArray(conversations.inboxId, [...countInboxIds]),
 			eq(conversations.status, "open"),
 			eq(conversations.assigneeId, userId),
+			visibleOutsideSnoozedQueue,
 		]),
 		countWhere(db, [
 			inArray(conversations.inboxId, [...visibleInboxIds]),
 			eq(conversations.status, "open"),
 			isNull(conversations.assigneeId),
+			visibleOutsideSnoozedQueue,
 		]),
 		countWhere(db, [
 			inArray(conversations.inboxId, [...countInboxIds]),
@@ -199,6 +212,7 @@ export async function getSidebar(
 				and(
 					inArray(conversations.inboxId, [...countInboxIds]),
 					eq(conversations.status, "open"),
+					visibleOutsideSnoozedQueue,
 				),
 			)
 			.groupBy(conversationTags.tagId)

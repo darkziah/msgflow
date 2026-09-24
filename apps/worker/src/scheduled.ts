@@ -1,60 +1,49 @@
-import { eq, lte } from "drizzle-orm";
+import { and, eq, lte } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { SCHEDULED_MAX_ATTEMPTS, scheduledMessages } from "@msgflow/db";
 import type { Env } from "./env";
 import { sendOutbound } from "./outbound";
+import { reviveDueSnoozes } from "./snooze";
+import { claimScheduledMessage } from "./scheduled-claim";
 
-/**
- * Send-later cron (per ADR 0013): one Cloudflare Cron Trigger (every minute)
- * selects due scheduled_messages rows and reuses the live send path. Success
- * deletes the row; transient failures bump `attempts` and retry next tick;
- * SCHEDULED_MAX_ATTEMPTS failures drop the row with an error log so a
- * permanently failing send (e.g. revoked Page token) stops retrying.
- *
- * The message id equals the row id, so a retry after a crash mid-send is
- * deduplicated by the DO instead of double-sending to the provider.
- */
+export { reviveDueSnoozes } from "./snooze";
+export { claimScheduledMessage, SCHEDULED_CLAIM_LEASE_MS } from "./scheduled-claim";
+
+/** Send-later cron with compare-and-set claims before every provider dispatch. */
 export async function handleScheduled(env: Env): Promise<void> {
-	const db = drizzle(env.DB);
 	const now = new Date().toISOString();
+	await reviveDueSnoozes(env, now);
+	await deliverScheduledMessages(env, now);
+}
 
-	const due = await db
-		.select()
-		.from(scheduledMessages)
-		.where(lte(scheduledMessages.sendAt, now))
-		.all();
-
+export async function deliverScheduledMessages(env: Env, now: string): Promise<void> {
+	const db = drizzle(env.DB);
+	const due = await db.select().from(scheduledMessages).where(lte(scheduledMessages.sendAt, now)).all();
 	for (const row of due) {
+		const claimToken = crypto.randomUUID();
+		if (!(await claimScheduledMessage(env, row.id, now, claimToken))) continue;
+
 		const result = await sendOutbound(env, {
 			conversationId: row.conversationId,
 			text: row.text,
+			attachments: JSON.parse(row.attachmentsJson),
 			senderId: row.createdBy ?? "system",
 			clientMessageId: row.id,
-		});
+		}, { allowQueued: true, retryDefinitiveFailure: true });
 
-		if (result.ok) {
-			await db
-				.delete(scheduledMessages)
-				.where(eq(scheduledMessages.id, row.id))
-				.run();
+		if (result.ok || !result.retryable) {
+			// Success, a provider/DO uncertainty, or an already-fenced intent must
+			// leave the cron queue. The durable intent remains for reconciliation.
+			await db.delete(scheduledMessages).where(and(eq(scheduledMessages.id, row.id), eq(scheduledMessages.claimToken, claimToken))).run();
 			continue;
 		}
 
 		const attempts = row.attempts + 1;
 		if (attempts >= SCHEDULED_MAX_ATTEMPTS) {
-			console.error(
-				`scheduled message ${row.id} dropped after ${attempts} attempts: ${result.error}`,
-			);
-			await db
-				.delete(scheduledMessages)
-				.where(eq(scheduledMessages.id, row.id))
-				.run();
+			console.error(`scheduled message ${row.id} stopped after ${attempts} definitive failures: ${result.error}`);
+			await db.delete(scheduledMessages).where(and(eq(scheduledMessages.id, row.id), eq(scheduledMessages.claimToken, claimToken))).run();
 		} else {
-			await db
-				.update(scheduledMessages)
-				.set({ attempts })
-				.where(eq(scheduledMessages.id, row.id))
-				.run();
+			await db.update(scheduledMessages).set({ attempts, claimToken: null, claimedAt: null }).where(and(eq(scheduledMessages.id, row.id), eq(scheduledMessages.claimToken, claimToken))).run();
 		}
 	}
 }

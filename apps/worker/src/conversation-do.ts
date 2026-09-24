@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { conversations, messagesSummary } from "@msgflow/db";
 import type {
+	Activity,
 	Comment,
 	ConversationEvent,
 	Message,
@@ -15,8 +16,8 @@ interface WebSocketAttachment {
 }
 
 /**
- * One ConversationDO per conversation. Owns the live Message/Comment timeline
- * (authoritative), holds connected agent WebSockets (Hibernation API), and
+ * One ConversationDO per conversation. Owns the live Message/Comment/Activity
+ * timeline (authoritative), holds connected agent WebSockets (Hibernation API), and
  * fans out events in real time. D1 is only a synced summary — this DO never
  * stores conversation metadata.
  */
@@ -36,6 +37,7 @@ export class ConversationDO extends DurableObject<Env> {
         sender_id TEXT NOT NULL,
         text TEXT NOT NULL,
         payload TEXT,
+        attachments TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider_message_id);
@@ -47,12 +49,27 @@ export class ConversationDO extends DurableObject<Env> {
         mentions TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS activities (
+        id TEXT PRIMARY KEY,
+        action TEXT NOT NULL,
+        actor_id TEXT,
+        details TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_activities_created_at ON activities(created_at, id);
       CREATE TABLE IF NOT EXISTS presence (
         agent_id TEXT PRIMARY KEY,
         status TEXT NOT NULL,
         connected_at TEXT NOT NULL
       );
     `);
+		// Existing DO SQLite databases predate image attachments. The add is
+		// intentionally idempotent across constructor restarts.
+		try {
+			this.sql.exec("ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'");
+		} catch {
+			// Column already exists.
+		}
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -78,8 +95,21 @@ export class ConversationDO extends DurableObject<Env> {
 		if (request.method === "POST" && url.pathname === "/append-comment") {
 			return this.appendComment(request);
 		}
+		if (request.method === "POST" && url.pathname === "/append-activity") {
+			return this.appendActivity(request);
+		}
 		if (request.method === "GET" && url.pathname === "/messages") {
 			return this.listMessages();
+		}
+		if (request.method === "GET" && url.pathname === "/comments") {
+			return this.listComments();
+		}
+		if (request.method === "GET" && url.pathname === "/activities") {
+			const requestedLimit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
+			const limit = Number.isFinite(requestedLimit)
+				? Math.min(Math.max(requestedLimit, 1), 100)
+				: 50;
+			return this.listActivities(limit);
 		}
 		if (request.method === "POST" && url.pathname === "/broadcast") {
 			return this.broadcastEvent(request);
@@ -125,8 +155,8 @@ export class ConversationDO extends DurableObject<Env> {
 		// client uses it to advance the read cursor (ADR 0015).
 		message.seq = seq;
 		this.sql.exec(
-			`INSERT INTO messages (id, seq, provider_message_id, kind, channel, sender_id, text, payload, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO messages (id, seq, provider_message_id, kind, channel, sender_id, text, payload, attachments, created_at)
+	       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			message.id,
 			seq,
 			message.providerMessageId,
@@ -135,6 +165,7 @@ export class ConversationDO extends DurableObject<Env> {
 			message.senderId,
 			message.text,
 			JSON.stringify(message.payload),
+			JSON.stringify(message.attachments),
 			message.createdAt,
 		);
 
@@ -187,6 +218,20 @@ export class ConversationDO extends DurableObject<Env> {
 		return new Response("ok", { status: 200 });
 	}
 
+	private async appendActivity(request: Request): Promise<Response> {
+		const activity = (await request.json()) as Activity;
+		this.sql.exec(
+			"INSERT INTO activities (id, action, actor_id, details, created_at) VALUES (?, ?, ?, ?, ?)",
+			activity.id,
+			activity.action,
+			activity.actorId,
+			JSON.stringify(activity.details),
+			activity.createdAt,
+		);
+		void this.broadcast({ type: "activity:new", activity });
+		return new Response("ok", { status: 200 });
+	}
+
 	private nextSeq(): number {
 		const row = this.sql
 			.exec("SELECT COALESCE(MAX(seq), 0) AS s FROM messages")
@@ -200,6 +245,29 @@ export class ConversationDO extends DurableObject<Env> {
 			.toArray();
 		return new Response(
 			JSON.stringify({ messages: rows.map((r) => this.rowToMessage(r)) }),
+			{ headers: { "content-type": "application/json" } },
+		);
+	}
+
+	private listComments(): Response {
+		const rows = this.sql
+			.exec("SELECT * FROM comments ORDER BY created_at ASC, id ASC")
+			.toArray();
+		return new Response(
+			JSON.stringify({ comments: rows.map((r) => this.rowToComment(r)) }),
+			{ headers: { "content-type": "application/json" } },
+		);
+	}
+
+	private listActivities(limit: number): Response {
+		const rows = this.sql
+			.exec(
+				"SELECT * FROM (SELECT * FROM activities ORDER BY created_at DESC, id DESC LIMIT ?) ORDER BY created_at ASC, id ASC",
+				limit,
+			)
+			.toArray();
+		return new Response(
+			JSON.stringify({ activities: rows.map((r) => this.rowToActivity(r)) }),
 			{ headers: { "content-type": "application/json" } },
 		);
 	}
@@ -219,7 +287,7 @@ export class ConversationDO extends DurableObject<Env> {
 		return new Response("ok", { status: 200 });
 	}
 
-	/** Reconstruct a canonical Message from a stored row (attachments not stored yet). */
+	/** Reconstruct a canonical Message from a stored row. */
 	private rowToMessage(row: Record<string, unknown>): Message {
 		return {
 			id: row.id as string,
@@ -230,9 +298,33 @@ export class ConversationDO extends DurableObject<Env> {
 			senderId: row.sender_id as string,
 			text: row.text as string,
 			payload: row.payload ? JSON.parse(row.payload as string) : null,
-			attachments: [],
+			attachments: row.attachments
+				? JSON.parse(row.attachments as string)
+				: [],
 			createdAt: row.created_at as string,
 			seq: row.seq as number,
+		};
+	}
+
+	private rowToComment(row: Record<string, unknown>): Comment {
+		return {
+			id: row.id as string,
+			conversationId: this.ctx.id.name ?? "",
+			authorId: row.author_id as string,
+			text: row.text as string,
+			mentions: JSON.parse(row.mentions as string) as string[],
+			createdAt: row.created_at as string,
+		};
+	}
+
+	private rowToActivity(row: Record<string, unknown>): Activity {
+		return {
+			id: row.id as string,
+			conversationId: this.ctx.id.name ?? "",
+			action: row.action as Activity["action"],
+			actorId: (row.actor_id as string | null) ?? null,
+			details: JSON.parse(row.details as string) as Record<string, unknown>,
+			createdAt: row.created_at as string,
 		};
 	}
 

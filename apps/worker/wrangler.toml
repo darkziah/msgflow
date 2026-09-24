@@ -1,15 +1,31 @@
 name = "msgflow-worker"
+account_id = "2b264b86e8b917f95fc97400900af720"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# The production Worker serves the Vite build at its custom domain. Keep the
+# public app generic: the hostname is attached at deploy time, not committed.
+[assets]
+directory = "../web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/health", "/webhooks/*", "/ws"]
+
 [observability]
 enabled = true
+
+# Non-secret production runtime configuration. Secrets are uploaded separately
+# with `wrangler secret put` and never belong in this file.
+[vars]
+ATTACHMENT_PUBLIC_BASE_URL = "https://attachments.msgflow.yeheyremit.jp"
+BETTER_AUTH_URL = "https://msgflow.yeheyremit.jp"
+BETTER_AUTH_TRUSTED_ORIGINS = "https://msgflow.yeheyremit.jp"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "msgflow"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+# Production D1 database, created in the Yehey Japan Cloudflare account (APAC).
+database_id = "867d5b8c-d960-4782-98d5-be9a85d10edc"
 
 [[durable_objects.bindings]]
 name = "CONVERSATION_DO"
@@ -22,6 +38,12 @@ new_sqlite_classes = ["ConversationDO"]
 [[send_email]]
 name = "EMAIL"
 
+# Production R2 image bucket. Its public custom domain is a non-secret Worker
+# runtime variable, not a hard-coded application setting.
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "msgflow-attachments"
+
 # Send-later: every minute, delivers due scheduled_messages rows (ADR 0013).
 [triggers]
 crons = ["* * * * *"]
@@ -31,3 +53,6 @@ crons = ["* * * * *"]
 
 # Auth: BETTER_AUTH_SECRET is set via `wrangler secret put` (or .dev.vars locally);
 # BETTER_AUTH_URL is the Worker's public base URL. See apps/worker/.dev.vars.example.
+# Set ATTACHMENT_PUBLIC_BASE_URL as a non-secret Worker runtime variable at
+# deploy time. It must be the public custom domain serving ATTACHMENTS and must
+# not end with '/'.

@@ -6,9 +6,13 @@ export type MessageKind = "inbound" | "outbound";
 
 export interface Attachment {
 	id: string;
-	type: string;
+	/** Immutable R2 object key. */
+	key: string;
+	/** MIME type; attachments are currently image-only. */
+	type: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 	url: string;
-	name?: string;
+	name: string;
+	size: number;
 }
 
 export interface Message {
@@ -39,6 +43,49 @@ export interface Comment {
 	createdAt: string;
 }
 
+/** A system-generated audit record for a Conversation metadata change. */
+export interface Activity {
+	id: string;
+	conversationId: string;
+	action:
+		| "conversation.updated"
+		| "tag.added"
+		| "tag.removed"
+		| "snooze.expired";
+	/** Authenticated agent responsible for the change; null for system work. */
+	actorId: string | null;
+	/** Immutable action-specific data (for example changed values or a tag id). */
+	details: Record<string, unknown>;
+	createdAt: string;
+}
+
+// POST /api/conversations/:id/comments — author and timestamp are assigned
+// from the authenticated Worker session, never accepted from the client.
+export interface CreateCommentRequest {
+	text: string;
+	mentions?: string[];
+}
+
+export interface CreateCommentResponse {
+	comment: Comment;
+}
+
+/** A personal D1 projection created when another agent mentions the recipient. */
+export interface CommentNotification {
+	id: string;
+	conversationId: string;
+	commentId: string;
+	authorId: string;
+	commentText: string;
+	createdAt: string;
+	readAt: string | null;
+}
+
+export interface CommentNotificationsResponse {
+	notifications: CommentNotification[];
+	unreadCount: number;
+}
+
 export interface PresenceEntry {
 	agentId: string;
 	status: "viewing" | "drafting";
@@ -48,6 +95,7 @@ export interface PresenceEntry {
 export type ConversationEvent =
 	| { type: "message:new"; message: Message }
 	| { type: "comment:new"; comment: Comment }
+	| { type: "activity:new"; activity: Activity }
 	| { type: "conversation-updated"; patch: Record<string, unknown> }
 	| { type: "presence"; agents: PresenceEntry[] }
 	| { type: "typing"; agentId: string; isTyping: boolean };
@@ -60,6 +108,8 @@ export interface ApiResponse {
 // POST /api/conversations/:id/messages
 export interface SendMessageRequest {
 	text: string;
+	/** Uploaded image metadata returned by POST /api/attachments. */
+	attachments?: Attachment[];
 	/** Email only: the subject line (Front/Missive composers show it). */
 	subject?: string;
 	/** ISO timestamp; when set in the future the message is scheduled instead of sent. */
@@ -200,10 +250,17 @@ export interface CannedReplyWriteRequest {
 	body: string;
 }
 
-// GET /api/conversations/:id/messages — full timeline from the Conversation DO.
-export interface MessagesResponse {
+// GET /api/conversations/:id/messages — complete internal timeline from the
+// Conversation DO. Each sibling collection preserves its own semantics:
+// customer-facing messages, team-only comments, and system Activities.
+export interface TimelineResponse {
 	messages: Message[];
+	comments: Comment[];
+	activities: Activity[];
 }
+
+/** @deprecated Use TimelineResponse. Kept for callers of the existing endpoint. */
+export type MessagesResponse = TimelineResponse;
 
 // POST /api/conversations/:id/read
 export interface MarkReadRequest {

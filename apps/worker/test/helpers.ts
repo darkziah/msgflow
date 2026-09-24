@@ -9,7 +9,7 @@ import type { Env } from "../src/env";
 
 /**
  * Miniflare-backed D1 test database: fresh instance per call, full migration
- * chain (0000 → 0004) applied, wrapped in the worker Env shape so the real
+ * chain (0000 → 0005) applied, wrapped in the worker Env shape so the real
  * manage/access/rules/workspace-api functions run against actual SQLite.
  *
  * This is how the routing-spec invariants are tested for real: default-inbox
@@ -31,6 +31,7 @@ export interface TestCtx {
 	env: Env;
 	db: ReturnType<typeof drizzle>;
 	mf: Miniflare;
+	activityRequests: unknown[];
 }
 
 export async function createTestDb(): Promise<TestCtx> {
@@ -43,14 +44,38 @@ export async function createTestDb(): Promise<TestCtx> {
 			d1Databases: {
 				DB: `msgflow-test-${Date.now()}-${Math.random()}`,
 			},
+			r2Buckets: ["ATTACHMENTS"],
 			compatibilityDate: "2025-01-01",
 		}),
 	);
 	await mf.ready;
 	const d1 = await mf.getD1Database("DB");
+	const attachments = await mf.getR2Bucket("ATTACHMENTS");
 	await applyMigrations(d1);
 	const db = drizzle(d1 as unknown as D1Database);
-	return { env: { DB: d1 as unknown as Env["DB"] } as Env, db, mf };
+	const activityRequests: unknown[] = [];
+	const conversationDo = {
+		idFromName: (name: string) => name,
+		get: () => ({
+			fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+				const request =
+					input instanceof Request ? input : new Request(input, init);
+				activityRequests.push(await request.json());
+				return new Response("ok");
+			},
+		}),
+	} as unknown as Env["CONVERSATION_DO"];
+	return {
+		env: {
+			DB: d1 as unknown as Env["DB"],
+			CONVERSATION_DO: conversationDo,
+			ATTACHMENTS: attachments as unknown as Env["ATTACHMENTS"],
+			ATTACHMENT_PUBLIC_BASE_URL: "https://attachments.test",
+		} as Env,
+		db,
+		mf,
+		activityRequests,
+	};
 }
 
 async function applyMigrations(d1: D1Database): Promise<void> {

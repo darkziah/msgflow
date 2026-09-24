@@ -127,10 +127,21 @@ export async function listConversations(
 	env: Env,
 	agentId: string,
 	opts: ConversationListOptions = {},
+	workspaceId?: string,
 ): Promise<ConversationSummary[]> {
 	const db = drizzle(env.DB);
 	const q = opts.q?.trim();
+	const now = new Date().toISOString();
+	// Future-snoozed open conversations belong exclusively to the Snoozed
+	// virtual queue. Archived conversations remain discoverable even if they
+	// retain a stale snooze timestamp.
+	const visibleOutsideSnoozedQueue = or(
+		eq(conversations.status, "archived"),
+		isNull(conversations.snoozedUntil),
+		lte(conversations.snoozedUntil, now),
+	);
 	const conditions = [
+		workspaceId ? eq(conversations.workspaceId, workspaceId) : undefined,
 		opts.status && opts.status !== "all"
 			? eq(conversations.status, opts.status)
 			: undefined,
@@ -140,9 +151,9 @@ export async function listConversations(
 		opts.snoozed
 			? and(
 					eq(conversations.status, "open"),
-					gt(conversations.snoozedUntil, new Date().toISOString()),
+					gt(conversations.snoozedUntil, now),
 				)
-			: undefined,
+			: visibleOutsideSnoozedQueue,
 		opts.channel
 			? eq(
 					channels.type,
@@ -206,6 +217,7 @@ export async function getConversation(
 	env: Env,
 	agentId: string,
 	id: string,
+	workspaceId?: string,
 ): Promise<ConversationSummary | null> {
 	const db = drizzle(env.DB);
 	const row = await db
@@ -220,7 +232,11 @@ export async function getConversation(
 				eq(conversationReads.agentId, agentId),
 			),
 		)
-		.where(eq(conversations.id, id))
+		.where(
+			workspaceId
+				? and(eq(conversations.id, id), eq(conversations.workspaceId, workspaceId))
+				: eq(conversations.id, id),
+		)
 		.get();
 
 	if (!row) return null;

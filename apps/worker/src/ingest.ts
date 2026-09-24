@@ -16,6 +16,8 @@ import { drizzle } from "drizzle-orm/d1";
 import type { Env } from "./env";
 import { evaluateRules } from "./rules";
 import { getOrCreateWorkspace } from "./workspace";
+import { decryptChannelToken } from "./channel-token-crypto";
+import { copyProviderImages } from "./attachments";
 
 const DEFAULT_INBOX_NAMES: Record<string, string> = {
 	facebook_page: "Facebook Support",
@@ -72,6 +74,14 @@ export async function routeInbound(
 	env: Env,
 	inbound: NormalizedInbound,
 ): Promise<void> {
+	// Provider-hosted Messenger media is copied before the canonical message is
+	// created. Broken/unsupported provider URLs are ignored by the copier, while
+	// a text-less image remains valid when at least one copy succeeds.
+	const attachments = [
+		...inbound.attachments,
+		...(await copyProviderImages(env, inbound.providerAttachments)),
+	];
+	if (!inbound.text && attachments.length === 0) return;
 	const db = drizzle(env.DB);
 	const now = new Date().toISOString();
 
@@ -95,10 +105,21 @@ export async function routeInbound(
 	// 3. Contact via its channel identity (PSIDs are Page-scoped → keyed by channel).
 	//    Meta webhooks carry only the PSID — resolve the display name/avatar via
 	//    the Graph API when the channel has a token (best-effort, never fatal).
-	const profile =
-		channelType === "facebook_page" && channel.accessToken
-			? await fetchFacebookProfile(inbound.senderId, channel.accessToken)
-			: null;
+	let profile: FacebookProfile | null = null;
+	if (channelType === "facebook_page" && channel.accessToken) {
+		try {
+			profile = await fetchFacebookProfile(
+				inbound.senderId,
+				await decryptChannelToken(
+					channel.accessToken,
+					env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+				),
+			);
+		} catch {
+			// Profile resolution is best-effort. Ingest remains available while a
+			// credential is missing, legacy plaintext, or cannot be decrypted.
+		}
+	}
 	const contact = await getOrCreateContact(
 		db,
 		workspace.id,
@@ -215,7 +236,7 @@ export async function routeInbound(
 		senderId: contact.id,
 		text: inbound.text,
 		payload: inbound.payload,
-		attachments: [],
+		attachments,
 		createdAt: inbound.createdAt,
 	};
 

@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import {
 	BadgeDollarSign,
+	Bell,
 	Briefcase,
 	CheckCircle2,
 	ChevronDown,
@@ -89,6 +90,13 @@ export function Sidebar({
 		{ mode: "create" } | { mode: "edit"; inboxId: string } | null
 	>(null);
 	const [dragId, setDragId] = useState<string | null>(null);
+	const [notificationsOpen, setNotificationsOpen] = useState(false);
+	const { data: notifications } = useQuery({ queryKey: ["comment-notifications"], queryFn: () => api.listCommentNotifications(), refetchInterval: 15000 });
+	const openNotification = (notification: NonNullable<typeof notifications>["notifications"][number]) => {
+		api.markCommentNotificationRead(notification.id).finally(() => queryClient.invalidateQueries({ queryKey: ["comment-notifications"] }));
+		setNotificationsOpen(false);
+		navigate({ to: "/", search: { c: notification.conversationId } });
+	};
 
 	const { data: sidebar } = useQuery({
 		queryKey: ["sidebar", workspaceId],
@@ -222,6 +230,7 @@ export function Sidebar({
 								</option>
 							))}
 						</select>
+						<div className="relative"><button type="button" className="relative rounded p-1 hover:bg-accent" onClick={() => setNotificationsOpen((open) => !open)} aria-label="Comment mentions"><Bell size={16} />{notifications?.unreadCount ? <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-red-600 px-1 text-center text-[10px] text-white">{notifications.unreadCount}</span> : null}</button>{notificationsOpen ? <div className="absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-md border bg-background shadow-lg"><p className="border-b px-3 py-2 text-xs font-semibold">Mentions</p>{notifications?.notifications.length ? notifications.notifications.map((notification) => <button key={notification.id} type="button" onClick={() => openNotification(notification)} className="block w-full border-b px-3 py-2 text-left text-sm hover:bg-muted"><span className={notification.readAt ? "text-muted-foreground" : "font-semibold"}>{notification.commentText}</span></button>) : <p className="px-3 py-4 text-sm text-muted-foreground">No mentions yet.</p>}</div> : null}</div>
 					</>
 				) : (
 					<h1 className="mx-auto text-sm font-black" title="MsgFlow">

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { and, eq } from "drizzle-orm";
 import {
+	cannedReplies,
 	channels,
 	contacts,
 	conversations,
@@ -10,19 +11,32 @@ import {
 	ruleConditions,
 	ruleExecutionLog,
 	rules,
+	tags,
 	userSidebarPreferences,
 	workspaceMembers,
+	workspaces,
 } from "@msgflow/db";
 import {
 	archiveInbox,
+	connectChannelToken,
+	createCannedReply,
+	createEmailChannel,
 	createInbox,
 	createRule,
+	createTag,
+	deleteTag,
+	disconnectChannel,
 	linkChannelToInbox,
+	listCannedReplies,
+	listChannels,
 	listInboxes,
+	listTags,
 	reorderInboxes,
 	setDefaultInbox,
 	unlinkChannelFromInbox,
+	updateCannedReply,
 	updateInbox,
+	updateTag,
 } from "../src/manage";
 import {
 	getWorkspaceAccess,
@@ -287,6 +301,183 @@ describe("workspace permission boundaries", () => {
 		await expect(getSidebar(ctx.env, workspaceId, OUTSIDER)).rejects.toThrow(
 			ManageError,
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Email channel onboarding
+// ---------------------------------------------------------------------------
+
+describe("email channel onboarding", () => {
+	test("owner creates a normalized mailbox with an immediate default inbox link", async () => {
+		const { workspaceId } = await setup();
+		const channel = await createEmailChannel(ctx.env, workspaceId, "  Support@Example.COM  ", ADMIN);
+
+		expect(channel.type).toBe("email");
+		expect(channel.externalId).toBe("support@example.com");
+		expect(channel.status).toBe("active");
+		const links = await ctx.db.select().from(inboxChannels)
+			.where(and(eq(inboxChannels.channelId, channel.id), eq(inboxChannels.isDefault, true))).all();
+		expect(links).toHaveLength(1);
+	});
+
+	test("repeat mailbox creation is idempotent", async () => {
+		const { workspaceId } = await setup();
+		const first = await createEmailChannel(ctx.env, workspaceId, "support@example.com", ADMIN);
+		const repeated = await createEmailChannel(ctx.env, workspaceId, "SUPPORT@example.com", ADMIN);
+
+		expect(repeated.id).toBe(first.id);
+		expect((await ctx.db.select().from(channels)
+			.where(and(eq(channels.workspaceId, workspaceId), eq(channels.externalId, "support@example.com"))).all())).toHaveLength(1);
+	});
+
+	test("ordinary members cannot add a mailbox", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await expect(createEmailChannel(ctx.env, workspaceId, "support@example.com", MEMBER))
+			.rejects.toMatchObject({ status: 403 });
+	});
+
+	test("rejects malformed mailbox addresses", async () => {
+		const { workspaceId } = await setup();
+		for (const address of ["", "support", "a@b@c.com", "a @example.com", "@example.com", "support@"]) {
+			await expect(createEmailChannel(ctx.env, workspaceId, address, ADMIN))
+				.rejects.toMatchObject({ status: 400 });
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Legacy management RBAC: tags, canned replies, and channel credentials
+// ---------------------------------------------------------------------------
+
+describe("legacy management workspace RBAC", () => {
+	test("enforces private-tag ownership, admin configuration, and foreign-id 404s", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await addMember(workspaceId, OUTSIDER);
+
+		const privateTag = await createTag(
+			ctx.env,
+			workspaceId,
+			{ name: "Member private", visibility: "private" },
+			MEMBER,
+		);
+		expect(privateTag.ownerUserId).toBe(MEMBER);
+		expect((await listTags(ctx.env, workspaceId, MEMBER)).map((tag) => tag.id)).toContain(
+			privateTag.id,
+		);
+		expect((await listTags(ctx.env, workspaceId, OUTSIDER)).map((tag) => tag.id)).not.toContain(
+			privateTag.id,
+		);
+		expect((await listTags(ctx.env, workspaceId, ADMIN)).map((tag) => tag.id)).toContain(
+			privateTag.id,
+		);
+
+		await updateTag(ctx.env, workspaceId, privateTag.id, { name: "Renamed" }, MEMBER);
+		await updateTag(ctx.env, workspaceId, privateTag.id, { color: "#123456" }, ADMIN);
+		await expect(
+			updateTag(
+				ctx.env,
+				workspaceId,
+				privateTag.id,
+				{ visibility: "shared" },
+				MEMBER,
+			),
+		).rejects.toMatchObject({ status: 403 });
+		await expect(
+			createTag(ctx.env, workspaceId, { name: "Shared", visibility: "shared" }, MEMBER),
+		).rejects.toMatchObject({ status: 403 });
+		await expect(
+			createCannedReply(ctx.env, workspaceId, { name: "No", body: "No" }, MEMBER),
+		).rejects.toMatchObject({ status: 403 });
+
+		const cannedReply = await createCannedReply(
+			ctx.env,
+			workspaceId,
+			{ name: "Approved", body: "Done" },
+			ADMIN,
+		);
+		expect((await listCannedReplies(ctx.env, workspaceId, MEMBER))[0]?.id).toBe(
+			cannedReply.id,
+		);
+
+		const foreignWorkspaceId = crypto.randomUUID();
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(workspaces)
+			.values({
+				id: foreignWorkspaceId,
+				name: "Foreign",
+				slug: "foreign",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await getWorkspaceAccess(ctx.db, foreignWorkspaceId, ADMIN);
+		const foreignTag = await createTag(
+			ctx.env,
+			foreignWorkspaceId,
+			{ name: "Foreign shared", visibility: "shared" },
+			ADMIN,
+		);
+		const foreignReply = await createCannedReply(
+			ctx.env,
+			foreignWorkspaceId,
+			{ name: "Foreign reply", body: "Hidden" },
+			ADMIN,
+		);
+		const foreignChannelId = crypto.randomUUID();
+		await ctx.db
+			.insert(channels)
+			.values({
+				id: foreignChannelId,
+				workspaceId: foreignWorkspaceId,
+				type: "facebook_page",
+				displayName: "Foreign Page",
+				externalId: "foreign-page",
+				accessToken: "enc:v1:credential",
+				status: "active",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+
+		await expect(
+			updateTag(ctx.env, workspaceId, foreignTag.id, { name: "Leaked" }, ADMIN),
+		).rejects.toMatchObject({ status: 404 });
+		await expect(
+			deleteTag(ctx.env, workspaceId, foreignTag.id, ADMIN),
+		).rejects.toMatchObject({ status: 404 });
+		await expect(
+			updateCannedReply(
+				ctx.env,
+				workspaceId,
+				foreignReply.id,
+				{ name: "Leaked", body: "Leaked" },
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 404 });
+		await expect(
+			disconnectChannel(ctx.env, workspaceId, foreignChannelId, ADMIN),
+		).rejects.toMatchObject({ status: 404 });
+
+		const foreignRows = await ctx.db
+			.select({ tagName: tags.name, replyName: cannedReplies.name, token: channels.accessToken })
+			.from(tags)
+			.innerJoin(cannedReplies, eq(cannedReplies.workspaceId, tags.workspaceId))
+			.innerJoin(channels, eq(channels.workspaceId, tags.workspaceId))
+			.where(eq(tags.id, foreignTag.id))
+			.get();
+		expect(foreignRows).toEqual({
+			tagName: "Foreign shared",
+			replyName: "Foreign reply",
+			token: "enc:v1:credential",
+		});
+		expect((await listChannels(ctx.env, workspaceId, ADMIN))[0]).toBeUndefined();
+		await expect(
+			connectChannelToken(ctx.env, workspaceId, foreignChannelId, "token", ADMIN),
+		).rejects.toMatchObject({ status: 404 });
 	});
 });
 

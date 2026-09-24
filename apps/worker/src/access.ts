@@ -3,6 +3,7 @@ import type { drizzle } from "drizzle-orm/d1";
 import { workspaceMembers, workspaces } from "@msgflow/db";
 import type { WorkspaceSummary } from "@msgflow/contracts";
 import { ManageError } from "./errors";
+import { getOrCreateWorkspace } from "./workspace";
 
 /**
  * Workspace access control for the inbox-routing/sidebar surface.
@@ -152,4 +153,13 @@ export async function userBelongsToWorkspace(
 		)
 		.get();
 	return row !== null;
+}
+
+/** Resolve the legacy default workspace and require membership before access. */
+export async function requireDefaultWorkspaceAccess(
+	db: ReturnType<typeof drizzle>,
+	userId: string,
+): Promise<WorkspaceAccess> {
+	const workspace = await getOrCreateWorkspace(db, new Date().toISOString());
+	return requireWorkspaceAccess(db, workspace.id, userId);
 }

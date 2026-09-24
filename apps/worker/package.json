@@ -15,7 +15,7 @@
 	},
 	"scripts": {
 		"build": "tsc",
-		"dev": "wrangler dev",
+		"dev": "wrangler dev --port 8787 --var MESSENGER_APP_SECRET:test-secret --var MESSENGER_VERIFY_TOKEN:test-verify --var BETTER_AUTH_SECRET:msgflow-local-dev-secret-change-me-32 --var BETTER_AUTH_URL:http://localhost:8787 --var BETTER_AUTH_TRUSTED_ORIGINS:http://localhost:5173,http://localhost:5174 --var CHANNEL_TOKEN_ENCRYPTION_KEY:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		"deploy": "wrangler deploy",
 		"type-check": "tsc --noEmit",
 		"test": "bun test",

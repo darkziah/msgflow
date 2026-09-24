@@ -53,12 +53,15 @@ export function ConversationActions({
 		mutationFn: (patch: ConversationUpdateRequest) =>
 			api.updateConversation(conversation.id, patch),
 		onSuccess: (result) => {
-			// Refresh the open thread immediately; the list polls + invalidates.
+			// Conversation metadata drives both the list and sidebar queue/count
+			// queries. Invalidate both immediately rather than waiting for the
+			// sidebar's 15-second polling interval.
 			queryClient.setQueryData(
 				["conversation", conversation.id],
 				result.conversation,
 			);
 			queryClient.invalidateQueries({ queryKey: ["conversations"] });
+			queryClient.invalidateQueries({ queryKey: ["sidebar"] });
 		},
 	});
 

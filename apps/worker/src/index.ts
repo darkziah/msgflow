@@ -1,35 +1,41 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import PostalMime from "postal-mime";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type {
 	ApiResponse,
+	Attachment,
 	ChannelConnectRequest,
-	ChannelSummary,
+	Comment,
+	CommentNotificationsResponse,
 	ConversationEvent,
 	ConversationTagRequest,
 	ConversationUpdateRequest,
 	ConversationUpdateResponse,
+	CreateCommentRequest,
+	CreateCommentResponse,
 	InboxChannelRequest,
 	InboxReorderRequest,
 	MarkReadRequest,
-	MessagesResponse,
 	SavedFilterCreateRequest,
 	SendMessageRequest,
 	SendMessageResult,
 	SetDefaultInboxRequest,
 	SidebarPreferencesUpdate,
+	TimelineResponse,
 	UserSummary,
 } from "@msgflow/contracts";
 import { createAuth } from "@msgflow/auth";
 import { drizzle } from "drizzle-orm/d1";
 import {
-	channels,
 	conversationReads,
+	commentNotifications,
 	conversationTags,
 	conversations,
 	inboxes,
+	tags,
 	user,
+	workspaceMembers,
 } from "@msgflow/db";
 import {
 	normalizeEmailMessage,
@@ -43,10 +49,12 @@ import {
 	ManageError,
 	addInboxMember,
 	archiveInbox,
+	connectChannelToken,
 	createCannedReply,
 	createInbox,
 	createRule,
 	createTag,
+	disconnectChannel,
 	deleteCannedReply,
 	deleteInbox,
 	deleteRule,
@@ -55,6 +63,7 @@ import {
 	leaveInbox,
 	linkChannelToInbox,
 	listCannedReplies,
+	listChannels,
 	listInboxes,
 	listRules,
 	listTags,
@@ -80,6 +89,14 @@ import { scheduleOutbound, sendOutbound } from "./outbound";
 import { getConversation, listConversations } from "./queries";
 import { handleScheduled } from "./scheduled";
 import { verifyFacebookSignature } from "./webhook";
+import { requireDefaultWorkspaceAccess } from "./access";
+import { appendActivity } from "./activity";
+import {
+	AttachmentError,
+	MAX_ATTACHMENTS_PER_MESSAGE,
+	storeImageBlob,
+	validateAttachments,
+} from "./attachments";
 
 export { ConversationDO };
 
@@ -97,6 +114,28 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => {
 });
 
 // Send a reply (or schedule one): authenticated, channel dispatch in outbound.ts.
+app.post("/api/attachments", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		// This is intentionally Worker-mediated: browsers never receive R2 keys.
+		await requireDefaultWorkspaceAccess(drizzle(c.env.DB), session.user.id);
+		const form = await c.req.formData();
+		const files = form.getAll("files");
+		if (files.length === 0 || files.length > MAX_ATTACHMENTS_PER_MESSAGE || files.some((file) => !(file instanceof File))) {
+			return c.json({ success: false, error: `provide 1-${MAX_ATTACHMENTS_PER_MESSAGE} image files` }, 400);
+		}
+		const attachments = await Promise.all(files.map((file) => {
+			if (!(file instanceof File)) throw new AttachmentError("invalid file");
+			return storeImageBlob(c.env, file, file.name);
+		}));
+		return c.json({ attachments }, 201);
+	} catch (err) {
+		if (err instanceof AttachmentError) return c.json({ success: false, error: err.message }, 400);
+		return manageError(c, err);
+	}
+});
+
 app.post("/api/conversations/:id/messages", async (c) => {
 	const session = await createAuth(c.env).api.getSession({
 		headers: c.req.raw.headers,
@@ -108,9 +147,15 @@ app.post("/api/conversations/:id/messages", async (c) => {
 	const body = (await c.req
 		.json()
 		.catch(() => null)) as SendMessageRequest | null;
-	if (!body || typeof body.text !== "string" || !body.text.trim()) {
+	if (!body || typeof body.text !== "string") {
 		return c.json({ success: false, error: "text is required" }, 400);
 	}
+	let attachments: Attachment[];
+	try { attachments = validateAttachments(c.env, body.attachments ?? []); }
+	catch (err) { return c.json({ success: false, error: err instanceof Error ? err.message : "invalid attachments" }, 400); }
+	if (!body.text.trim() && attachments.length === 0) return c.json({ success: false, error: "text or an image is required" }, 400);
+	try { await requireDefaultWorkspaceAccess(drizzle(c.env.DB), session.user.id); }
+	catch (err) { return manageError(c, err); }
 
 	const conversationId = c.req.param("id");
 	const text = body.text.trim();
@@ -126,6 +171,7 @@ app.post("/api/conversations/:id/messages", async (c) => {
 				conversationId,
 				text,
 				subject: body.subject,
+				attachments,
 				senderId: session.user.id,
 				clientMessageId: body.clientMessageId,
 				sendAt: sendAt.toISOString(),
@@ -142,6 +188,7 @@ app.post("/api/conversations/:id/messages", async (c) => {
 		conversationId,
 		text,
 		subject: body.subject,
+		attachments,
 		senderId: session.user.id,
 		clientMessageId: body.clientMessageId,
 	});
@@ -162,28 +209,41 @@ app.get("/api/conversations", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
-	const statusParam = c.req.query("status") ?? "open";
-	const inboxId = c.req.query("inboxId") ?? undefined;
-	const conversations = await listConversations(c.env, session.user.id, {
-		status:
-			statusParam === "archived" || statusParam === "all"
-				? statusParam
-				: "open",
-		inboxId,
-		q: c.req.query("q") ?? undefined,
-		assigneeId: c.req.query("assigneeId") ?? undefined,
-		unassigned: c.req.query("unassigned") === "true" || undefined,
-		snoozed: c.req.query("snoozed") === "true" || undefined,
-		channel:
-			c.req.query("channel") === "facebook" ||
-			c.req.query("channel") === "email"
-				? (c.req.query("channel") as "facebook" | "email")
-				: undefined,
-		tagId: c.req.query("tagId") ?? undefined,
-		dateFrom: c.req.query("dateFrom") ?? undefined,
-		dateTo: c.req.query("dateTo") ?? undefined,
-	});
-	return c.json({ conversations });
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const statusParam = c.req.query("status") ?? "open";
+		const inboxId = c.req.query("inboxId") ?? undefined;
+		const conversations = await listConversations(
+			c.env,
+			session.user.id,
+			{
+				status:
+					statusParam === "archived" || statusParam === "all"
+						? statusParam
+						: "open",
+				inboxId,
+				q: c.req.query("q") ?? undefined,
+				assigneeId: c.req.query("assigneeId") ?? undefined,
+				unassigned: c.req.query("unassigned") === "true" || undefined,
+				snoozed: c.req.query("snoozed") === "true" || undefined,
+				channel:
+					c.req.query("channel") === "facebook" ||
+					c.req.query("channel") === "email"
+						? (c.req.query("channel") as "facebook" | "email")
+						: undefined,
+				tagId: c.req.query("tagId") ?? undefined,
+				dateFrom: c.req.query("dateFrom") ?? undefined,
+				dateTo: c.req.query("dateTo") ?? undefined,
+			},
+			workspaceId,
+		);
+		return c.json({ conversations });
+	} catch (err) {
+		return manageError(c, err);
+	}
 });
 
 // GET /api/conversations/:id — single conversation (metadata + contact).
@@ -191,31 +251,187 @@ app.get("/api/conversations/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
-	const conversation = await getConversation(
-		c.env,
-		session.user.id,
-		c.req.param("id"),
-	);
-	if (!conversation) {
-		return c.json({ success: false, error: "not found" }, 404);
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const conversation = await getConversation(
+			c.env,
+			session.user.id,
+			c.req.param("id"),
+			workspaceId,
+		);
+		if (!conversation) {
+			return c.json({ success: false, error: "not found" }, 404);
+		}
+		return c.json(conversation);
+	} catch (err) {
+		return manageError(c, err);
 	}
-	return c.json(conversation);
 });
 
 // GET /api/conversations/:id/messages — full timeline from the Conversation DO.
+// The established path stays intact for the web client while its response now
+// includes team-only comments and system Activities alongside messages.
 app.get("/api/conversations/:id/messages", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
-	const conversationId = c.req.param("id");
-	const stub = c.env.CONVERSATION_DO.get(
-		c.env.CONVERSATION_DO.idFromName(conversationId),
-	);
-	const res = await stub.fetch("https://do/messages");
-	if (!res.ok) {
-		return c.json({ success: false, error: "timeline unavailable" }, 502);
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const conversationId = c.req.param("id");
+		const conversation = await getConversation(
+			c.env,
+			session.user.id,
+			conversationId,
+			workspaceId,
+		);
+		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+		const stub = c.env.CONVERSATION_DO.get(
+			c.env.CONVERSATION_DO.idFromName(conversationId),
+		);
+		const [messagesRes, commentsRes, activitiesRes] = await Promise.all([
+			stub.fetch("https://do/messages"),
+			stub.fetch("https://do/comments"),
+			stub.fetch("https://do/activities?limit=50"),
+		]);
+		if (!messagesRes.ok || !commentsRes.ok || !activitiesRes.ok) {
+			return c.json({ success: false, error: "timeline unavailable" }, 502);
+		}
+		const [{ messages }, { comments }, { activities }] = await Promise.all([
+			messagesRes.json() as Promise<{ messages: TimelineResponse["messages"] }>,
+			commentsRes.json() as Promise<{ comments: TimelineResponse["comments"] }>,
+			activitiesRes.json() as Promise<{
+				activities: TimelineResponse["activities"];
+			}>,
+		]);
+		return c.json({ messages, comments, activities } satisfies TimelineResponse);
+	} catch (err) {
+		return manageError(c, err);
 	}
-	return c.json((await res.json()) as MessagesResponse);
+});
+
+// POST /api/conversations/:id/comments — authenticated internal note. The
+// Worker authorizes the conversation before resolving its globally derivable DO.
+app.post("/api/conversations/:id/comments", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+
+	try {
+		const db = drizzle(c.env.DB);
+		const { workspaceId } = await requireDefaultWorkspaceAccess(db, session.user.id);
+		const conversationId = c.req.param("id");
+		const conversation = await getConversation(
+			c.env,
+			session.user.id,
+			conversationId,
+			workspaceId,
+		);
+		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+
+		const body = (await c.req
+			.json()
+			.catch(() => null)) as CreateCommentRequest | null;
+		if (!body || typeof body.text !== "string" || !body.text.trim()) {
+			return c.json({ success: false, error: "text is required" }, 400);
+		}
+		if (
+			body.mentions !== undefined &&
+			(!Array.isArray(body.mentions) ||
+				body.mentions.some((mention) => typeof mention !== "string"))
+		) {
+			return c.json({ success: false, error: "mentions must be an array of strings" }, 400);
+		}
+		const mentions = [...new Set(body.mentions ?? [])].filter(
+			(mention) => mention !== session.user.id,
+		);
+		if (mentions.length > 20) {
+			return c.json({ success: false, error: "a comment can mention at most 20 teammates" }, 400);
+		}
+		if (mentions.length > 0) {
+			const members = await db
+				.select({ userId: workspaceMembers.userId })
+				.from(workspaceMembers)
+				.where(and(eq(workspaceMembers.workspaceId, workspaceId), inArray(workspaceMembers.userId, mentions)))
+				.all();
+			if (members.length !== mentions.length) {
+				return c.json({ success: false, error: "mentions must be workspace teammates" }, 400);
+			}
+		}
+
+		const comment: Comment = {
+			id: crypto.randomUUID(),
+			conversationId,
+			authorId: session.user.id,
+			text: body.text.trim(),
+			mentions,
+			createdAt: new Date().toISOString(),
+		};
+		const stub = c.env.CONVERSATION_DO.get(
+			c.env.CONVERSATION_DO.idFromName(conversationId),
+		);
+		const res = await stub.fetch("https://do/append-comment", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(comment),
+		});
+		if (!res.ok) {
+			return c.json({ success: false, error: "timeline unavailable" }, 502);
+		}
+		if (mentions.length > 0) {
+			await db
+				.insert(commentNotifications)
+				.values(
+					mentions.map((userId) => ({
+						id: crypto.randomUUID(),
+						workspaceId,
+						userId,
+						conversationId,
+						commentId: comment.id,
+						authorId: session.user.id,
+						commentText: comment.text,
+						createdAt: comment.createdAt,
+					})),
+				)
+				.onConflictDoNothing()
+				.run();
+		}
+		return c.json({ comment } satisfies CreateCommentResponse, 201);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+// GET /api/comment-notifications — personal mention inbox, bounded for the sidebar.
+app.get("/api/comment-notifications", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const db = drizzle(c.env.DB);
+		await requireDefaultWorkspaceAccess(db, session.user.id);
+		const notifications = await db.select().from(commentNotifications)
+			.where(eq(commentNotifications.userId, session.user.id))
+			.orderBy(desc(commentNotifications.createdAt)).limit(50).all();
+		const unread = await db.select({ id: commentNotifications.id }).from(commentNotifications)
+			.where(and(eq(commentNotifications.userId, session.user.id), isNull(commentNotifications.readAt))).all();
+		return c.json({ notifications, unreadCount: unread.length } satisfies CommentNotificationsResponse);
+	} catch (err) { return manageError(c, err); }
+});
+
+app.post("/api/comment-notifications/:id/read", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const db = drizzle(c.env.DB);
+		await requireDefaultWorkspaceAccess(db, session.user.id);
+		await db.update(commentNotifications).set({ readAt: new Date().toISOString() })
+			.where(and(eq(commentNotifications.id, c.req.param("id")), eq(commentNotifications.userId, session.user.id))).run();
+		return c.json({ success: true });
+	} catch (err) { return manageError(c, err); }
 });
 
 // POST /api/conversations/:id/read — advance the agent's read cursor (ADR 0015).
@@ -223,37 +439,60 @@ app.post("/api/conversations/:id/read", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
-	const body = (await c.req.json().catch(() => null)) as MarkReadRequest | null;
-	if (!body || !Number.isInteger(body.lastReadSeq) || body.lastReadSeq < 0) {
-		return c.json({ success: false, error: "invalid lastReadSeq" }, 400);
-	}
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const conversationId = c.req.param("id");
+		const conversation = await getConversation(
+			c.env,
+			session.user.id,
+			conversationId,
+			workspaceId,
+		);
+		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
 
-	await drizzle(c.env.DB)
-		.insert(conversationReads)
-		.values({
-			conversationId: c.req.param("id"),
-			agentId: session.user.id,
-			lastReadSeq: body.lastReadSeq,
-		})
-		.onConflictDoUpdate({
-			target: [conversationReads.conversationId, conversationReads.agentId],
-			set: { lastReadSeq: body.lastReadSeq },
-		})
-		.run();
-	return c.json({ success: true });
+		const body = (await c.req.json().catch(() => null)) as MarkReadRequest | null;
+		if (!body || !Number.isInteger(body.lastReadSeq) || body.lastReadSeq < 0) {
+			return c.json({ success: false, error: "invalid lastReadSeq" }, 400);
+		}
+
+		await drizzle(c.env.DB)
+			.insert(conversationReads)
+			.values({
+				conversationId,
+				agentId: session.user.id,
+				lastReadSeq: body.lastReadSeq,
+			})
+			.onConflictDoUpdate({
+				target: [conversationReads.conversationId, conversationReads.agentId],
+				set: { lastReadSeq: body.lastReadSeq },
+			})
+			.run();
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
+	}
 });
 
-// GET /api/users — agents for assignee pickers. Single-tenant bootstrap: all
-// registered users (workspace RBAC enforcement is a later phase).
+// GET /api/users — workspace agents for assignee pickers.
 app.get("/api/users", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
-
-	const users = await drizzle(c.env.DB)
-		.select({ id: user.id, name: user.name, email: user.email })
-		.from(user)
-		.all();
-	return c.json({ users } satisfies { users: UserSummary[] });
+	try {
+		const db = drizzle(c.env.DB);
+		const { workspaceId } = await requireDefaultWorkspaceAccess(db, session.user.id);
+		const users = await db
+			.select({ id: user.id, name: user.name, email: user.email })
+			.from(workspaceMembers)
+			.innerJoin(user, eq(workspaceMembers.userId, user.id))
+			.where(eq(workspaceMembers.workspaceId, workspaceId))
+			.all();
+		return c.json({ users } satisfies { users: UserSummary[] });
+	} catch (err) {
+		return manageError(c, err);
+	}
 });
 
 // PATCH /api/conversations/:id — update metadata (status, assignee, snooze).
@@ -263,81 +502,121 @@ app.patch("/api/conversations/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
-	const id = c.req.param("id");
-	const current = await getConversation(c.env, session.user.id, id);
-	if (!current) {
-		return c.json({ success: false, error: "not found" }, 404);
-	}
-
-	const body = (await c.req
-		.json()
-		.catch(() => null)) as ConversationUpdateRequest | null;
-	if (!body) return c.json({ success: false, error: "invalid body" }, 400);
-
-	const patch: Record<string, unknown> = {};
-	if (body.status !== undefined) {
-		if (body.status !== "open" && body.status !== "archived") {
-			return c.json({ success: false, error: "invalid status" }, 400);
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const id = c.req.param("id");
+		const current = await getConversation(c.env, session.user.id, id, workspaceId);
+		if (!current) {
+			return c.json({ success: false, error: "not found" }, 404);
 		}
-		patch.status = body.status;
-	}
-	if (body.assigneeId !== undefined) {
-		// string (assign) or null (unassign); existence is not validated here.
-		patch.assigneeId = body.assigneeId;
-	}
-	if (body.snoozedUntil !== undefined) {
+
+		const body = (await c.req
+			.json()
+			.catch(() => null)) as ConversationUpdateRequest | null;
+		if (!body) return c.json({ success: false, error: "invalid body" }, 400);
+
+		const patch: Record<string, unknown> = {};
+		if (body.status !== undefined) {
+			if (body.status !== "open" && body.status !== "archived") {
+				return c.json({ success: false, error: "invalid status" }, 400);
+			}
+			patch.status = body.status;
+		}
+		if (body.assigneeId !== undefined) {
+			// string (assign) or null (unassign); existence is not validated here.
+			patch.assigneeId = body.assigneeId;
+		}
+		if (body.snoozedUntil !== undefined) {
+			if (
+				body.snoozedUntil !== null &&
+				Number.isNaN(new Date(body.snoozedUntil).getTime())
+			) {
+				return c.json({ success: false, error: "invalid snoozedUntil" }, 400);
+			}
+			patch.snoozedUntil = body.snoozedUntil;
+		}
+		if (body.inboxId !== undefined) {
+			// Conversations can only move to an inbox in their authorized workspace.
+			const target = await drizzle(c.env.DB)
+				.select({ id: inboxes.id })
+				.from(inboxes)
+				.where(and(eq(inboxes.id, body.inboxId), eq(inboxes.workspaceId, workspaceId)))
+				.get();
+			if (!target) {
+				return c.json({ success: false, error: "inbox not found" }, 400);
+			}
+			patch.inboxId = body.inboxId;
+		}
+		if (Object.keys(patch).length === 0) {
+			return c.json({ success: false, error: "nothing to update" }, 400);
+		}
+
+		const updatedAt = new Date().toISOString();
+		const set: Partial<typeof conversations.$inferInsert> = { updatedAt };
+		if (patch.status !== undefined)
+			set.status = patch.status as "open" | "archived";
+		if (patch.assigneeId !== undefined)
+			set.assigneeId = patch.assigneeId as string | null;
+		if (patch.snoozedUntil !== undefined)
+			set.snoozedUntil = patch.snoozedUntil as string | null;
+		if (patch.inboxId !== undefined) set.inboxId = patch.inboxId as string;
+
+		const changes: Record<string, { from: unknown; to: unknown }> = {};
+		if (patch.status !== undefined && patch.status !== current.status) {
+			changes.status = { from: current.status, to: patch.status };
+		}
+		if (patch.assigneeId !== undefined && patch.assigneeId !== current.assigneeId) {
+			changes.assigneeId = { from: current.assigneeId, to: patch.assigneeId };
+		}
 		if (
-			body.snoozedUntil !== null &&
-			Number.isNaN(new Date(body.snoozedUntil).getTime())
+			patch.snoozedUntil !== undefined &&
+			patch.snoozedUntil !== current.snoozedUntil
 		) {
-			return c.json({ success: false, error: "invalid snoozedUntil" }, 400);
+			changes.snoozedUntil = {
+				from: current.snoozedUntil,
+				to: patch.snoozedUntil,
+			};
 		}
-		patch.snoozedUntil = body.snoozedUntil;
-	}
-	if (body.inboxId !== undefined) {
-		// Validate the target inbox exists (ADR 0008: conversations never leave
-		// the inbox system; the FK is NOT NULL).
-		const target = await drizzle(c.env.DB)
-			.select({ id: inboxes.id })
-			.from(inboxes)
-			.where(eq(inboxes.id, body.inboxId))
-			.get();
-		if (!target) {
-			return c.json({ success: false, error: "inbox not found" }, 400);
+		if (patch.inboxId !== undefined && patch.inboxId !== current.inboxId) {
+			changes.inboxId = { from: current.inboxId, to: patch.inboxId };
 		}
-		patch.inboxId = body.inboxId;
+
+		await drizzle(c.env.DB)
+			.update(conversations)
+			.set(set)
+			.where(and(eq(conversations.id, id), eq(conversations.workspaceId, workspaceId)))
+			.run();
+
+		// Best-effort relay to connected agents; the D1 write already succeeded.
+		await broadcastUpdate(c.env, id, { ...patch, updatedAt });
+		if (Object.keys(changes).length > 0) {
+			await appendActivity(c.env, {
+				conversationId: id,
+				action: "conversation.updated",
+				actorId: session.user.id,
+				details: { changes },
+			});
+		}
+
+		const conversation = await getConversation(
+			c.env,
+			session.user.id,
+			id,
+			workspaceId,
+		);
+		if (!conversation) {
+			return c.json({ success: false, error: "not found" }, 404);
+		}
+		return c.json({
+			success: true,
+			conversation,
+		} satisfies ConversationUpdateResponse);
+	} catch (err) {
+		return manageError(c, err);
 	}
-	if (Object.keys(patch).length === 0) {
-		return c.json({ success: false, error: "nothing to update" }, 400);
-	}
-
-	const updatedAt = new Date().toISOString();
-	const set: Partial<typeof conversations.$inferInsert> = { updatedAt };
-	if (patch.status !== undefined)
-		set.status = patch.status as "open" | "archived";
-	if (patch.assigneeId !== undefined)
-		set.assigneeId = patch.assigneeId as string | null;
-	if (patch.snoozedUntil !== undefined)
-		set.snoozedUntil = patch.snoozedUntil as string | null;
-	if (patch.inboxId !== undefined) set.inboxId = patch.inboxId as string;
-
-	await drizzle(c.env.DB)
-		.update(conversations)
-		.set(set)
-		.where(eq(conversations.id, id))
-		.run();
-
-	// Best-effort relay to connected agents; the D1 write already succeeded.
-	await broadcastUpdate(c.env, id, { ...patch, updatedAt });
-
-	const conversation = await getConversation(c.env, session.user.id, id);
-	if (!conversation) {
-		return c.json({ success: false, error: "not found" }, 404);
-	}
-	return c.json({
-		success: true,
-		conversation,
-	} satisfies ConversationUpdateResponse);
 });
 
 // GET /api/channels — channel instances with connection state. Access tokens
@@ -345,35 +624,17 @@ app.patch("/api/conversations/:id", async (c) => {
 app.get("/api/channels", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
-
-	const rows = await drizzle(c.env.DB)
-		.select({
-			id: channels.id,
-			type: channels.type,
-			displayName: channels.displayName,
-			externalId: channels.externalId,
-			status: channels.status,
-			accessToken: channels.accessToken,
-			tokenExpiresAt: channels.tokenExpiresAt,
-			createdAt: channels.createdAt,
-			updatedAt: channels.updatedAt,
-		})
-		.from(channels)
-		.all();
-
-	return c.json({
-		channels: rows.map((row) => ({
-			id: row.id,
-			type: row.type,
-			displayName: row.displayName,
-			externalId: row.externalId,
-			status: row.status,
-			hasToken: row.accessToken !== null,
-			tokenExpiresAt: row.tokenExpiresAt,
-			createdAt: row.createdAt,
-			updatedAt: row.updatedAt,
-		})) satisfies ChannelSummary[],
-	});
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		return c.json({
+			channels: await listChannels(c.env, workspaceId, session.user.id),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
 });
 
 // POST /api/channels/:id/token — store a Page access token (dev-mode connect;
@@ -382,32 +643,32 @@ app.post("/api/channels/:id/token", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
-	const body = (await c.req
-		.json()
-		.catch(() => null)) as ChannelConnectRequest | null;
-	if (
-		!body ||
-		typeof body.accessToken !== "string" ||
-		!body.accessToken.trim()
-	) {
-		return c.json({ success: false, error: "accessToken is required" }, 400);
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const body = (await c.req
+			.json()
+			.catch(() => null)) as ChannelConnectRequest | null;
+		if (
+			!body ||
+			typeof body.accessToken !== "string" ||
+			!body.accessToken.trim()
+		) {
+			return c.json({ success: false, error: "accessToken is required" }, 400);
+		}
+		await connectChannelToken(
+			c.env,
+			workspaceId,
+			c.req.param("id"),
+			body.accessToken,
+			session.user.id,
+		);
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
 	}
-
-	const id = c.req.param("id");
-	const updated = await drizzle(c.env.DB)
-		.update(channels)
-		.set({
-			accessToken: body.accessToken.trim(),
-			status: "active",
-			updatedAt: new Date().toISOString(),
-		})
-		.where(and(eq(channels.id, id), eq(channels.type, "facebook_page")))
-		.returning({ id: channels.id })
-		.get();
-	if (!updated) {
-		return c.json({ success: false, error: "not found" }, 404);
-	}
-	return c.json({ success: true });
 });
 
 // POST /api/channels/:id/disconnect — clear credentials; outbound stops.
@@ -415,23 +676,21 @@ app.post("/api/channels/:id/disconnect", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
-	const id = c.req.param("id");
-	const updated = await drizzle(c.env.DB)
-		.update(channels)
-		.set({
-			accessToken: null,
-			refreshToken: null,
-			tokenExpiresAt: null,
-			status: "disconnected",
-			updatedAt: new Date().toISOString(),
-		})
-		.where(eq(channels.id, id))
-		.returning({ id: channels.id })
-		.get();
-	if (!updated) {
-		return c.json({ success: false, error: "not found" }, 404);
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		await disconnectChannel(
+			c.env,
+			workspaceId,
+			c.req.param("id"),
+			session.user.id,
+		);
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
 	}
-	return c.json({ success: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -867,7 +1126,11 @@ app.get("/api/tags", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		return c.json({ tags: await listTags(c.env) });
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		return c.json({ tags: await listTags(c.env, workspaceId, session.user.id) });
 	} catch (err) {
 		return manageError(c, err);
 	}
@@ -877,7 +1140,16 @@ app.post("/api/tags", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const tag = await createTag(c.env, await c.req.json(), session.user.id);
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const tag = await createTag(
+			c.env,
+			workspaceId,
+			await c.req.json(),
+			session.user.id,
+		);
 		return c.json({ tag }, 201);
 	} catch (err) {
 		return manageError(c, err);
@@ -888,7 +1160,17 @@ app.patch("/api/tags/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const tag = await updateTag(c.env, c.req.param("id"), await c.req.json());
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const tag = await updateTag(
+			c.env,
+			workspaceId,
+			c.req.param("id"),
+			await c.req.json(),
+			session.user.id,
+		);
 		return c.json({ tag });
 	} catch (err) {
 		return manageError(c, err);
@@ -899,7 +1181,11 @@ app.delete("/api/tags/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		await deleteTag(c.env, c.req.param("id"));
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		await deleteTag(c.env, workspaceId, c.req.param("id"), session.user.id);
 		return c.json({ success: true });
 	} catch (err) {
 		return manageError(c, err);
@@ -911,50 +1197,126 @@ app.delete("/api/tags/:id", async (c) => {
 app.post("/api/conversations/:id/tags", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
-	const id = c.req.param("id");
-	const conversation = await getConversation(c.env, session.user.id, id);
-	if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+	try {
+		const access = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const { workspaceId } = access;
+		const id = c.req.param("id");
+		const conversation = await getConversation(
+			c.env,
+			session.user.id,
+			id,
+			workspaceId,
+		);
+		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
 
-	const body = (await c.req
-		.json()
-		.catch(() => null)) as ConversationTagRequest | null;
-	if (!body || typeof body.tagId !== "string" || !body.tagId) {
-		return c.json({ success: false, error: "tagId is required" }, 400);
+		const body = (await c.req
+			.json()
+			.catch(() => null)) as ConversationTagRequest | null;
+		if (!body || typeof body.tagId !== "string" || !body.tagId) {
+			return c.json({ success: false, error: "tagId is required" }, 400);
+		}
+		const tag = await drizzle(c.env.DB)
+			.select({
+				id: tags.id,
+				visibility: tags.visibility,
+				ownerUserId: tags.ownerUserId,
+			})
+			.from(tags)
+			.where(and(eq(tags.id, body.tagId), eq(tags.workspaceId, workspaceId)))
+			.get();
+		if (
+			!tag ||
+			(!access.isAdmin &&
+				tag.visibility === "private" &&
+				tag.ownerUserId !== session.user.id)
+		) {
+			return c.json({ success: false, error: "tag not found" }, 404);
+		}
+
+		const tagInsert = await drizzle(c.env.DB)
+			.insert(conversationTags)
+			.values({
+				id: crypto.randomUUID(),
+				conversationId: id,
+				tagId: body.tagId,
+				createdBy: session.user.id,
+				createdAt: new Date().toISOString(),
+			})
+			.onConflictDoNothing()
+			.run();
+		await broadcastUpdate(c.env, id);
+		if ((tagInsert.meta.changes ?? 0) > 0) {
+			await appendActivity(c.env, {
+				conversationId: id,
+				action: "tag.added",
+				actorId: session.user.id,
+				details: { tagId: body.tagId },
+			});
+		}
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
 	}
-	await drizzle(c.env.DB)
-		.insert(conversationTags)
-		.values({
-			id: crypto.randomUUID(),
-			conversationId: id,
-			tagId: body.tagId,
-			createdBy: session.user.id,
-			createdAt: new Date().toISOString(),
-		})
-		.onConflictDoNothing()
-		.run();
-	await broadcastUpdate(c.env, id);
-	return c.json({ success: true });
 });
 
 // Remove a tag from a conversation.
 app.delete("/api/conversations/:id/tags/:tagId", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
-	const id = c.req.param("id");
-	const conversation = await getConversation(c.env, session.user.id, id);
-	if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+	try {
+		const access = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const { workspaceId } = access;
+		const id = c.req.param("id");
+		const conversation = await getConversation(
+			c.env,
+			session.user.id,
+			id,
+			workspaceId,
+		);
+		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
 
-	await drizzle(c.env.DB)
-		.delete(conversationTags)
-		.where(
-			and(
-				eq(conversationTags.conversationId, id),
-				eq(conversationTags.tagId, c.req.param("tagId")),
-			),
-		)
-		.run();
-	await broadcastUpdate(c.env, id);
-	return c.json({ success: true });
+		const tagId = c.req.param("tagId");
+		const tag = await drizzle(c.env.DB)
+			.select({ visibility: tags.visibility, ownerUserId: tags.ownerUserId })
+			.from(tags)
+			.where(and(eq(tags.id, tagId), eq(tags.workspaceId, workspaceId)))
+			.get();
+		if (
+			!tag ||
+			(!access.isAdmin &&
+				tag.visibility === "private" &&
+				tag.ownerUserId !== session.user.id)
+		) {
+			return c.json({ success: false, error: "tag not found" }, 404);
+		}
+		const tagDelete = await drizzle(c.env.DB)
+			.delete(conversationTags)
+			.where(
+				and(
+					eq(conversationTags.conversationId, id),
+					eq(conversationTags.tagId, tagId),
+				),
+			)
+			.run();
+		await broadcastUpdate(c.env, id);
+		if ((tagDelete.meta.changes ?? 0) > 0) {
+			await appendActivity(c.env, {
+				conversationId: id,
+				action: "tag.removed",
+				actorId: session.user.id,
+				details: { tagId },
+			});
+		}
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
+	}
 });
 
 // ---------------------------------------------------------------------------
@@ -1029,7 +1391,13 @@ app.get("/api/canned-replies", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		return c.json({ cannedReplies: await listCannedReplies(c.env) });
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		return c.json({
+			cannedReplies: await listCannedReplies(c.env, workspaceId, session.user.id),
+		});
 	} catch (err) {
 		return manageError(c, err);
 	}
@@ -1039,7 +1407,16 @@ app.post("/api/canned-replies", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const reply = await createCannedReply(c.env, await c.req.json());
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const reply = await createCannedReply(
+			c.env,
+			workspaceId,
+			await c.req.json(),
+			session.user.id,
+		);
 		return c.json({ cannedReply: reply }, 201);
 	} catch (err) {
 		return manageError(c, err);
@@ -1050,10 +1427,16 @@ app.patch("/api/canned-replies/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
 		const reply = await updateCannedReply(
 			c.env,
+			workspaceId,
 			c.req.param("id"),
 			await c.req.json(),
+			session.user.id,
 		);
 		return c.json({ cannedReply: reply });
 	} catch (err) {
@@ -1065,7 +1448,16 @@ app.delete("/api/canned-replies/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		await deleteCannedReply(c.env, c.req.param("id"));
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		await deleteCannedReply(
+			c.env,
+			workspaceId,
+			c.req.param("id"),
+			session.user.id,
+		);
 		return c.json({ success: true });
 	} catch (err) {
 		return manageError(c, err);
@@ -1128,7 +1520,7 @@ export default {
 		env: Env,
 		_ctx: ExecutionContext,
 	): Promise<void> {
-		const parsed = await parseEmailMessage(message);
+		const parsed = await parseEmailMessage(message, env);
 		if (!parsed) return;
 		const inbound = normalizeEmailMessage(parsed);
 		if (inbound) {
@@ -1221,6 +1613,7 @@ async function broadcastUpdate(
 
 async function parseEmailMessage(
 	message: ForwardableEmailMessage,
+	env: Env,
 ): Promise<ParsedEmail | null> {
 	const raw = await new Response(message.raw).text();
 	const email = await new PostalMime().parse(raw);
@@ -1229,6 +1622,18 @@ async function parseEmailMessage(
 	if (email.date) {
 		const parsed = new Date(email.date);
 		if (!Number.isNaN(parsed.getTime())) receivedAt = parsed.toISOString();
+	}
+
+	const attachments = [];
+	for (const attachment of email.attachments ?? []) {
+		const mimeType = attachment.mimeType ?? "";
+		const content = attachment.content;
+		if (!content || !["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType.toLowerCase())) continue;
+		try {
+			attachments.push(await storeImageBlob(env, new Blob([content], { type: mimeType }), attachment.filename));
+		} catch {
+			// Non-image, too-large, or malformed MIME content is never persisted.
+		}
 	}
 
 	return {
@@ -1241,6 +1646,7 @@ async function parseEmailMessage(
 			? email.references.split(/\s+/).filter(Boolean)
 			: null,
 		text: email.text ?? "",
+		attachments,
 		mailbox: message.to,
 		receivedAt,
 	};

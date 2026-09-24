@@ -1,16 +1,19 @@
 import type {
+	Attachment,
 	CannedReplySummary,
 	CannedReplyWriteRequest,
 	ChannelSummary,
+	CommentNotificationsResponse,
 	ConversationSummary,
 	ConversationUpdateRequest,
 	ConversationUpdateResponse,
+	CreateCommentRequest,
+	CreateCommentResponse,
 	InboxCreateRequest,
 	InboxReorderRequest,
 	InboxSummary,
 	InboxUpdateRequest,
 	MarkReadRequest,
-	MessagesResponse,
 	RuleSummary,
 	RuleWriteRequest,
 	SavedFilterCreateRequest,
@@ -24,6 +27,7 @@ import type {
 	TagSummary,
 	TagUpdateRequest,
 	TeamSummary,
+	TimelineResponse,
 	UserSummary,
 	WorkspaceSummary,
 } from "@msgflow/contracts";
@@ -34,7 +38,10 @@ const BASE = import.meta.env.VITE_SERVER_URL ?? "";
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(`${BASE}${path}`, {
 		...init,
-		headers: { "content-type": "application/json", ...init?.headers },
+		headers: {
+			...(init?.body instanceof FormData ? {} : { "content-type": "application/json" }),
+			...init?.headers,
+		},
 	});
 	if (!res.ok) {
 		const body = (await res.json().catch(() => null)) as {
@@ -78,12 +85,28 @@ export const api = {
 		return request<ConversationSummary>(`/api/conversations/${id}`);
 	},
 	getMessages(id: string) {
-		return request<MessagesResponse>(`/api/conversations/${id}/messages`);
+		return request<TimelineResponse>(`/api/conversations/${id}/messages`);
 	},
+	createComment(id: string, body: CreateCommentRequest) {
+		return request<CreateCommentResponse>(`/api/conversations/${id}/comments`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+	},
+	listCommentNotifications() { return request<CommentNotificationsResponse>("/api/comment-notifications"); },
+	markCommentNotificationRead(id: string) { return request<{ success: true }>(`/api/comment-notifications/${id}/read`, { method: "POST" }); },
 	sendMessage(id: string, body: SendMessageRequest) {
 		return request<SendMessageResult>(`/api/conversations/${id}/messages`, {
 			method: "POST",
 			body: JSON.stringify(body),
+		});
+	},
+	uploadAttachments(files: File[]) {
+		const form = new FormData();
+		for (const file of files) form.append("files", file);
+		return request<{ attachments: Attachment[] }>("/api/attachments", {
+			method: "POST",
+			body: form,
 		});
 	},
 	markRead(id: string, lastReadSeq: number) {

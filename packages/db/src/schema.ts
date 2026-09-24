@@ -492,15 +492,65 @@ export const scheduledMessages = sqliteTable("scheduled_messages", {
 	id: text("id").primaryKey(),
 	conversationId: text("conversation_id").notNull(),
 	text: text("text").notNull(),
+	attachmentsJson: text("attachments_json").notNull().default("[]"),
 	sendAt: text("send_at").notNull(),
 	createdBy: text("created_by"),
 	// Delivery attempts; the cron tick deletes the row after MAX_ATTEMPTS failures
 	// so a permanently failing message (e.g. revoked Page token) stops retrying.
 	attempts: integer("attempts").notNull().default(0),
+	// A cron invocation owns a row only while its token is present. This lease
+	// prevents overlapping Cron Trigger invocations from dispatching it twice.
+	claimToken: text("claim_token"),
+	claimedAt: text("claimed_at"),
 });
 
 // 5 attempts (≈5 minutes) before a scheduled message is dropped with an error log.
 export const SCHEDULED_MAX_ATTEMPTS = 5;
+
+// Durable outbound command log. This is intentionally separate from the DO
+// timeline: D1 records the intent before crossing the provider boundary, while
+// the DO remains the canonical live message log.
+export const outboundIntents = sqliteTable(
+	"outbound_intents",
+	{
+		// Stable client/idempotency key, also used as the canonical Message id.
+		id: text("id").primaryKey(),
+		conversationId: text("conversation_id").notNull(),
+		text: text("text").notNull(),
+		attachmentsJson: text("attachments_json").notNull().default("[]"),
+		subject: text("subject"),
+		senderId: text("sender_id").notNull(),
+		// queued is send-later waiting for its due time; sending is deliberately
+		// treated as uncertain after a crash because the provider may have acted.
+		status: text("status", {
+			enum: [
+				"queued",
+				"pending",
+				"sending",
+				"provider_sent",
+				"delivered",
+				"failed",
+				"uncertain",
+			],
+		}).notNull(),
+		attempts: integer("attempts").notNull().default(0),
+		lastError: text("last_error"),
+		providerMessageId: text("provider_message_id"),
+		// Set for send-later intents; unique prevents duplicate schedule rows for
+		// one stable client id.
+		scheduledMessageId: text("scheduled_message_id"),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+		providerSentAt: text("provider_sent_at"),
+		deliveredAt: text("delivered_at"),
+	},
+	(table) => [
+		uniqueIndex("idx_outbound_intents_scheduled_message").on(
+			table.scheduledMessageId,
+		),
+		index("idx_outbound_intents_status").on(table.status, table.updatedAt),
+	],
+);
 
 // ---------------------------------------------------------------------------
 // 9. SIDEBAR PERSONALIZATION + SAVED FILTERS + WEBHOOK IDEMPOTENCY
@@ -575,5 +625,26 @@ export const processedMessages = sqliteTable(
 		primaryKey({
 			columns: [table.conversationId, table.providerMessageId],
 		}),
+	],
+);
+
+// Per-agent inbox for Comment @mentions. The Comment remains canonical in its
+// ConversationDO; D1 stores the recipient's cross-conversation read state.
+export const commentNotifications = sqliteTable(
+	"comment_notifications",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+		userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+		conversationId: text("conversation_id").notNull().references(() => conversations.id, { onDelete: "cascade" }),
+		commentId: text("comment_id").notNull(),
+		authorId: text("author_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+		commentText: text("comment_text").notNull(),
+		createdAt: text("created_at").notNull(),
+		readAt: text("read_at"),
+	},
+	(table) => [
+		uniqueIndex("idx_comment_notifications_comment_user").on(table.commentId, table.userId),
+		index("idx_comment_notifications_user_unread").on(table.userId, table.readAt, table.createdAt),
 	],
 );
