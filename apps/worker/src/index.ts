@@ -5,7 +5,6 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type {
 	ApiResponse,
 	Attachment,
-	ChannelConnectRequest,
 	Comment,
 	CommentNotificationsResponse,
 	ConversationEvent,
@@ -24,6 +23,10 @@ import type {
 	SidebarPreferencesUpdate,
 	TimelineResponse,
 	UserSummary,
+} from "@msgflow/contracts";
+import {
+	ChannelConnectRequestSchema,
+	InboxCreateRequestSchema,
 } from "@msgflow/contracts";
 import { createAuth } from "@msgflow/auth";
 import { drizzle } from "drizzle-orm/d1";
@@ -97,6 +100,7 @@ import {
 	storeImageBlob,
 	validateAttachments,
 } from "./attachments";
+import { decodeJsonBody } from "./validation";
 
 export { ConversationDO };
 
@@ -648,21 +652,17 @@ app.post("/api/channels/:id/token", async (c) => {
 			drizzle(c.env.DB),
 			session.user.id,
 		);
-		const body = (await c.req
-			.json()
-			.catch(() => null)) as ChannelConnectRequest | null;
-		if (
-			!body ||
-			typeof body.accessToken !== "string" ||
-			!body.accessToken.trim()
-		) {
-			return c.json({ success: false, error: "accessToken is required" }, 400);
-		}
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			ChannelConnectRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		await connectChannelToken(
 			c.env,
 			workspaceId,
 			c.req.param("id"),
-			body.accessToken,
+			decoded.value.accessToken,
 			session.user.id,
 		);
 		return c.json({ success: true });
@@ -724,10 +724,13 @@ app.post("/api/inboxes", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = await defaultWorkspaceId(c.env);
+		const decoded = await decodeJsonBody(c.req.raw, InboxCreateRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const inbox = await createInbox(
 			c.env,
 			workspaceId,
-			await c.req.json(),
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ inbox }, 201);
@@ -913,10 +916,13 @@ app.post("/api/workspaces/:workspaceId/inboxes", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
+		const decoded = await decodeJsonBody(c.req.raw, InboxCreateRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
 		const inbox = await createInbox(
 			c.env,
 			c.req.param("workspaceId"),
-			await c.req.json(),
+			decoded.value,
 			session.user.id,
 		);
 		return c.json({ inbox }, 201);

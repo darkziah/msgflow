@@ -1,5 +1,7 @@
 // Canonical, channel-agnostic domain types shared by the Worker, Durable Objects, and web client.
 
+import type { InboxAssignmentStrategy, InboxIconKey } from "../inbox-schema";
+
 export type Channel = "facebook" | "email";
 
 export type MessageKind = "inbound" | "outbound";
@@ -306,10 +308,8 @@ export interface ChannelSummary {
 	updatedAt: string;
 }
 
-// POST /api/channels/:id/token
-export interface ChannelConnectRequest {
-	accessToken: string;
-}
+// POST /api/channels/:id/token is defined by ChannelConnectRequestSchema.
+export type { ChannelConnectRequest } from "../channel-schema";
 
 // ---------------------------------------------------------------------------
 // INBOXES (ADR 0008: every conversation in exactly one inbox; channels link
@@ -342,34 +342,6 @@ export interface InboxSummary {
 	updatedAtMs: number | null;
 }
 
-export const INBOX_ICON_KEYS = [
-	"inbox",
-	"headphones",
-	"receipt-text",
-	"badge-dollar-sign",
-	"briefcase",
-] as const;
-export type InboxIconKey = (typeof INBOX_ICON_KEYS)[number];
-
-export const INBOX_ASSIGNMENT_STRATEGIES = [
-	"manual",
-	"round_robin",
-	"least_busy",
-] as const;
-export type InboxAssignmentStrategy =
-	(typeof INBOX_ASSIGNMENT_STRATEGIES)[number];
-
-export const INBOX_COLOR_PRESETS = [
-	"#3B82F6",
-	"#22C55E",
-	"#A855F7",
-	"#F97316",
-	"#EAB308",
-	"#EF4444",
-	"#14B8A6",
-	"#64748B",
-] as const;
-
 export interface InboxChannelLink {
 	channelId: string;
 	channelDisplayName: string;
@@ -378,17 +350,13 @@ export interface InboxChannelLink {
 	isDefault: boolean;
 }
 
-// POST /api/workspaces/:workspaceId/inboxes
-export interface InboxCreateRequest {
-	name: string;
-	description?: string | null;
-	color?: string;
-	icon?: InboxIconKey | null;
-	teamId?: string | null;
-	assignmentStrategy?: InboxAssignmentStrategy;
-	/** Optional channel ids to link immediately (first becomes the channel's default). */
-	channelIds?: string[];
-}
+// POST /api/workspaces/:workspaceId/inboxes is defined by InboxCreateRequestSchema.
+// Re-export its inferred type here to preserve the existing contracts surface.
+export type {
+	InboxAssignmentStrategy,
+	InboxCreateRequest,
+	InboxIconKey,
+} from "../inbox-schema";
 
 // PATCH /api/workspaces/:workspaceId/inboxes/:inboxId
 export interface InboxUpdateRequest {

@@ -18,7 +18,7 @@ apps/
   web/        # inbox UI (Front/Missive-style)
   worker/     # single ingress Worker (Hono) — exports ConversationDO
 packages/
-  contracts/  # types, Zod schemas, event envelopes, conversation IDs
+  contracts/  # types, Effect Schema boundary contracts, event envelopes, conversation IDs
   db/         # D1 schema + migrations + query helpers (Drizzle)
   channel/    # channel-agnostic message model + Facebook/email adapters
   auth/       # Better-auth config + RBAC + user/workspace context
