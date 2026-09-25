@@ -33,8 +33,10 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { applyPreferences, isSectionCollapsed } from "./sidebar-prefs";
 import { InboxSettingsDrawer } from "./InboxSettingsDrawer";
+import { MailboxSidebar } from "./MailboxSidebar";
 
 export interface ListFilters {
+	mailboxId?: string;
 	status?: "open" | "archived" | "all";
 	inboxId?: string;
 	q?: string;
@@ -91,9 +93,19 @@ export function Sidebar({
 	>(null);
 	const [dragId, setDragId] = useState<string | null>(null);
 	const [notificationsOpen, setNotificationsOpen] = useState(false);
-	const { data: notifications } = useQuery({ queryKey: ["comment-notifications"], queryFn: () => api.listCommentNotifications(), refetchInterval: 15000 });
-	const openNotification = (notification: NonNullable<typeof notifications>["notifications"][number]) => {
-		api.markCommentNotificationRead(notification.id).finally(() => queryClient.invalidateQueries({ queryKey: ["comment-notifications"] }));
+	const { data: notifications } = useQuery({
+		queryKey: ["comment-notifications"],
+		queryFn: () => api.listCommentNotifications(),
+		refetchInterval: 15000,
+	});
+	const openNotification = (
+		notification: NonNullable<typeof notifications>["notifications"][number],
+	) => {
+		api
+			.markCommentNotificationRead(notification.id)
+			.finally(() =>
+				queryClient.invalidateQueries({ queryKey: ["comment-notifications"] }),
+			);
 		setNotificationsOpen(false);
 		navigate({ to: "/", search: { c: notification.conversationId } });
 	};
@@ -230,7 +242,52 @@ export function Sidebar({
 								</option>
 							))}
 						</select>
-						<div className="relative"><button type="button" className="relative rounded p-1 hover:bg-accent" onClick={() => setNotificationsOpen((open) => !open)} aria-label="Comment mentions"><Bell size={16} />{notifications?.unreadCount ? <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-red-600 px-1 text-center text-[10px] text-white">{notifications.unreadCount}</span> : null}</button>{notificationsOpen ? <div className="absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-md border bg-background shadow-lg"><p className="border-b px-3 py-2 text-xs font-semibold">Mentions</p>{notifications?.notifications.length ? notifications.notifications.map((notification) => <button key={notification.id} type="button" onClick={() => openNotification(notification)} className="block w-full border-b px-3 py-2 text-left text-sm hover:bg-muted"><span className={notification.readAt ? "text-muted-foreground" : "font-semibold"}>{notification.commentText}</span></button>) : <p className="px-3 py-4 text-sm text-muted-foreground">No mentions yet.</p>}</div> : null}</div>
+						<div className="relative">
+							<button
+								type="button"
+								className="relative rounded p-1 hover:bg-accent"
+								onClick={() => setNotificationsOpen((open) => !open)}
+								aria-label="Comment mentions"
+							>
+								<Bell size={16} />
+								{notifications?.unreadCount ? (
+									<span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-red-600 px-1 text-center text-[10px] text-white">
+										{notifications.unreadCount}
+									</span>
+								) : null}
+							</button>
+							{notificationsOpen ? (
+								<div className="absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-md border bg-background shadow-lg">
+									<p className="border-b px-3 py-2 text-xs font-semibold">
+										Mentions
+									</p>
+									{notifications?.notifications.length ? (
+										notifications.notifications.map((notification) => (
+											<button
+												key={notification.id}
+												type="button"
+												onClick={() => openNotification(notification)}
+												className="block w-full border-b px-3 py-2 text-left text-sm hover:bg-muted"
+											>
+												<span
+													className={
+														notification.readAt
+															? "text-muted-foreground"
+															: "font-semibold"
+													}
+												>
+													{notification.commentText}
+												</span>
+											</button>
+										))
+									) : (
+										<p className="px-3 py-4 text-sm text-muted-foreground">
+											No mentions yet.
+										</p>
+									)}
+								</div>
+							) : null}
+						</div>
 					</>
 				) : (
 					<h1 className="mx-auto text-sm font-black" title="MsgFlow">
@@ -241,6 +298,15 @@ export function Sidebar({
 
 			{/* Sections */}
 			<nav className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+				<MailboxSidebar
+					workspaceId={workspaceId}
+					userId={currentUserId}
+					selected={activeFilters.mailboxId}
+					compact={compact}
+					onSelect={(mailboxId) =>
+						onSelect({ mailboxId, channel: "email", status: "open" })
+					}
+				/>
 				{sidebar.sections.map((section) => (
 					<SidebarSectionView
 						key={section.key}

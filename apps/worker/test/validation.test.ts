@@ -4,7 +4,7 @@ import {
 	InboxCreateRequestSchema,
 } from "@msgflow/contracts";
 import { teams, workspaceMembers, workspaces } from "@msgflow/db";
-import { getWorkspaceAccess } from "../src/access";
+
 import { createInbox } from "../src/manage";
 import { decodeJsonBody, MAX_JSON_BODY_BYTES } from "../src/validation";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
@@ -100,7 +100,16 @@ describe("Effect Schema inbox-create boundary", () => {
 		const { workspaceId } = await seedWorkspace(ctx);
 		await seedUser(ctx, "admin", "admin@test.dev");
 		await seedUser(ctx, "member", "member@test.dev");
-		await getWorkspaceAccess(ctx.db, workspaceId, "admin");
+		await ctx.db
+			.insert(workspaceMembers)
+			.values({
+				id: crypto.randomUUID(),
+				workspaceId,
+				userId: "admin",
+				role: "owner",
+				createdAt: new Date().toISOString(),
+			})
+			.run();
 		await ctx.db
 			.insert(workspaceMembers)
 			.values({

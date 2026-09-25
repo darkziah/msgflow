@@ -7,10 +7,11 @@ import type {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
+import { EmailAdmin } from "@/components/email-admin";
+import { TAG_COLOR_OPTIONS, TagChip } from "@/components/inbox/TagChip";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { TAG_COLOR_OPTIONS, TagChip } from "@/components/inbox/TagChip";
 
 export const Route = createFileRoute("/settings")({ component: Settings });
 
@@ -22,6 +23,7 @@ function Settings() {
 				<InboxesSection />
 				<ChannelsSection />
 				<TagsSection />
+				<EmailAdmin />
 			</div>
 		</div>
 	);
@@ -277,9 +279,9 @@ function ChannelsSection() {
 		<section>
 			<h2 className="text-lg font-bold">Channels</h2>
 			<p className="mt-1 text-sm text-gray-500">
-				Connect a Facebook Page so replies can be sent. Email channels are
-				routed through Cloudflare Email Service and need no token. Channels are
-				created automatically when the first message arrives.
+				Connect a Facebook Page so replies can be sent. Email addresses must be
+				explicitly provisioned in Email domains and mailboxes below; incoming
+				mail never creates a new address automatically.
 			</p>
 			<div className="mt-4 space-y-4">
 				{isPending ? <p className="text-sm text-gray-400">Loading…</p> : null}

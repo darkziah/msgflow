@@ -20,7 +20,7 @@ import {
 	archiveInbox,
 	connectChannelToken,
 	createCannedReply,
-	createEmailChannel,
+
 	createInbox,
 	createRule,
 	createTag,
@@ -68,16 +68,15 @@ async function setup(): Promise<{ workspaceId: string }> {
 	await seedUser(ctx, ADMIN, "admin@test.dev");
 	await seedUser(ctx, MEMBER, "member@test.dev");
 	await seedUser(ctx, OUTSIDER, "outsider@test.dev");
-	// Bootstrap ADMIN as owner FIRST — the zero-members bootstrap depends on
-	// first-access order, so later addMember() calls must not shift it.
-	await getWorkspaceAccess(ctx.db, ws.workspaceId, ADMIN);
+	// Explicit setup creates the owner membership; tests seed that durable state.
+	await addMember(ws.workspaceId, ADMIN, "owner");
 	return ws;
 }
 
 async function addMember(
 	workspaceId: string,
 	userId: string,
-	role: "member" | "admin" = "member",
+	role: "owner" | "member" | "admin" = "member",
 ): Promise<void> {
 	await ctx.db
 		.insert(workspaceMembers)
@@ -259,10 +258,9 @@ async function channelAndInboxes(): Promise<{
 // ---------------------------------------------------------------------------
 
 describe("workspace permission boundaries", () => {
-	test("bootstraps the first caller as owner; non-members are rejected", async () => {
+	test("requires an explicit owner membership; non-members are rejected", async () => {
 		const { workspaceId } = await setup();
 
-		// ADMIN is the first caller → bootstrap owner.
 		const adminAccess = await getWorkspaceAccess(ctx.db, workspaceId, ADMIN);
 		expect(adminAccess).not.toBeNull();
 		expect(adminAccess?.role).toBe("owner");
@@ -304,48 +302,6 @@ describe("workspace permission boundaries", () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
-// Email channel onboarding
-// ---------------------------------------------------------------------------
-
-describe("email channel onboarding", () => {
-	test("owner creates a normalized mailbox with an immediate default inbox link", async () => {
-		const { workspaceId } = await setup();
-		const channel = await createEmailChannel(ctx.env, workspaceId, "  Support@Example.COM  ", ADMIN);
-
-		expect(channel.type).toBe("email");
-		expect(channel.externalId).toBe("support@example.com");
-		expect(channel.status).toBe("active");
-		const links = await ctx.db.select().from(inboxChannels)
-			.where(and(eq(inboxChannels.channelId, channel.id), eq(inboxChannels.isDefault, true))).all();
-		expect(links).toHaveLength(1);
-	});
-
-	test("repeat mailbox creation is idempotent", async () => {
-		const { workspaceId } = await setup();
-		const first = await createEmailChannel(ctx.env, workspaceId, "support@example.com", ADMIN);
-		const repeated = await createEmailChannel(ctx.env, workspaceId, "SUPPORT@example.com", ADMIN);
-
-		expect(repeated.id).toBe(first.id);
-		expect((await ctx.db.select().from(channels)
-			.where(and(eq(channels.workspaceId, workspaceId), eq(channels.externalId, "support@example.com"))).all())).toHaveLength(1);
-	});
-
-	test("ordinary members cannot add a mailbox", async () => {
-		const { workspaceId } = await setup();
-		await addMember(workspaceId, MEMBER);
-		await expect(createEmailChannel(ctx.env, workspaceId, "support@example.com", MEMBER))
-			.rejects.toMatchObject({ status: 403 });
-	});
-
-	test("rejects malformed mailbox addresses", async () => {
-		const { workspaceId } = await setup();
-		for (const address of ["", "support", "a@b@c.com", "a @example.com", "@example.com", "support@"]) {
-			await expect(createEmailChannel(ctx.env, workspaceId, address, ADMIN))
-				.rejects.toMatchObject({ status: 400 });
-		}
-	});
-});
 
 // ---------------------------------------------------------------------------
 // Legacy management RBAC: tags, canned replies, and channel credentials
@@ -414,7 +370,7 @@ describe("legacy management workspace RBAC", () => {
 				updatedAt: now,
 			})
 			.run();
-		await getWorkspaceAccess(ctx.db, foreignWorkspaceId, ADMIN);
+		await addMember(foreignWorkspaceId, ADMIN, "owner");
 		const foreignTag = await createTag(
 			ctx.env,
 			foreignWorkspaceId,

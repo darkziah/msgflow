@@ -47,12 +47,25 @@ bun run test
 bun run format
 ```
 
-## Verify-before-build
+## Email-domain pilot
 
-1. Cloudflare Email Service: confirm `send_email` reaches arbitrary customer addresses (an early restriction limited it to verified/owned addresses; current docs show general sending).
-2. Email Workers inbound `email()` handler enablement on the account (Workers Paid plan required).
+Use the [operator runbook](./docs/runbooks/email-domain-pilot.md) for approval gates,
+DNS scope, authentication sender configuration, fresh and populated migration
+rehearsals, recovery, retention and the manual live-test matrix. The pilot uses
+explicit workspace-owned private/shared mailboxes, private R2 email storage, durable
+D1 email records and actor-scoped drafts. Provider acceptance is **not delivery**.
 
-## Image attachments deployment configuration
+Cloudflare Email Service is beta; structured sending requires Workers Paid and has
+a 5 MiB total encoded-message limit. Confirm account entitlement and exact pilot
+subdomain records in the dashboard. Catch-all zone scope remains unverified until
+operator inspection; no apex DNS changes or deployment are implied by this code.
+
+Run `bun run --cwd packages/db build` after source schema changes. Apply the ordered
+SQL chain through `0016_email_drafts.sql` only after backup and legacy mapping
+review; do not reset a populated database. Live DNS/provider and two-client browser
+acceptance remain manual gates.
+
+## Messenger image attachments deployment configuration
 
 Attachments use R2 through the Worker binding `ATTACHMENTS`. Before deployment,
 create the bucket, replace the clearly named `bucket_name` placeholder in

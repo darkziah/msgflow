@@ -53,11 +53,29 @@ export interface OutboundContext {
 	 * Email: structural wrapper around the Worker's SendEmail binding, so this
 	 * package stays environment-neutral (no Cloudflare types here).
 	 */
-	emailSender?: { send(from: string, to: string, raw: string): Promise<void> };
+	emailSender?: {
+		send(message: StructuredEmail): Promise<{ messageId: string }>;
+	};
+	inReplyTo?: string;
+	references?: string[];
 	/** Structural R2 reader supplied by the Worker; no Worker types leak here. */
 	attachmentReader?: {
 		read(attachment: Attachment): Promise<ArrayBuffer | null>;
 	};
+}
+
+export interface StructuredEmail {
+	from: string;
+	to: string;
+	subject: string;
+	text: string;
+	headers: Record<string, string>;
+	attachments: {
+		content: ArrayBuffer;
+		filename: string;
+		type: string;
+		disposition: "attachment";
+	}[];
 }
 
 export interface ProviderSendResult {

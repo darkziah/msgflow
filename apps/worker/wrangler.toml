@@ -44,6 +44,12 @@ name = "EMAIL"
 binding = "ATTACHMENTS"
 bucket_name = "msgflow-attachments"
 
+# Private email raw-MIME/attachment archive (ADR 0021). This must never have a
+# public custom domain or share the Messenger attachment bucket.
+[[r2_buckets]]
+binding = "EMAIL_ARCHIVE"
+bucket_name = "msgflow-email-archive"
+
 # Send-later: every minute, delivers due scheduled_messages rows (ADR 0013).
 [triggers]
 crons = ["* * * * *"]

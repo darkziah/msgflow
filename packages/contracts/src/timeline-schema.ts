@@ -1,13 +1,22 @@
 import { Schema } from "effect";
 
-const Identifier = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(255));
+const Identifier = Schema.String.pipe(
+	Schema.minLength(1),
+	Schema.maxLength(255),
+);
 const Timestamp = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(64));
 const JsonRecord = Schema.Record({ key: Schema.String, value: Schema.Unknown });
 
 export const AttachmentSchema = Schema.Struct({
 	id: Identifier,
 	key: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(1_024)),
-	type: Schema.Literal("image/jpeg", "image/png", "image/gif", "image/webp"),
+	type: Schema.Literal(
+		"image/jpeg",
+		"image/png",
+		"image/gif",
+		"image/webp",
+		"application/pdf",
+	),
 	url: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4_096)),
 	name: Schema.String.pipe(Schema.maxLength(255)),
 	size: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
@@ -28,13 +37,16 @@ export const TimelineMessageSchema = Schema.Struct({
 	channel: Schema.Literal("facebook", "email"),
 	providerMessageId: Schema.NullOr(Identifier),
 	senderId: Identifier,
-	text: Schema.String.pipe(Schema.maxLength(10_000)),
+	text: Schema.String.pipe(Schema.maxLength(5 * 1024 * 1024)),
 	payload: TimelinePayloadSchema,
 	attachments: TimelineAttachmentsSchema,
 	createdAt: Timestamp,
-	seq: Schema.optionalWith(Schema.Number.pipe(Schema.int(), Schema.nonNegative()), {
-		exact: true,
-	}),
+	seq: Schema.optionalWith(
+		Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+		{
+			exact: true,
+		},
+	),
 });
 
 export const TimelineCommentSchema = Schema.Struct({
@@ -68,5 +80,8 @@ export const ConversationUpdatedEventSchema = Schema.Struct({
 export const WebSocketClientEventSchema = Schema.Union(
 	Schema.Struct({ type: Schema.Literal("draft:opened") }),
 	Schema.Struct({ type: Schema.Literal("draft:closed") }),
-	Schema.Struct({ type: Schema.Literal("typing"), isTyping: Schema.optionalWith(Schema.Boolean, { exact: true }) }),
+	Schema.Struct({
+		type: Schema.Literal("typing"),
+		isTyping: Schema.optionalWith(Schema.Boolean, { exact: true }),
+	}),
 );

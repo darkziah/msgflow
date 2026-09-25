@@ -14,6 +14,7 @@ import type {
 	InboxSummary,
 	InboxUpdateRequest,
 	MarkReadRequest,
+	OwnerSetupRequest,
 	RuleSummary,
 	RuleWriteRequest,
 	SavedFilterCreateRequest,
@@ -32,14 +33,40 @@ import type {
 	WorkspaceSummary,
 } from "@msgflow/contracts";
 
+export interface EmailDomainSummary {
+	id: string;
+	workspaceId: string;
+	canonicalDomain: string;
+	inboundState: "pending" | "ready" | "suspended";
+	outboundState: "pending" | "ready" | "suspended";
+	operatorConfirmedAt: string | null;
+}
+
+export interface MailboxSummary {
+	id: string;
+	workspaceId: string;
+	emailDomainId: string;
+	localPart: string;
+	canonicalAddress: string;
+	type: "private" | "shared";
+	ownerUserId: string | null;
+	inboxId: string | null;
+	teamId: string | null;
+	isEnabled: boolean;
+	isSendEnabled: boolean;
+}
+
 // Empty = same origin (Vite dev proxy); override for a separate API origin.
 const BASE = import.meta.env.VITE_SERVER_URL ?? "";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(`${BASE}${path}`, {
+		credentials: "include",
 		...init,
 		headers: {
-			...(init?.body instanceof FormData ? {} : { "content-type": "application/json" }),
+			...(init?.body instanceof FormData
+				? {}
+				: { "content-type": "application/json" }),
 			...init?.headers,
 		},
 	});
@@ -53,7 +80,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+	setupOwner(body: OwnerSetupRequest) {
+		return request<{
+			success: true;
+			setup: {
+				workspaceId: string;
+				teamId: string;
+				inboxId: string;
+				userId: string;
+				verification: "pending_sender_configuration";
+			};
+		}>("/api/setup/owner", { method: "POST", body: JSON.stringify(body) });
+	},
 	listConversations(params?: {
+		mailboxId?: string;
+		workspaceId?: string;
 		status?: string;
 		inboxId?: string;
 		q?: string;
@@ -66,6 +107,8 @@ export const api = {
 		dateTo?: string;
 	}) {
 		const qs = new URLSearchParams();
+		if (params?.mailboxId) qs.set("mailboxId", params.mailboxId);
+		if (params?.workspaceId) qs.set("workspaceId", params.workspaceId);
 		if (params?.status) qs.set("status", params.status);
 		if (params?.inboxId) qs.set("inboxId", params.inboxId);
 		if (params?.q) qs.set("q", params.q);
@@ -93,8 +136,14 @@ export const api = {
 			body: JSON.stringify(body),
 		});
 	},
-	listCommentNotifications() { return request<CommentNotificationsResponse>("/api/comment-notifications"); },
-	markCommentNotificationRead(id: string) { return request<{ success: true }>(`/api/comment-notifications/${id}/read`, { method: "POST" }); },
+	listCommentNotifications() {
+		return request<CommentNotificationsResponse>("/api/comment-notifications");
+	},
+	markCommentNotificationRead(id: string) {
+		return request<{ success: true }>(`/api/comment-notifications/${id}/read`, {
+			method: "POST",
+		});
+	},
 	sendMessage(id: string, body: SendMessageRequest) {
 		return request<SendMessageResult>(`/api/conversations/${id}/messages`, {
 			method: "POST",
@@ -267,6 +316,46 @@ export const api = {
 	},
 	listWorkspaces() {
 		return request<{ workspaces: WorkspaceSummary[] }>("/api/workspaces");
+	},
+	listEmailDomains(workspaceId: string) {
+		return request<{ emailDomains: EmailDomainSummary[] }>(
+			`/api/workspaces/${workspaceId}/email-domains`,
+		);
+	},
+	createEmailDomain(workspaceId: string, canonicalDomain: string) {
+		return request<{ emailDomain: EmailDomainSummary }>(
+			`/api/workspaces/${workspaceId}/email-domains`,
+			{ method: "POST", body: JSON.stringify({ canonicalDomain }) },
+		);
+	},
+	listMailboxes(workspaceId: string) {
+		return request<{ mailboxes: MailboxSummary[] }>(
+			`/api/workspaces/${workspaceId}/mailboxes`,
+		);
+	},
+	createPrivateMailbox(
+		workspaceId: string,
+		emailDomainId: string,
+		ownerUserId: string,
+	) {
+		return request<{ mailbox: MailboxSummary }>(
+			`/api/workspaces/${workspaceId}/mailboxes/private`,
+			{ method: "POST", body: JSON.stringify({ emailDomainId, ownerUserId }) },
+		);
+	},
+	createSharedMailbox(
+		workspaceId: string,
+		body: {
+			emailDomainId: string;
+			localPart: string;
+			inboxId: string;
+			teamId?: string | null;
+		},
+	) {
+		return request<{ mailbox: MailboxSummary }>(
+			`/api/workspaces/${workspaceId}/mailboxes/shared`,
+			{ method: "POST", body: JSON.stringify(body) },
+		);
 	},
 	getSidebar(workspaceId: string) {
 		return request<SidebarResponse>(`/api/workspaces/${workspaceId}/sidebar`);

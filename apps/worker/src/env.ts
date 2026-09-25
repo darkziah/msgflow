@@ -4,7 +4,11 @@ export interface Env {
 	DB: D1Database;
 	CONVERSATION_DO: DurableObjectNamespace<ConversationDO>;
 	EMAIL: SendEmail;
+	/** Verified provider sender for recovery and invitation email. */
+	AUTH_EMAIL_FROM?: string;
 	ATTACHMENTS: R2Bucket;
+	/** Private raw MIME and email-attachment archive; never exposed publicly. */
+	EMAIL_ARCHIVE: R2Bucket;
 	/** Public custom-domain base URL for ATTACHMENTS, without a trailing slash. */
 	ATTACHMENT_PUBLIC_BASE_URL: string;
 	MESSENGER_APP_SECRET: string;

@@ -1,11 +1,11 @@
 import {
+	type AnySQLiteColumn,
 	index,
 	integer,
 	primaryKey,
 	sqliteTable,
 	text,
 	uniqueIndex,
-	type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
 import { user } from "./auth-schema";
 
@@ -29,6 +29,18 @@ export const workspaces = sqliteTable("workspaces", {
 	slug: text("slug").notNull().unique(),
 	createdAt: text("created_at").notNull(),
 	updatedAt: text("updated_at").notNull(),
+});
+
+/** Singleton lock and durable audit marker for explicit first-use setup. */
+export const workspaceSetupClaim = sqliteTable("workspace_setup_claim", {
+	id: integer("id").primaryKey(),
+	email: text("email").notNull(),
+	userId: text("user_id").references(() => user.id, { onDelete: "restrict" }),
+	workspaceId: text("workspace_id").references(() => workspaces.id, {
+		onDelete: "restrict",
+	}),
+	claimedAt: text("claimed_at").notNull(),
+	completedAt: text("completed_at"),
 });
 
 export const workspaceMembers = sqliteTable(
@@ -281,6 +293,7 @@ export const conversations = sqliteTable(
 	},
 	(table) => [
 		index("idx_conversations_inbox_status").on(table.inboxId, table.status),
+		uniqueIndex("idx_conversation_workspace_identity").on(table.id, table.workspaceId),
 		index("idx_conversations_assignee").on(table.assigneeId),
 		index("idx_conversations_contact").on(table.contactId),
 		index("idx_conversations_last_activity").on(table.lastMessageAt),
@@ -519,14 +532,19 @@ export const outboundIntents = sqliteTable(
 		text: text("text").notNull(),
 		attachmentsJson: text("attachments_json").notNull().default("[]"),
 		subject: text("subject"),
+		commandJson: text("command_json"),
 		senderId: text("sender_id").notNull(),
 		// queued is send-later waiting for its due time; sending is deliberately
 		// treated as uncertain after a crash because the provider may have acted.
+		// accepted means the provider accepted handoff. It is deliberately not
+		// delivery: delivery/bounce events need a future queue binding.
 		status: text("status", {
 			enum: [
 				"queued",
 				"pending",
 				"sending",
+				"accepted",
+				// Legacy rows remain readable during the Phase 2 transition.
 				"provider_sent",
 				"delivered",
 				"failed",
@@ -549,6 +567,154 @@ export const outboundIntents = sqliteTable(
 			table.scheduledMessageId,
 		),
 		index("idx_outbound_intents_status").on(table.status, table.updatedAt),
+	],
+);
+
+// ---------------------------------------------------------------------------
+// 8b. LOGICAL EMAIL DOMAINS / MAILBOXES (ADR 0021)
+// ---------------------------------------------------------------------------
+
+export const emailDomains = sqliteTable(
+	"email_domains",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "restrict" }),
+		canonicalDomain: text("canonical_domain").notNull().unique(),
+		inboundState: text("inbound_state", {
+			enum: ["pending", "ready", "suspended"],
+		})
+			.notNull()
+			.default("pending"),
+		outboundState: text("outbound_state", {
+			enum: ["pending", "ready", "suspended"],
+		})
+			.notNull()
+			.default("pending"),
+		dnsStatusJson: text("dns_status_json").notNull().default("{}"),
+		operatorConfirmedAt: text("operator_confirmed_at"),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [index("idx_email_domains_workspace").on(table.workspaceId)],
+);
+
+export const mailboxes = sqliteTable(
+	"mailboxes",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "restrict" }),
+		emailDomainId: text("email_domain_id")
+			.notNull()
+			.references(() => emailDomains.id, { onDelete: "restrict" }),
+		localPart: text("local_part").notNull(),
+		canonicalAddress: text("canonical_address").notNull().unique(),
+		type: text("type", { enum: ["private", "shared"] }).notNull(),
+		ownerUserId: text("owner_user_id").references(() => user.id, {
+			onDelete: "restrict",
+		}),
+		inboxId: text("inbox_id").references(() => inboxes.id, {
+			onDelete: "restrict",
+		}),
+		teamId: text("team_id").references(() => teams.id, {
+			onDelete: "restrict",
+		}),
+		isEnabled: integer("is_enabled", { mode: "boolean" })
+			.notNull()
+			.default(false),
+		isSendEnabled: integer("is_send_enabled", { mode: "boolean" })
+			.notNull()
+			.default(false),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("idx_mailboxes_domain_local_part").on(
+			table.emailDomainId,
+			table.localPart,
+		),
+		uniqueIndex("idx_mailbox_workspace_identity").on(table.id, table.workspaceId),
+		index("idx_mailboxes_workspace_owner").on(
+			table.workspaceId,
+			table.ownerUserId,
+		),
+	],
+);
+
+export const emailAudit = sqliteTable(
+	"email_audit",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull(),
+		actorUserId: text("actor_user_id"),
+		action: text("action").notNull(),
+		targetId: text("target_id").notNull(),
+		detailJson: text("detail_json").notNull().default("{}"),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [
+		index("idx_email_audit_workspace_time").on(
+			table.workspaceId,
+			table.createdAt,
+		),
+	],
+);
+
+export const mailboxDelegates = sqliteTable(
+	"mailbox_delegates",
+	{
+		mailboxId: text("mailbox_id")
+			.notNull()
+			.references(() => mailboxes.id, { onDelete: "cascade" }),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		createdBy: text("created_by")
+			.notNull()
+			.references(() => user.id, { onDelete: "restrict" }),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [primaryKey({ columns: [table.mailboxId, table.userId] })],
+);
+
+export const emailIngress = sqliteTable(
+	"email_ingress",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "restrict" }),
+		mailboxId: text("mailbox_id")
+			.notNull()
+			.references(() => mailboxes.id, { onDelete: "restrict" }),
+		dedupeKey: text("dedupe_key").notNull(),
+		rawObjectKey: text("raw_object_key").notNull(),
+		/** SHA-256 of the exact RFC 5322 source; the mailbox-scoped dedupe key. */
+		rawSha256: text("raw_sha256").notNull().default(""),
+		rawBytes: integer("raw_bytes").notNull().default(0),
+		leaseToken: text("lease_token"),
+		leaseUntil: integer("lease_until"),
+		attempts: integer("attempts").notNull().default(0),
+		envelopeFrom: text("envelope_from"),
+		state: text("state", {
+			enum: ["stored", "processing", "quarantined", "processed", "failed"],
+		})
+			.notNull()
+			.default("stored"),
+		error: text("error"),
+		receivedAt: text("received_at").notNull(),
+		processedAt: text("processed_at"),
+	},
+	(table) => [
+		uniqueIndex("idx_email_ingress_mailbox_dedupe").on(
+			table.mailboxId,
+			table.dedupeKey,
+		),
+		index("idx_email_ingress_state").on(table.state, table.receivedAt),
+		uniqueIndex("idx_ingress_scope_identity").on(table.id, table.workspaceId, table.mailboxId),
 	],
 );
 
@@ -634,17 +800,32 @@ export const commentNotifications = sqliteTable(
 	"comment_notifications",
 	{
 		id: text("id").primaryKey(),
-		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-		userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
-		conversationId: text("conversation_id").notNull().references(() => conversations.id, { onDelete: "cascade" }),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "cascade" }),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		conversationId: text("conversation_id")
+			.notNull()
+			.references(() => conversations.id, { onDelete: "cascade" }),
 		commentId: text("comment_id").notNull(),
-		authorId: text("author_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+		authorId: text("author_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
 		commentText: text("comment_text").notNull(),
 		createdAt: text("created_at").notNull(),
 		readAt: text("read_at"),
 	},
 	(table) => [
-		uniqueIndex("idx_comment_notifications_comment_user").on(table.commentId, table.userId),
-		index("idx_comment_notifications_user_unread").on(table.userId, table.readAt, table.createdAt),
+		uniqueIndex("idx_comment_notifications_comment_user").on(
+			table.commentId,
+			table.userId,
+		),
+		index("idx_comment_notifications_user_unread").on(
+			table.userId,
+			table.readAt,
+			table.createdAt,
+		),
 	],
 );

@@ -7,94 +7,233 @@ export const Route = createFileRoute("/login")({ component: Login });
 
 function Login() {
 	const router = useRouter();
-	const [mode, setMode] = useState<"signin" | "signup">("signin");
-	const [email, setEmail] = useState("");
+	const search = new URLSearchParams(window.location.search);
+	const invitation = search.get("invite");
+	const resetToken = search.get("token");
+	const [identifier, setIdentifier] = useState("");
+	const [username, setUsername] = useState("");
 	const [password, setPassword] = useState("");
-	const [error, setError] = useState<string | null>(null);
+	const [message, setMessage] = useState<string | null>(
+		search.has("error")
+			? "This link is invalid or expired. Request a new one."
+			: null,
+	);
 	const [busy, setBusy] = useState(false);
-
-	async function submit(event: React.FormEvent) {
-		event.preventDefault();
-		setError(null);
+	async function action(run: () => Promise<void>) {
 		setBusy(true);
+		setMessage(null);
 		try {
-			const result =
-				mode === "signin"
-					? await authClient.signIn.email({ email, password })
-					: await authClient.signUp.email({
-							email,
-							password,
-							name: email.split("@")[0] || "Agent",
-						});
-			if (result.error) {
-				setError(result.error.message ?? "Something went wrong.");
-				return;
-			}
-			await router.invalidate();
-			await router.navigate({ to: "/" });
+			await run();
 		} catch (err) {
-			setError(err instanceof Error ? err.message : "Something went wrong.");
+			setMessage(
+				err instanceof Error ? err.message : "Unable to complete request",
+			);
 		} finally {
 			setBusy(false);
 		}
 	}
-
+	async function post(path: string, body: unknown) {
+		const response = await fetch(`/api/${path}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		const result = await response.json();
+		if (!response.ok)
+			throw new Error(result.error ?? "Unable to complete request");
+		return result.data;
+	}
+	async function submit(event: React.FormEvent) {
+		event.preventDefault();
+		await action(async () => {
+			if (resetToken) {
+				const result = await authClient.resetPassword({
+					token: resetToken,
+					newPassword: password,
+				});
+				if (result.error) throw new Error(result.error.message);
+				window.history.replaceState(null, "", "/login");
+				setPassword("");
+				setMessage("Password reset. Sign in with your new password.");
+				return;
+			}
+			const value = identifier.trim();
+			const result = value.includes("@")
+				? await authClient.signIn.email({ email: value, password })
+				: await authClient.signIn.username({ username: value, password });
+			if (result.error) throw new Error(result.error.message);
+			if (invitation) await post("invitations/accept", { token: invitation });
+			await router.invalidate();
+			await router.navigate({ to: "/" });
+		});
+	}
 	return (
-		<div className="flex min-h-screen items-center justify-center bg-gray-50">
+		<div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
 			<form
 				onSubmit={submit}
-				className="w-full max-w-sm space-y-4 rounded-xl border bg-white p-8 shadow-sm"
+				className="w-full max-w-md space-y-4 rounded-xl border bg-white p-8 shadow-sm"
 			>
-				<div>
-					<h1 className="text-2xl font-black">MsgFlow</h1>
-					<p className="mt-1 text-sm text-gray-500">
-						Unified inbox for your business conversations.
-					</p>
-				</div>
-				<div className="space-y-2">
+				<h1 className="text-2xl font-black">
+					{resetToken
+						? "Reset password"
+						: invitation
+							? "Join your invited workspace"
+							: "MsgFlow"}
+				</h1>
+				{!resetToken && (
 					<input
-						type="email"
+						aria-label="Email or username"
 						required
-						value={email}
-						onChange={(event) => setEmail(event.target.value)}
-						placeholder="Email"
-						autoComplete="email"
-						className="w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/50"
+						value={identifier}
+						onChange={(e) => setIdentifier(e.target.value)}
+						placeholder="Email or username"
+						autoComplete="username"
+						className="input w-full"
 					/>
-					<input
-						type="password"
-						required
-						minLength={8}
-						value={password}
-						onChange={(event) => setPassword(event.target.value)}
-						placeholder="Password (min 8 chars)"
-						autoComplete={
-							mode === "signin" ? "current-password" : "new-password"
-						}
-						className="w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/50"
-					/>
-				</div>
-				{error ? <p className="text-sm text-red-600">{error}</p> : null}
-				<Button
-					type="submit"
-					disabled={busy || !email || !password}
-					className="w-full"
-				>
-					{busy
-						? "Please wait…"
-						: mode === "signin"
-							? "Sign in"
-							: "Create account"}
+				)}
+				<input
+					aria-label="Password"
+					type="password"
+					required
+					minLength={8}
+					maxLength={128}
+					value={password}
+					onChange={(e) => setPassword(e.target.value)}
+					placeholder="Password (at least 8 characters)"
+					autoComplete={resetToken ? "new-password" : "current-password"}
+					className="input w-full"
+				/>
+				<Button disabled={busy} type="submit" className="w-full">
+					{resetToken
+						? "Reset password"
+						: invitation
+							? "Sign in and accept invitation"
+							: "Sign in"}
 				</Button>
-				<button
-					type="button"
-					onClick={() => setMode(mode === "signin" ? "signup" : "signin")}
-					className="w-full text-center text-sm text-gray-500 underline-offset-2 hover:underline"
-				>
-					{mode === "signin"
-						? "No account? Create one"
-						: "Have an account? Sign in"}
-				</button>
+				{invitation && !resetToken && (
+					<section className="space-y-3 border-t pt-4">
+						<p className="text-sm">
+							New account? Choose an immutable username. Your recovery email is
+							fixed by the invitation. Creating credentials does not join the
+							workspace until your email is verified.
+						</p>
+						<input
+							aria-label="New immutable username"
+							value={username}
+							minLength={3}
+							maxLength={30}
+							onChange={(e) => setUsername(e.target.value)}
+							placeholder="New immutable username"
+							className="input w-full"
+						/>
+						<Button
+							type="button"
+							disabled={busy || !username || password.length < 8}
+							onClick={() =>
+								action(async () => {
+									const data = await post("invitations/register", {
+										token: invitation,
+										username,
+										password,
+									});
+									setPassword("");
+									setMessage(
+										data.verification === "verification_sent"
+											? "Credentials created. Check your recovery email, verify it, then sign in and accept this invitation."
+											: "Credentials created; verification pending. Ask the operator to configure EMAIL and AUTH_EMAIL_FROM if needed, then enter your invited email above and resend verification. Keep this invitation link to finish joining.",
+									);
+								})
+							}
+						>
+							Create invited account
+						</Button>
+						<Button
+							type="button"
+							disabled={busy}
+							onClick={() =>
+								action(async () => {
+									await post("invitations/accept", { token: invitation });
+									await router.invalidate();
+									await router.navigate({ to: "/" });
+								})
+							}
+						>
+							Accept with current signed-in account
+						</Button>
+					</section>
+				)}
+				{!resetToken && (
+					<div className="space-y-2 border-t pt-4 text-sm">
+						<p>
+							For verification or recovery, enter your recovery email above (not
+							your username).
+						</p>
+						<button
+							type="button"
+							disabled={busy}
+							className="block text-primary"
+							onClick={() =>
+								action(async () => {
+									if (!identifier.includes("@"))
+										throw new Error("Enter your recovery email first.");
+									const result = await authClient.sendVerificationEmail({
+										email: identifier.trim(),
+										callbackURL: invitation
+											? `/login?invite=${invitation}`
+											: "/login",
+									});
+									if (result.error)
+										throw new Error(
+											result.error.message ??
+												"Verification sender is not configured",
+										);
+									setMessage(
+										"If this account needs verification, a link was submitted for delivery. Check your email. If no link arrives, ask the operator to check the authentication sender configuration.",
+									);
+								})
+							}
+						>
+							Resend verification
+						</button>
+						<button
+							type="button"
+							disabled={busy}
+							className="block text-primary"
+							onClick={() =>
+								action(async () => {
+									if (!identifier.includes("@"))
+										throw new Error("Enter your recovery email first.");
+									const result = await authClient.requestPasswordReset({
+										email: identifier.trim(),
+										redirectTo: `${window.location.origin}/login`,
+									});
+									if (result.error) throw new Error(result.error.message);
+									setMessage(
+										"If a verified account matches that email, a password-reset link was submitted for delivery. Unverified accounts must verify their recovery email first.",
+									);
+								})
+							}
+						>
+							Forgot password
+						</button>
+						<p>
+							Existing accounts can still sign in. Invitations and private
+							mailbox provisioning require verified recovery email.
+						</p>
+						<button
+							type="button"
+							className="text-primary"
+							onClick={() => router.navigate({ to: "/setup" })}
+						>
+							Set up the first workspace
+						</button>
+					</div>
+				)}
+				{message && (
+					<p role="status" className="rounded border p-3 text-sm">
+						{message}
+					</p>
+				)}
 			</form>
 		</div>
 	);

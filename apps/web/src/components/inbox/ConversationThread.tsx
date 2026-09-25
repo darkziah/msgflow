@@ -7,12 +7,13 @@ import type {
 } from "@msgflow/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, conversationSocketUrl } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { api, conversationSocketUrl } from "@/lib/api";
+import { emailApi } from "@/lib/email-api";
 import { contactName, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { ContactAvatar } from "./ContactAvatar";
 import { Composer } from "./Composer";
+import { ContactAvatar } from "./ContactAvatar";
 import { ConversationActions } from "./ConversationActions";
 import { TagPicker } from "./TagPicker";
 
@@ -38,6 +39,12 @@ export function ConversationThread({
 	const { data: timeline, isPending: messagesPending } = useQuery({
 		queryKey: ["messages", conversationId],
 		queryFn: () => api.getMessages(conversationId),
+	});
+	const emailContext = useQuery({
+		queryKey: ["email-context", conversationId],
+		queryFn: () => emailApi.context(conversationId),
+		enabled: conversation?.channel === "email",
+		refetchInterval: 5000,
 	});
 	const { data: usersData } = useQuery({
 		queryKey: ["users"],
@@ -93,14 +100,17 @@ export function ConversationThread({
 	const timelineItems = useMemo(() => {
 		const messages = [...(timeline?.messages ?? [])];
 		for (const message of liveMessages) {
-			if (!messages.some((item) => item.id === message.id)) messages.push(message);
+			if (!messages.some((item) => item.id === message.id))
+				messages.push(message);
 		}
 		const comments = [...(timeline?.comments ?? [])];
 		for (const comment of liveComments) {
-			if (!comments.some((item) => item.id === comment.id)) comments.push(comment);
+			if (!comments.some((item) => item.id === comment.id))
+				comments.push(comment);
 		}
 		return [...messages, ...comments].sort(
-			(a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+			(a, b) =>
+				a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
 		);
 	}, [timeline, liveMessages, liveComments]);
 	const activities = useMemo(() => {
@@ -109,7 +119,10 @@ export function ConversationThread({
 			if (!items.some((item) => item.id === activity.id)) items.push(activity);
 		}
 		return items
-			.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+			.sort(
+				(a, b) =>
+					b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id),
+			)
 			.slice(0, ACTIVITY_DISPLAY_LIMIT)
 			.reverse();
 	}, [timeline, liveActivities]);
@@ -151,6 +164,7 @@ export function ConversationThread({
 		);
 	}
 
+	const ReplyComposer = Composer;
 	return (
 		<div className="flex h-full flex-col">
 			<header className="flex items-center justify-between gap-3 border-b px-4 py-3">
@@ -200,17 +214,62 @@ export function ConversationThread({
 				) : (
 					timelineItems.map((item) =>
 						"kind" in item ? (
-							<MessageBubble key={item.id} message={item} />
+							<MessageBubble
+								key={item.id}
+								message={item}
+								isEmail={conversation.channel === "email"}
+							/>
 						) : (
 							<CommentBubble key={item.id} comment={item} />
 						),
 					)
 				)}
+				{conversation.channel === "email" ? (
+					<section
+						aria-label="Email delivery attempts"
+						className="rounded border p-3 text-xs text-muted-foreground"
+					>
+						<div className="flex items-center justify-between">
+							<h3 className="font-medium">Email delivery attempts</h3>
+							<Button
+								type="button"
+								variant="ghost"
+								size="sm"
+								onClick={() => void emailContext.refetch()}
+							>
+								Refresh status
+							</Button>
+						</div>
+						{emailContext.isError ? (
+							<p role="alert">Delivery status unavailable.</p>
+						) : null}
+						<ul className="space-y-2">
+							{emailContext.data?.deliveryStates.map((d) => (
+								<li key={d.id}>
+									<span className="font-medium">
+										{d.state === "accepted"
+											? "Accepted by provider — delivery not confirmed"
+											: d.state === "uncertain"
+												? "Uncertain — do not resend; operator reconciliation required"
+												: d.state === "failed"
+													? "Failed"
+													: d.state}
+									</span>
+									{d.fromAddress ? ` · From: ${d.fromAddress}` : ""}
+									<span className="block">
+										{d.id}
+										{d.error ? ` · ${d.error}` : ""}
+									</span>
+								</li>
+							))}
+						</ul>
+					</section>
+				) : null}
 				<div ref={bottomRef} />
 			</div>
 
 			<div className="border-t px-4 py-3">
-				<Composer
+				<ReplyComposer
 					conversationId={conversationId}
 					showSubject={conversation.channel === "email"}
 					onSent={() =>
@@ -238,7 +297,13 @@ export function ConversationThread({
 	);
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+	message,
+	isEmail,
+}: {
+	message: Message;
+	isEmail: boolean;
+}) {
 	const inbound = message.kind === "inbound";
 	return (
 		<div className={cn("flex", inbound ? "justify-start" : "justify-end")}>
@@ -250,12 +315,33 @@ function MessageBubble({ message }: { message: Message }) {
 						: "bg-primary text-primary-foreground",
 				)}
 			>
-				{message.text ? <p className="whitespace-pre-wrap break-words">{message.text}</p> : null}
+				{message.text ? (
+					<p className="whitespace-pre-wrap break-words">{message.text}</p>
+				) : null}
 				{message.attachments.length > 0 ? (
 					<div className="mt-2 grid gap-2">
 						{message.attachments.map((attachment) => (
-							<a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer">
-								<img src={attachment.url} alt={attachment.name} className="max-h-64 rounded object-contain" loading="lazy" />
+							<a
+								key={attachment.id}
+								href={
+									isEmail
+										? emailApi.attachmentUrl(attachment.id)
+										: attachment.url
+								}
+								target="_blank"
+								rel="noreferrer"
+								className="underline"
+							>
+								{isEmail ? (
+									`Download ${attachment.name}`
+								) : (
+									<img
+										src={attachment.url}
+										alt={attachment.name}
+										className="max-h-64 rounded object-contain"
+										loading="lazy"
+									/>
+								)}
 							</a>
 						))}
 					</div>
@@ -305,9 +391,7 @@ function ActivityModal({
 	}, [onClose]);
 
 	return (
-		<div
-			className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-		>
+		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
 			<section
 				className="flex max-h-[min(42rem,calc(100vh-2rem))] w-full max-w-lg flex-col rounded-lg border bg-background shadow-xl"
 				role="dialog"
@@ -329,11 +413,16 @@ function ActivityModal({
 				</header>
 				<div className="overflow-y-auto px-5 py-4">
 					{activities.length === 0 ? (
-						<p className="text-sm text-muted-foreground">No activity recorded yet.</p>
+						<p className="text-sm text-muted-foreground">
+							No activity recorded yet.
+						</p>
 					) : (
 						<ol className="space-y-3 border-l pl-4">
 							{activities.map((activity) => (
-								<li key={activity.id} className="relative text-sm text-muted-foreground">
+								<li
+									key={activity.id}
+									className="relative text-sm text-muted-foreground"
+								>
 									<span className="absolute -left-[21px] top-1.5 size-2 rounded-full bg-muted-foreground/50" />
 									<ActivityLine activity={activity} agentNames={agentNames} />
 								</li>
@@ -362,7 +451,9 @@ function ActivityLine({
 				<strong className="font-medium text-foreground">{actor}</strong>{" "}
 				{activityDescription(activity)}
 			</span>
-			<span className="shrink-0 text-[10px]">{timeAgo(activity.createdAt)}</span>
+			<span className="shrink-0 text-[10px]">
+				{timeAgo(activity.createdAt)}
+			</span>
 		</div>
 	);
 }
@@ -373,7 +464,8 @@ function activityDescription(activity: Activity): string {
 	if (activity.action === "snooze.expired") return "revived this conversation";
 
 	const changes = activity.details.changes;
-	if (!changes || typeof changes !== "object") return "updated this conversation";
+	if (!changes || typeof changes !== "object")
+		return "updated this conversation";
 	const keys = Object.keys(changes);
 	if (keys.includes("status")) return "changed the status";
 	if (keys.includes("assigneeId")) return "changed the assignee";

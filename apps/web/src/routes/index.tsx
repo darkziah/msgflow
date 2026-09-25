@@ -61,9 +61,11 @@ function Inbox() {
 	}
 
 	const { data, isPending } = useQuery({
-		queryKey: ["conversations", status, filters],
+		queryKey: ["conversations", activeWorkspaceId, status, filters],
 		queryFn: () =>
 			api.listConversations({
+				workspaceId: activeWorkspaceId,
+				mailboxId: filters.mailboxId,
 				status,
 				inboxId: filters.inboxId,
 				q: filters.q,

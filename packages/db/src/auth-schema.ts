@@ -5,6 +5,9 @@ export const user = sqliteTable("user", {
 	id: text("id").primaryKey(),
 	name: text("name").notNull(),
 	email: text("email").notNull().unique(),
+	// Nullable only during the existing-account transition. SQLite migration 0010
+	// permits one valid NULL -> username assignment and rejects later changes.
+	username: text("username").unique(),
 	emailVerified: integer("email_verified", { mode: "boolean" })
 		.default(false)
 		.notNull(),

@@ -3,5 +3,8 @@ export * from "./channel-schema";
 export * from "./conversation-schema";
 export * from "./inbox-schema";
 export * from "./management-schema";
+export * from "./mailbox-schema";
+export * from "./email-api-schema";
 export * from "./provider-schema";
+export * from "./setup-schema";
 export * from "./timeline-schema";

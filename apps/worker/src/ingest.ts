@@ -13,11 +13,18 @@ import {
 } from "@msgflow/db";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import { copyProviderImages } from "./attachments";
+import { decryptChannelToken } from "./channel-token-crypto";
+import {
+	getCanonicalEmail,
+	persistCanonicalEmail,
+	projectCanonicalEmail,
+	routeEmailRulesAtomically,
+} from "./email-persistence";
+import type { AuthorizedEmailInboundRoute } from "./email-transport";
 import type { Env } from "./env";
 import { evaluateRules } from "./rules";
 import { getOrCreateWorkspace } from "./workspace";
-import { decryptChannelToken } from "./channel-token-crypto";
-import { copyProviderImages } from "./attachments";
 
 const DEFAULT_INBOX_NAMES: Record<string, string> = {
 	facebook_page: "Facebook Support",
@@ -73,6 +80,8 @@ async function fetchFacebookProfile(
 export async function routeInbound(
 	env: Env,
 	inbound: NormalizedInbound,
+	emailRoute?: AuthorizedEmailInboundRoute,
+	emailIngressId?: string,
 ): Promise<void> {
 	// Provider-hosted Messenger media is copied before the canonical message is
 	// created. Broken/unsupported provider URLs are ignored by the copier, while
@@ -81,7 +90,8 @@ export async function routeInbound(
 		...inbound.attachments,
 		...(await copyProviderImages(env, inbound.providerAttachments)),
 	];
-	if (!inbound.text && attachments.length === 0) return;
+	if (!inbound.text && attachments.length === 0 && inbound.channel !== "email")
+		return;
 	const db = drizzle(env.DB);
 	const now = new Date().toISOString();
 
@@ -90,17 +100,61 @@ export async function routeInbound(
 	if (!parsed) return;
 	const channelType = parsed.channel === "facebook" ? "facebook_page" : "email";
 
-	// 1. Workspace (lazy single-tenant bootstrap).
-	const workspace = await getOrCreateWorkspace(db, now);
-
-	// 2. Channel (Page or mailbox) the conversation flows through.
-	const channel = await getOrCreateChannel(
-		db,
-		workspace.id,
-		channelType,
-		parsed.left,
-		now,
-	);
+	// Email ingress is authorization-first. It must receive an explicit route
+	// resolved from a ready logical mailbox; legacy lazy workspace/channel/inbox
+	// creation is retained only for the separate Facebook transport.
+	let workspaceId: string;
+	let channel: typeof channels.$inferSelect;
+	let inbox: typeof inboxes.$inferSelect;
+	if (channelType === "email") {
+		if (!emailRoute) throw new Error("email route missing");
+		const [resolvedChannel, resolvedInbox] = await Promise.all([
+			db
+				.select()
+				.from(channels)
+				.where(
+					and(
+						eq(channels.id, emailRoute.channelId),
+						eq(channels.workspaceId, emailRoute.workspaceId),
+						eq(channels.type, "email"),
+					),
+				)
+				.get(),
+			db
+				.select()
+				.from(inboxes)
+				.where(
+					and(
+						eq(inboxes.id, emailRoute.inboxId),
+						eq(inboxes.workspaceId, emailRoute.workspaceId),
+						eq(inboxes.isArchived, false),
+					),
+				)
+				.get(),
+		]);
+		if (!resolvedChannel || !resolvedInbox)
+			throw new Error("email route unavailable");
+		workspaceId = emailRoute.workspaceId;
+		channel = resolvedChannel;
+		inbox = resolvedInbox;
+	} else {
+		const workspace = await getOrCreateWorkspace(db, now);
+		workspaceId = workspace.id;
+		channel = await getOrCreateChannel(
+			db,
+			workspaceId,
+			channelType,
+			parsed.left,
+			now,
+		);
+		inbox = await getOrCreateDefaultInbox(
+			db,
+			workspaceId,
+			channel.id,
+			channelType,
+			now,
+		);
+	}
 
 	// 3. Contact via its channel identity (PSIDs are Page-scoped → keyed by channel).
 	//    Meta webhooks carry only the PSID — resolve the display name/avatar via
@@ -122,21 +176,12 @@ export async function routeInbound(
 	}
 	const contact = await getOrCreateContact(
 		db,
-		workspace.id,
+		workspaceId,
 		channel.id,
 		channelType,
 		inbound.senderId,
 		now,
 		profile,
-	);
-
-	// 4. Default inbox for the channel (each channel has exactly one default, ADR 0008).
-	const inbox = await getOrCreateDefaultInbox(
-		db,
-		workspace.id,
-		channel.id,
-		channelType,
-		now,
 	);
 
 	// 5. Ensure the conversation metadata row exists (D1 is authoritative for it).
@@ -145,7 +190,7 @@ export async function routeInbound(
 		.insert(conversations)
 		.values({
 			id: inbound.conversationId,
-			workspaceId: workspace.id,
+			workspaceId,
 			channelId: channel.id,
 			inboxId: inbox.id,
 			contactId: contact.id,
@@ -159,6 +204,65 @@ export async function routeInbound(
 		.onConflictDoNothing()
 		.run();
 
+	if (channelType === "email" && emailRoute && emailIngressId) {
+		await env.DB.prepare(
+			"UPDATE email_private_attachments SET conversation_id=? WHERE ingress_id=? AND workspace_id=? AND mailbox_id=?",
+		)
+			.bind(
+				inbound.conversationId,
+				emailIngressId,
+				workspaceId,
+				emailRoute.mailboxId,
+			)
+			.run();
+		const existing = await getCanonicalEmail(env, emailIngressId);
+		if (!existing)
+			await persistCanonicalEmail(
+				env,
+				{
+					id: emailIngressId,
+					conversationId: inbound.conversationId,
+					kind: "inbound",
+					channel: "email",
+					providerMessageId: inbound.providerMessageId,
+					senderId: contact.id,
+					text: inbound.text,
+					payload: inbound.payload,
+					attachments,
+					createdAt: inbound.createdAt,
+				},
+				{
+					workspaceId,
+					mailboxId: emailRoute.mailboxId,
+					ingressId: emailIngressId,
+				},
+				inbound.payload,
+			);
+		const current = await db
+			.select()
+			.from(conversations)
+			.where(eq(conversations.id, inbound.conversationId))
+			.get();
+		const tags = await db
+			.select({ tagId: conversationTags.tagId })
+			.from(conversationTags)
+			.where(eq(conversationTags.conversationId, inbound.conversationId))
+			.all();
+		await routeEmailRulesAtomically(env, emailIngressId, {
+			conversationId: inbound.conversationId,
+			workspaceId,
+			inboxId: current?.inboxId ?? inbox.id,
+			assigneeId: current?.assigneeId ?? null,
+			status: current?.status ?? "open",
+			channelType: "email",
+			senderEmail: inbound.senderId,
+			subject: emailPayload.subject ?? null,
+			messageText: inbound.text,
+			conversationTagIds: tags.map((row) => row.tagId),
+		});
+		await projectCanonicalEmail(env, emailIngressId);
+		return;
+	}
 	// 5b. Webhook idempotency (routing spec): rules run BEFORE the DO append,
 	// so a replayed provider event could re-run rule side effects (duplicate
 	// canned replies, re-tags). Claim the event in processed_messages first —
@@ -198,7 +302,7 @@ export async function routeInbound(
 		.all();
 	const outcome = await evaluateRules(env, {
 		conversationId: inbound.conversationId,
-		workspaceId: workspace.id,
+		workspaceId,
 		inboxId: inbox.id,
 		assigneeId: null,
 		status: "open",
@@ -242,11 +346,13 @@ export async function routeInbound(
 
 	const doId = env.CONVERSATION_DO.idFromName(inbound.conversationId);
 	const stub = env.CONVERSATION_DO.get(doId);
-	await stub.fetch("https://do/append-message", {
+	const response = await stub.fetch("https://do/append-message", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(message),
 	});
+	if (!response.ok)
+		throw new Error(`Conversation DO append failed (${response.status})`);
 }
 
 /**

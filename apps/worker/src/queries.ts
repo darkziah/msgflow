@@ -1,3 +1,13 @@
+import type { ConversationSummary, TagSummary } from "@msgflow/contracts";
+import {
+	channels,
+	contacts,
+	conversationReads,
+	conversations,
+	conversationTags,
+	mailboxes,
+	tags,
+} from "@msgflow/db";
 import {
 	and,
 	desc,
@@ -13,15 +23,7 @@ import {
 	sql,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { ConversationSummary, TagSummary } from "@msgflow/contracts";
-import {
-	channels,
-	contacts,
-	conversationReads,
-	conversationTags,
-	conversations,
-	tags,
-} from "@msgflow/db";
+import { canAccessMailbox, conversationReadPredicate } from "./email-transport";
 import type { Env } from "./env";
 
 // Fields shared by the list and single-conversation queries. The unread count
@@ -31,6 +33,7 @@ const conversationColumns = {
 	channelId: conversations.channelId,
 	channelType: channels.type,
 	channelDisplayName: channels.displayName,
+	channelExternalId: channels.externalId,
 	inboxId: conversations.inboxId,
 	subject: conversations.subject,
 	status: conversations.status,
@@ -53,6 +56,7 @@ interface ConversationRow {
 	channelId: string;
 	channelType: "facebook_page" | "email";
 	channelDisplayName: string;
+	channelExternalId: string;
 	inboxId: string;
 	subject: string | null;
 	status: "open" | "archived";
@@ -102,6 +106,7 @@ function toSummary(
 
 /** Faceted search filters (ADR 0013): q, assignee, channel, tag, date range. */
 export interface ConversationListOptions {
+	mailboxId?: string;
 	status?: "open" | "archived" | "all";
 	inboxId?: string;
 	/** Free text: contact name/email, subject, last-message preview. */
@@ -141,6 +146,10 @@ export async function listConversations(
 		lte(conversations.snoozedUntil, now),
 	);
 	const conditions = [
+		conversationReadPredicate(agentId),
+		opts.mailboxId
+			? sql`EXISTS (SELECT 1 FROM mailboxes m WHERE m.id = ${opts.mailboxId} AND m.workspace_id = ${conversations.workspaceId} AND m.canonical_address = ${channels.externalId} AND ${channels.type} = 'email')`
+			: undefined,
 		workspaceId ? eq(conversations.workspaceId, workspaceId) : undefined,
 		opts.status && opts.status !== "all"
 			? eq(conversations.status, opts.status)
@@ -205,11 +214,19 @@ export async function listConversations(
 		.limit(200)
 		.all();
 
+	const visibleRows = await filterMailboxAccess(
+		env,
+		agentId,
+		workspaceId,
+		rows,
+	);
 	const tagsByConversation = await loadTagsForConversations(
 		db,
-		rows.map((row) => row.id),
+		visibleRows.map((row) => row.id),
 	);
-	return rows.map((row) => toSummary(row, tagsByConversation[row.id] ?? []));
+	return visibleRows.map((row) =>
+		toSummary(row, tagsByConversation[row.id] ?? []),
+	);
 }
 
 /** Single conversation (metadata + contact + agent unread) or null. */
@@ -234,14 +251,61 @@ export async function getConversation(
 		)
 		.where(
 			workspaceId
-				? and(eq(conversations.id, id), eq(conversations.workspaceId, workspaceId))
+				? and(
+						eq(conversations.id, id),
+						eq(conversations.workspaceId, workspaceId),
+					)
 				: eq(conversations.id, id),
 		)
 		.get();
 
 	if (!row) return null;
+	if (!(await canReadConversation(env, agentId, workspaceId, row))) return null;
 	const tagsByConversation = await loadTagsForConversations(db, [row.id]);
 	return toSummary(row, tagsByConversation[row.id] ?? []);
+}
+
+async function filterMailboxAccess(
+	env: Env,
+	userId: string,
+	workspaceId: string | undefined,
+	rows: ConversationRow[],
+): Promise<ConversationRow[]> {
+	return (
+		await Promise.all(
+			rows.map(async (row) =>
+				(await canReadConversation(env, userId, workspaceId, row)) ? row : null,
+			),
+		)
+	).filter((row): row is ConversationRow => row !== null);
+}
+
+async function canReadConversation(
+	env: Env,
+	userId: string,
+	workspaceId: string | undefined,
+	row: ConversationRow,
+): Promise<boolean> {
+	if (row.channelType !== "email") return true;
+	if (!workspaceId) return false;
+	// Logical mailbox rows carry private/team visibility rules and must always
+	// pass that authorization. Channels created before logical mailboxes existed
+	// retain the existing workspace-scoped visibility model; hiding them would
+	// make established queues (including Snoozed) disappear during migration.
+	const mailbox = await drizzle(env.DB)
+		.select({ id: mailboxes.id })
+		.from(mailboxes)
+		.where(
+			and(
+				eq(mailboxes.workspaceId, workspaceId),
+				eq(mailboxes.canonicalAddress, row.channelExternalId),
+			),
+		)
+		.get();
+	return (
+		!mailbox ||
+		canAccessMailbox(env, workspaceId, row.channelExternalId, userId)
+	);
 }
 
 /** Tags attached to the given conversations, keyed by conversation id. */

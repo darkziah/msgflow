@@ -151,3 +151,27 @@ the returned provider message ID, uses a `X-MsgFlow-*` header only for app
 correlation, and supplies threading through approved `In-Reply-To` and
 `References` headers rather than attempting to set platform-controlled
 Message-ID or Date headers.
+
+## Implementation qualification for the pilot
+
+The accepted product decisions above remain the target, not a claim that external
+configuration or every operational feature is already complete. The application
+implements explicit provisioning, private/shared authorization, private MIME/PDF/image
+storage, durable ingress replay, structured outbound sending, reply bridges, send-as
+audit, server drafts and provider-acceptance UI. Archived invalid MIME or unsupported
+attachments are quarantined as a whole rather than partially projected; oversized
+transport input is rejected before archival. Parsed text is limited to 256 KiB UTF-8
+to keep canonical D1 rows bounded. Operators can explicitly retry an authorized
+quarantine; cron never automatically retries poison content.
+
+Automatic 90/365-day deletion, delivery/bounce Queue consumers, proactive alert
+delivery and a dedicated Agent-deactivation workflow are not enabled by this change.
+Until those gates are implemented and approved, retention requires the runbook's
+manual legal-hold/expiry procedure, send state remains accepted/uncertain, operators
+must review the operations screen/logs, and offboarding must explicitly disable
+mailboxes and revoke grants/membership. This qualification does not silently change
+the accepted retention or lifecycle policy. No deployment, DNS/MX change, entitlement,
+catch-all scope or external-client threading result is inferred from local tests.
+
+See [pilot runbook](../runbooks/email-domain-pilot.md) for the required approval,
+migration, DNS and manual acceptance gates.

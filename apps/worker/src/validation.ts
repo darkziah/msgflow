@@ -22,15 +22,16 @@ export type JsonBodyDecodeResult<A> =
 export async function decodeJsonBody<A, I>(
 	request: Request,
 	schema: Schema.Schema<A, I, never>,
+	maxBytes = MAX_JSON_BODY_BYTES,
 ): Promise<JsonBodyDecodeResult<A>> {
 	const contentLength = request.headers.get("content-length");
-	if (contentLength && Number(contentLength) > MAX_JSON_BODY_BYTES) {
+	if (contentLength && Number(contentLength) > maxBytes) {
 		return { ok: false, error: "request body too large" };
 	}
 
 	let text: string;
 	try {
-		text = await readBodyAtMost(request, MAX_JSON_BODY_BYTES);
+		text = await readBodyAtMost(request, maxBytes);
 	} catch (error) {
 		if (error instanceof BodyTooLargeError) {
 			return { ok: false, error: "request body too large" };

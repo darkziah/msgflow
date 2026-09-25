@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Either, Schema } from "effect";
-import { eq } from "drizzle-orm";
+import { and, eq, lte } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { conversations, messagesSummary } from "@msgflow/db";
 import type {
@@ -23,9 +23,11 @@ import {
 } from "@msgflow/contracts";
 import type { Env } from "./env";
 import { decodeJsonBody } from "./validation";
+import { canReadConversation } from "./conversation-permissions";
 
 interface WebSocketAttachment {
 	agentId: string;
+	conversationId: string;
 }
 
 /**
@@ -79,7 +81,9 @@ export class ConversationDO extends DurableObject<Env> {
 		// Existing DO SQLite databases predate image attachments. The add is
 		// intentionally idempotent across constructor restarts.
 		try {
-			this.sql.exec("ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'");
+			this.sql.exec(
+				"ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+			);
 		} catch {
 			// Column already exists.
 		}
@@ -118,7 +122,10 @@ export class ConversationDO extends DurableObject<Env> {
 			return this.listComments();
 		}
 		if (request.method === "GET" && url.pathname === "/activities") {
-			const requestedLimit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
+			const requestedLimit = Number.parseInt(
+				url.searchParams.get("limit") ?? "50",
+				10,
+			);
 			const limit = Number.isFinite(requestedLimit)
 				? Math.min(Math.max(requestedLimit, 1), 100)
 				: 50;
@@ -131,13 +138,24 @@ export class ConversationDO extends DurableObject<Env> {
 		return new Response("not found", { status: 404 });
 	}
 
-	private handleUpgrade(request: Request): Response {
-		const agentId = request.headers.get("x-agent-id") ?? "anonymous";
+	private async handleUpgrade(request: Request): Promise<Response> {
+		const agentId = request.headers.get("x-agent-id");
+		const conversationId = request.headers.get("x-conversation-id");
+		if (
+			!agentId ||
+			!conversationId ||
+			!(await canReadConversation(this.env, agentId, conversationId))
+		) {
+			return new Response("forbidden", { status: 403 });
+		}
 		const pair = new WebSocketPair();
 		const { 0: client, 1: server } = pair;
 
 		this.ctx.acceptWebSocket(server, [agentId]);
-		server.serializeAttachment({ agentId } satisfies WebSocketAttachment);
+		server.serializeAttachment({
+			agentId,
+			conversationId,
+		} satisfies WebSocketAttachment);
 
 		this.upsertPresence(agentId, "viewing");
 		void this.broadcast({ type: "presence", agents: this.listPresence() });
@@ -146,7 +164,11 @@ export class ConversationDO extends DurableObject<Env> {
 	}
 
 	private async appendMessage(request: Request): Promise<Response> {
-		const decoded = await decodeJsonBody(request, TimelineMessageSchema);
+		const decoded = await decodeJsonBody(
+			request,
+			TimelineMessageSchema,
+			8 * 1024 * 1024,
+		);
 		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
 		const message = decoded.value as Message;
 
@@ -155,12 +177,18 @@ export class ConversationDO extends DurableObject<Env> {
 		if (message.providerMessageId || message.id) {
 			const existing = this.sql
 				.exec(
-					"SELECT id FROM messages WHERE id = ? OR provider_message_id = ?",
+					"SELECT * FROM messages WHERE id = ? OR (channel != 'email' AND provider_message_id = ?)",
 					message.id,
 					message.providerMessageId,
 				)
 				.toArray()[0];
 			if (existing) {
+				const stored = {
+					...this.rowToMessage(existing),
+					conversationId: message.conversationId,
+				};
+				await this.syncProjection(stored);
+				await this.broadcast({ type: "message:new", message: stored });
 				return new Response("duplicate", { status: 200 });
 			}
 		}
@@ -184,39 +212,44 @@ export class ConversationDO extends DurableObject<Env> {
 			message.createdAt,
 		);
 
-		// Summary sync (ADR 0004/0015): the DO is the single-threaded owner of the
-		// timeline, so it upserts the D1 summary projection here — one row per
-		// message for list/search plus the conversation's latest-seq/messageCount
-		// for per-agent unread.
-		await drizzle(this.env.DB)
-			.insert(messagesSummary)
-			.values({
-				id: message.id,
-				conversationId: message.conversationId,
-				seq,
-				direction: message.kind === "inbound" ? "inbound" : "outbound",
-				senderType: message.kind === "inbound" ? "contact" : "user",
-				senderId: message.senderId,
-				preview: message.text.slice(0, 200),
-				hasAttachments: message.attachments.length > 0,
-				sentAt: message.createdAt,
-				createdAt: message.createdAt,
-			})
-			.onConflictDoNothing()
-			.run();
-
-		await drizzle(this.env.DB)
-			.update(conversations)
-			.set({
-				lastMessagePreview: message.text.slice(0, 200),
-				lastMessageAt: message.createdAt,
-				messageCount: seq,
-			})
-			.where(eq(conversations.id, message.conversationId))
-			.run();
-
-		void this.broadcast({ type: "message:new", message });
+		await this.syncProjection(message);
+		await this.broadcast({ type: "message:new", message });
 		return new Response("ok", { status: 200 });
+	}
+
+	private async syncProjection(message: Message): Promise<void> {
+		const seq = message.seq ?? 0;
+		const db = drizzle(this.env.DB);
+		await db.batch([
+			db
+				.insert(messagesSummary)
+				.values({
+					id: message.id,
+					conversationId: message.conversationId,
+					seq,
+					direction: message.kind === "inbound" ? "inbound" : "outbound",
+					senderType: message.kind === "inbound" ? "contact" : "user",
+					senderId: message.senderId,
+					preview: message.text.slice(0, 200),
+					hasAttachments: message.attachments.length > 0,
+					sentAt: message.createdAt,
+					createdAt: message.createdAt,
+				})
+				.onConflictDoNothing(),
+			db
+				.update(conversations)
+				.set({
+					lastMessagePreview: message.text.slice(0, 200),
+					lastMessageAt: message.createdAt,
+					messageCount: seq,
+				})
+				.where(
+					and(
+						eq(conversations.id, message.conversationId),
+						lte(conversations.messageCount, seq),
+					),
+				),
+		]);
 	}
 
 	private async appendComment(request: Request): Promise<Response> {
@@ -298,7 +331,10 @@ export class ConversationDO extends DurableObject<Env> {
 	 * messages/comments go through their own append endpoints.
 	 */
 	private async broadcastEvent(request: Request): Promise<Response> {
-		const decoded = await decodeJsonBody(request, ConversationUpdatedEventSchema);
+		const decoded = await decodeJsonBody(
+			request,
+			ConversationUpdatedEventSchema,
+		);
 		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
 		const event = decoded.value as ConversationEvent;
 		await this.broadcast(event);
@@ -370,10 +406,42 @@ export class ConversationDO extends DurableObject<Env> {
 			}));
 	}
 
+	private async socketAuthorized(ws: WebSocket): Promise<boolean> {
+		try {
+			const identity = ws.deserializeAttachment() as
+				| WebSocketAttachment
+				| undefined;
+			if (
+				identity?.agentId &&
+				identity.conversationId &&
+				(await canReadConversation(
+					this.env,
+					identity.agentId,
+					identity.conversationId,
+				))
+			)
+				return true;
+			if (identity?.agentId)
+				this.sql.exec(
+					"DELETE FROM presence WHERE agent_id = ?",
+					identity.agentId,
+				);
+			ws.close(1008, "conversation access revoked");
+		} catch {
+			try {
+				ws.close(1011, "authorization unavailable");
+			} catch {
+				/* already closed */
+			}
+		}
+		return false;
+	}
+
 	private async broadcast(event: ConversationEvent): Promise<void> {
 		const payload = JSON.stringify(event);
 		for (const ws of this.ctx.getWebSockets()) {
 			try {
+				if (!(await this.socketAuthorized(ws))) continue;
 				ws.send(payload);
 			} catch {
 				// ignore a closed socket
@@ -386,6 +454,7 @@ export class ConversationDO extends DurableObject<Env> {
 		message: string | ArrayBuffer,
 	): Promise<void> {
 		if (typeof message !== "string") return;
+		if (!(await this.socketAuthorized(ws))) return;
 
 		const attachment = ws.deserializeAttachment() as
 			| WebSocketAttachment

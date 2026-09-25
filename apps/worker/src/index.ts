@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { Either, Schema } from "effect";
 import type { Context } from "hono";
-import PostalMime from "postal-mime";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type {
 	ApiResponse,
 	Attachment,
@@ -18,6 +18,13 @@ import type {
 	UserSummary,
 } from "@msgflow/contracts";
 import {
+	EmailDomainCreateRequestSchema,
+	EmailDomainStateUpdateRequestSchema,
+	OwnerSetupRequestSchema,
+	MailboxDelegateRequestSchema,
+	MailboxStateUpdateRequestSchema,
+	PrivateMailboxCreateRequestSchema,
+	SharedMailboxCreateRequestSchema,
 	ChannelConnectRequestSchema,
 	ConversationTagRequestSchema,
 	ConversationUpdateRequestSchema,
@@ -50,14 +57,11 @@ import {
 	user,
 	workspaceMembers,
 } from "@msgflow/db";
-import {
-	normalizeEmailMessage,
-	normalizeFacebookWebhook,
-	type ParsedEmail,
-} from "@msgflow/channel";
+import { normalizeFacebookWebhook } from "@msgflow/channel";
 import { ConversationDO } from "./conversation-do";
 import type { Env } from "./env";
 import { routeInbound } from "./ingest";
+
 import {
 	ManageError,
 	addInboxMember,
@@ -97,6 +101,18 @@ import {
 	listWorkspacesForUser,
 	updateSidebarPreferences,
 } from "./workspace-api";
+import {
+	addPrivateMailboxDelegate,
+	createEmailDomain,
+	createPrivateMailbox,
+	createSharedMailbox,
+	listEmailDomains,
+	listMailboxes,
+	removePrivateMailboxDelegate,
+	type MailboxStateUpdateInput,
+	updateEmailDomainState,
+	updateMailboxState,
+} from "./mailboxes";
 import { getOrCreateWorkspace } from "./workspace";
 import { scheduleOutbound, sendOutbound } from "./outbound";
 import { getConversation, listConversations } from "./queries";
@@ -111,10 +127,27 @@ import {
 	validateAttachments,
 } from "./attachments";
 import { decodeJsonBody } from "./validation";
+import { OwnerSetupError, setupInitialOwner } from "./setup";
+import {
+	canReadConversation,
+	filterReadableNotifications,
+} from "./conversation-permissions";
+import {
+	readEmailDraft,
+	saveEmailDraft,
+	deleteEmailDraft,
+} from "./email-drafts";
+import { handleInboundEmail } from "./email-ingress";
+import { emailApi, validatePrivateEmailAttachments } from "./email-api";
+import { onboardingApi } from "./onboarding-api";
 
 export { ConversationDO };
 
 const app = new Hono<{ Bindings: Env }>();
+app.use("/api/*", async (c, next) => {
+	c.header("Cache-Control", "private, no-store");
+	await next();
+});
 
 app.get("/", (c) => c.text("MsgFlow API"));
 
@@ -126,6 +159,60 @@ app.get("/health", (c) =>
 app.on(["GET", "POST"], "/api/auth/*", (c) => {
 	return createAuth(c.env).handler(c.req.raw);
 });
+app.route("/api", onboardingApi);
+
+// The sole first-use account-creation path. Better Auth's generic public sign-up
+// remains disabled; this route wins a durable D1 claim before using its server API.
+app.post("/api/setup/owner", async (c) => {
+	const decoded = await decodeJsonBody(c.req.raw, OwnerSetupRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		const setup = await setupInitialOwner(c.env, decoded.value);
+		return c.json({ success: true, setup }, 201);
+	} catch (err) {
+		if (err instanceof OwnerSetupError) {
+			return c.json({ success: false, error: err.message }, err.status);
+		}
+		console.error("initial owner setup error:", err);
+		return c.json({ success: false, error: "internal error" }, 500);
+	}
+});
+
+app.on(["GET", "PUT", "DELETE"], "/api/conversations/:id/draft", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const id = c.req.param("id");
+		if (c.req.method === "GET")
+			return c.json({
+				draft: await readEmailDraft(c.env, workspaceId, id, session.user.id),
+			});
+		if (c.req.method === "DELETE") {
+			const expected = c.req.query("clientMessageId");
+			if (!expected) return c.json({ success: false, error: "submitted draft identifier required" }, 400);
+			await deleteEmailDraft(c.env, workspaceId, id, session.user.id, expected);
+			return c.json({ success: true });
+		}
+		const decoded = await decodeJsonBody(c.req.raw, SendMessageRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		return c.json({
+			draft: await saveEmailDraft(
+				c.env,
+				workspaceId,
+				id,
+				session.user.id,
+				decoded.value,
+			),
+		});
+	} catch (error) {
+		return manageError(c, error);
+	}
+});
 
 // Send a reply (or schedule one): authenticated, channel dispatch in outbound.ts.
 app.post("/api/attachments", async (c) => {
@@ -136,16 +223,29 @@ app.post("/api/attachments", async (c) => {
 		await requireDefaultWorkspaceAccess(drizzle(c.env.DB), session.user.id);
 		const form = await c.req.formData();
 		const files = form.getAll("files");
-		if (files.length === 0 || files.length > MAX_ATTACHMENTS_PER_MESSAGE || files.some((file) => !(file instanceof File))) {
-			return c.json({ success: false, error: `provide 1-${MAX_ATTACHMENTS_PER_MESSAGE} image files` }, 400);
+		if (
+			files.length === 0 ||
+			files.length > MAX_ATTACHMENTS_PER_MESSAGE ||
+			files.some((file) => !(file instanceof File))
+		) {
+			return c.json(
+				{
+					success: false,
+					error: `provide 1-${MAX_ATTACHMENTS_PER_MESSAGE} image files`,
+				},
+				400,
+			);
 		}
-		const attachments = await Promise.all(files.map((file) => {
-			if (!(file instanceof File)) throw new AttachmentError("invalid file");
-			return storeImageBlob(c.env, file, file.name);
-		}));
+		const attachments = await Promise.all(
+			files.map((file) => {
+				if (!(file instanceof File)) throw new AttachmentError("invalid file");
+				return storeImageBlob(c.env, file, file.name);
+			}),
+		);
 		return c.json({ attachments }, 201);
 	} catch (err) {
-		if (err instanceof AttachmentError) return c.json({ success: false, error: err.message }, 400);
+		if (err instanceof AttachmentError)
+			return c.json({ success: false, error: err.message }, 400);
 		return manageError(c, err);
 	}
 });
@@ -159,17 +259,44 @@ app.post("/api/conversations/:id/messages", async (c) => {
 	}
 
 	const decoded = await decodeJsonBody(c.req.raw, SendMessageRequestSchema);
-	if (!decoded.ok)
-		return c.json({ success: false, error: decoded.error }, 400);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
 	const body = decoded.value;
-	let attachments: Attachment[];
-	try { attachments = validateAttachments(c.env, body.attachments ?? []); }
-	catch (err) { return c.json({ success: false, error: err instanceof Error ? err.message : "invalid attachments" }, 400); }
-	if (!body.text.trim() && attachments.length === 0) return c.json({ success: false, error: "text or an image is required" }, 400);
-	try { await requireDefaultWorkspaceAccess(drizzle(c.env.DB), session.user.id); }
-	catch (err) { return manageError(c, err); }
-
+	let attachments: Attachment[] = [];
+	let isEmail = false;
 	const conversationId = c.req.param("id");
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(c.env.DB),
+			session.user.id,
+		);
+		const conversation = await getConversation(
+			c.env,
+			session.user.id,
+			conversationId,
+			workspaceId,
+		);
+		if (!conversation) {
+			return c.json({ success: false, error: "not found" }, 404);
+		}
+		attachments =
+			conversation.channel === "email"
+				? await validatePrivateEmailAttachments(
+						c.env,
+						workspaceId,
+						conversationId,
+						session.user.id,
+						body.attachments ?? [],
+					)
+				: validateAttachments(c.env, body.attachments ?? []);
+		isEmail = conversation.channel === "email";
+	} catch (err) {
+		return manageError(c, err);
+	}
+	if (!body.text.trim() && attachments.length === 0)
+		return c.json(
+			{ success: false, error: "text or an attachment is required" },
+			400,
+		);
 	const text = body.text.trim();
 
 	if (body.sendAt) {
@@ -187,6 +314,8 @@ app.post("/api/conversations/:id/messages", async (c) => {
 				senderId: session.user.id,
 				clientMessageId: body.clientMessageId,
 				sendAt: sendAt.toISOString(),
+				mailboxId: body.mailboxId,
+				confirmPrivateIdentity: body.confirmPrivateIdentity,
 			});
 			return c.json({
 				success: true,
@@ -203,13 +332,17 @@ app.post("/api/conversations/:id/messages", async (c) => {
 		attachments,
 		senderId: session.user.id,
 		clientMessageId: body.clientMessageId,
-	});
+		mailboxId: body.mailboxId,
+		confirmPrivateIdentity: body.confirmPrivateIdentity,
+	}, { retryDefinitiveFailure: true });
+
 	if (!result.ok) {
 		return c.json({ success: false, error: result.error }, 502);
 	}
 	return c.json({
 		success: true,
 		sent: true,
+		...(isEmail ? { deliveryState: "accepted" as const } : {}),
 		message: result.message,
 	} satisfies SendMessageResult);
 });
@@ -238,6 +371,7 @@ app.get("/api/conversations", async (c) => {
 						: "open",
 				inboxId,
 				q: c.req.query("q") ?? undefined,
+				mailboxId: c.req.query("mailboxId") ?? undefined,
 				assigneeId: c.req.query("assigneeId") ?? undefined,
 				unassigned: c.req.query("unassigned") === "true" || undefined,
 				snoozed: c.req.query("snoozed") === "true" || undefined,
@@ -302,7 +436,8 @@ app.get("/api/conversations/:id/messages", async (c) => {
 			conversationId,
 			workspaceId,
 		);
-		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+		if (!conversation)
+			return c.json({ success: false, error: "not found" }, 404);
 		const stub = c.env.CONVERSATION_DO.get(
 			c.env.CONVERSATION_DO.idFromName(conversationId),
 		);
@@ -321,7 +456,11 @@ app.get("/api/conversations/:id/messages", async (c) => {
 				activities: TimelineResponse["activities"];
 			}>,
 		]);
-		return c.json({ messages, comments, activities } satisfies TimelineResponse);
+		return c.json({
+			messages,
+			comments,
+			activities,
+		} satisfies TimelineResponse);
 	} catch (err) {
 		return manageError(c, err);
 	}
@@ -335,7 +474,10 @@ app.post("/api/conversations/:id/comments", async (c) => {
 
 	try {
 		const db = drizzle(c.env.DB);
-		const { workspaceId } = await requireDefaultWorkspaceAccess(db, session.user.id);
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			db,
+			session.user.id,
+		);
 		const conversationId = c.req.param("id");
 		const conversation = await getConversation(
 			c.env,
@@ -343,7 +485,8 @@ app.post("/api/conversations/:id/comments", async (c) => {
 			conversationId,
 			workspaceId,
 		);
-		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+		if (!conversation)
+			return c.json({ success: false, error: "not found" }, 404);
 
 		const decoded = await decodeJsonBody(c.req.raw, CreateCommentRequestSchema);
 		if (!decoded.ok)
@@ -357,10 +500,36 @@ app.post("/api/conversations/:id/comments", async (c) => {
 			const members = await db
 				.select({ userId: workspaceMembers.userId })
 				.from(workspaceMembers)
-				.where(and(eq(workspaceMembers.workspaceId, workspaceId), inArray(workspaceMembers.userId, mentions)))
+				.where(
+					and(
+						eq(workspaceMembers.workspaceId, workspaceId),
+						inArray(workspaceMembers.userId, mentions),
+					),
+				)
 				.all();
 			if (members.length !== mentions.length) {
-				return c.json({ success: false, error: "mentions must be workspace teammates" }, 400);
+				return c.json(
+					{ success: false, error: "mentions must be workspace teammates" },
+					400,
+				);
+			}
+			for (const recipientId of mentions) {
+				if (
+					!(await canReadConversation(
+						c.env,
+						recipientId,
+						conversationId,
+						workspaceId,
+					))
+				) {
+					return c.json(
+						{
+							success: false,
+							error: "mention recipients must have conversation access",
+						},
+						403,
+					);
+				}
 			}
 		}
 
@@ -413,14 +582,37 @@ app.get("/api/comment-notifications", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const db = drizzle(c.env.DB);
-		await requireDefaultWorkspaceAccess(db, session.user.id);
-		const notifications = await db.select().from(commentNotifications)
-			.where(eq(commentNotifications.userId, session.user.id))
-			.orderBy(desc(commentNotifications.createdAt)).limit(50).all();
-		const unread = await db.select({ id: commentNotifications.id }).from(commentNotifications)
-			.where(and(eq(commentNotifications.userId, session.user.id), isNull(commentNotifications.readAt))).all();
-		return c.json({ notifications, unreadCount: unread.length } satisfies CommentNotificationsResponse);
-	} catch (err) { return manageError(c, err); }
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			db,
+			session.user.id,
+		);
+		const rows = await db
+			.select()
+			.from(commentNotifications)
+			.where(
+				and(
+					eq(commentNotifications.userId, session.user.id),
+					eq(commentNotifications.workspaceId, workspaceId),
+				),
+			)
+			.orderBy(desc(commentNotifications.createdAt))
+			.limit(200)
+			.all();
+		const notifications = (
+			await filterReadableNotifications(
+				c.env,
+				session.user.id,
+				workspaceId,
+				rows,
+			)
+		).slice(0, 50);
+		return c.json({
+			notifications,
+			unreadCount: notifications.filter((row) => !row.readAt).length,
+		} satisfies CommentNotificationsResponse);
+	} catch (err) {
+		return manageError(c, err);
+	}
 });
 
 app.post("/api/comment-notifications/:id/read", async (c) => {
@@ -428,11 +620,47 @@ app.post("/api/comment-notifications/:id/read", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const db = drizzle(c.env.DB);
-		await requireDefaultWorkspaceAccess(db, session.user.id);
-		await db.update(commentNotifications).set({ readAt: new Date().toISOString() })
-			.where(and(eq(commentNotifications.id, c.req.param("id")), eq(commentNotifications.userId, session.user.id))).run();
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			db,
+			session.user.id,
+		);
+		const notification = await db
+			.select()
+			.from(commentNotifications)
+			.where(
+				and(
+					eq(commentNotifications.id, c.req.param("id")),
+					eq(commentNotifications.userId, session.user.id),
+					eq(commentNotifications.workspaceId, workspaceId),
+				),
+			)
+			.get();
+		if (
+			!notification ||
+			!(await canReadConversation(
+				c.env,
+				session.user.id,
+				notification.conversationId,
+				workspaceId,
+			))
+		) {
+			return c.json({ success: false, error: "not found" }, 404);
+		}
+		await db
+			.update(commentNotifications)
+			.set({ readAt: new Date().toISOString() })
+			.where(
+				and(
+					eq(commentNotifications.id, notification.id),
+					eq(commentNotifications.userId, session.user.id),
+					eq(commentNotifications.workspaceId, workspaceId),
+				),
+			)
+			.run();
 		return c.json({ success: true });
-	} catch (err) { return manageError(c, err); }
+	} catch (err) {
+		return manageError(c, err);
+	}
 });
 
 // POST /api/conversations/:id/read — advance the agent's read cursor (ADR 0015).
@@ -452,7 +680,8 @@ app.post("/api/conversations/:id/read", async (c) => {
 			conversationId,
 			workspaceId,
 		);
-		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+		if (!conversation)
+			return c.json({ success: false, error: "not found" }, 404);
 
 		const decoded = await decodeJsonBody(c.req.raw, MarkReadRequestSchema);
 		if (!decoded.ok)
@@ -483,7 +712,10 @@ app.get("/api/users", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const db = drizzle(c.env.DB);
-		const { workspaceId } = await requireDefaultWorkspaceAccess(db, session.user.id);
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			db,
+			session.user.id,
+		);
 		const users = await db
 			.select({ id: user.id, name: user.name, email: user.email })
 			.from(workspaceMembers)
@@ -509,7 +741,12 @@ app.patch("/api/conversations/:id", async (c) => {
 			session.user.id,
 		);
 		const id = c.req.param("id");
-		const current = await getConversation(c.env, session.user.id, id, workspaceId);
+		const current = await getConversation(
+			c.env,
+			session.user.id,
+			id,
+			workspaceId,
+		);
 		if (!current) {
 			return c.json({ success: false, error: "not found" }, 404);
 		}
@@ -544,7 +781,12 @@ app.patch("/api/conversations/:id", async (c) => {
 			const target = await drizzle(c.env.DB)
 				.select({ id: inboxes.id })
 				.from(inboxes)
-				.where(and(eq(inboxes.id, body.inboxId), eq(inboxes.workspaceId, workspaceId)))
+				.where(
+					and(
+						eq(inboxes.id, body.inboxId),
+						eq(inboxes.workspaceId, workspaceId),
+					),
+				)
 				.get();
 			if (!target) {
 				return c.json({ success: false, error: "inbox not found" }, 400);
@@ -569,7 +811,10 @@ app.patch("/api/conversations/:id", async (c) => {
 		if (patch.status !== undefined && patch.status !== current.status) {
 			changes.status = { from: current.status, to: patch.status };
 		}
-		if (patch.assigneeId !== undefined && patch.assigneeId !== current.assigneeId) {
+		if (
+			patch.assigneeId !== undefined &&
+			patch.assigneeId !== current.assigneeId
+		) {
 			changes.assigneeId = { from: current.assigneeId, to: patch.assigneeId };
 		}
 		if (
@@ -588,7 +833,12 @@ app.patch("/api/conversations/:id", async (c) => {
 		await drizzle(c.env.DB)
 			.update(conversations)
 			.set(set)
-			.where(and(eq(conversations.id, id), eq(conversations.workspaceId, workspaceId)))
+			.where(
+				and(
+					eq(conversations.id, id),
+					eq(conversations.workspaceId, workspaceId),
+				),
+			)
 			.run();
 
 		// Best-effort relay to connected agents; the D1 write already succeeded.
@@ -898,6 +1148,206 @@ app.get("/api/workspaces/:workspaceId/sidebar", async (c) => {
 	}
 });
 
+// ---------------------------------------------------------------------------
+// EMAIL DOMAINS AND MAILBOXES: workspace-scoped configuration. Authorization
+// is enforced by the service; routes only derive actor/workspace from session.
+// ---------------------------------------------------------------------------
+app.get("/api/workspaces/:workspaceId/email-domains", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		return c.json({
+			emailDomains: await listEmailDomains(
+				c.env,
+				c.req.param("workspaceId"),
+				session.user.id,
+			),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.post("/api/workspaces/:workspaceId/email-domains", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			EmailDomainCreateRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const emailDomain = await createEmailDomain(
+			c.env,
+			c.req.param("workspaceId"),
+			decoded.value,
+			session.user.id,
+		);
+		return c.json({ emailDomain }, 201);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.patch(
+	"/api/workspaces/:workspaceId/email-domains/:domainId/state",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			const decoded = await decodeJsonBody(
+				c.req.raw,
+				EmailDomainStateUpdateRequestSchema,
+			);
+			if (!decoded.ok)
+				return c.json({ success: false, error: decoded.error }, 400);
+			const emailDomain = await updateEmailDomainState(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("domainId"),
+				decoded.value,
+				session.user.id,
+			);
+			return c.json({ emailDomain });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+
+app.get("/api/workspaces/:workspaceId/mailboxes", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		return c.json({
+			mailboxes: await listMailboxes(
+				c.env,
+				c.req.param("workspaceId"),
+				session.user.id,
+			),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.post("/api/workspaces/:workspaceId/mailboxes/private", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			PrivateMailboxCreateRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const mailbox = await createPrivateMailbox(
+			c.env,
+			c.req.param("workspaceId"),
+			decoded.value,
+			session.user.id,
+		);
+		return c.json({ mailbox }, 201);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.post("/api/workspaces/:workspaceId/mailboxes/shared", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			SharedMailboxCreateRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const mailbox = await createSharedMailbox(
+			c.env,
+			c.req.param("workspaceId"),
+			decoded.value,
+			session.user.id,
+		);
+		return c.json({ mailbox }, 201);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.patch(
+	"/api/workspaces/:workspaceId/mailboxes/:mailboxId/state",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			const decoded = await decodeJsonBody(
+				c.req.raw,
+				MailboxStateUpdateRequestSchema,
+			);
+			if (!decoded.ok)
+				return c.json({ success: false, error: decoded.error }, 400);
+			const mailbox = await updateMailboxState(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("mailboxId"),
+				decoded.value as MailboxStateUpdateInput,
+				session.user.id,
+			);
+			return c.json({ mailbox });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+
+app.post(
+	"/api/workspaces/:workspaceId/mailboxes/:mailboxId/delegates",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			const decoded = await decodeJsonBody(
+				c.req.raw,
+				MailboxDelegateRequestSchema,
+			);
+			if (!decoded.ok)
+				return c.json({ success: false, error: decoded.error }, 400);
+			await addPrivateMailboxDelegate(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("mailboxId"),
+				decoded.value,
+				session.user.id,
+			);
+			return c.json({ success: true }, 201);
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+
+app.delete(
+	"/api/workspaces/:workspaceId/mailboxes/:mailboxId/delegates/:userId",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			await removePrivateMailboxDelegate(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("mailboxId"),
+				c.req.param("userId"),
+				session.user.id,
+			);
+			return c.json({ success: true });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+
 // GET /api/workspaces/:workspaceId/inboxes
 app.get("/api/workspaces/:workspaceId/inboxes", async (c) => {
 	const session = await getSession(c);
@@ -981,7 +1431,10 @@ app.post(
 		const session = await getSession(c);
 		if (!session) return unauthorized(c);
 		try {
-			const decoded = await decodeJsonBody(c.req.raw, InboxChannelRequestSchema);
+			const decoded = await decodeJsonBody(
+				c.req.raw,
+				InboxChannelRequestSchema,
+			);
 			if (!decoded.ok)
 				return c.json({ success: false, error: decoded.error }, 400);
 			await linkChannelToInbox(
@@ -1027,7 +1480,10 @@ app.post(
 		const session = await getSession(c);
 		if (!session) return unauthorized(c);
 		try {
-			const decoded = await decodeJsonBody(c.req.raw, SetDefaultInboxRequestSchema);
+			const decoded = await decodeJsonBody(
+				c.req.raw,
+				SetDefaultInboxRequestSchema,
+			);
 			if (!decoded.ok)
 				return c.json({ success: false, error: decoded.error }, 400);
 			await setDefaultInbox(
@@ -1156,7 +1612,9 @@ app.get("/api/tags", async (c) => {
 			drizzle(c.env.DB),
 			session.user.id,
 		);
-		return c.json({ tags: await listTags(c.env, workspaceId, session.user.id) });
+		return c.json({
+			tags: await listTags(c.env, workspaceId, session.user.id),
+		});
 	} catch (err) {
 		return manageError(c, err);
 	}
@@ -1242,9 +1700,13 @@ app.post("/api/conversations/:id/tags", async (c) => {
 			id,
 			workspaceId,
 		);
-		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+		if (!conversation)
+			return c.json({ success: false, error: "not found" }, 404);
 
-		const decoded = await decodeJsonBody(c.req.raw, ConversationTagRequestSchema);
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			ConversationTagRequestSchema,
+		);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
 		const body = decoded.value;
@@ -1309,7 +1771,8 @@ app.delete("/api/conversations/:id/tags/:tagId", async (c) => {
 			id,
 			workspaceId,
 		);
-		if (!conversation) return c.json({ success: false, error: "not found" }, 404);
+		if (!conversation)
+			return c.json({ success: false, error: "not found" }, 404);
 
 		const tagId = c.req.param("tagId");
 		const tag = await drizzle(c.env.DB)
@@ -1376,15 +1839,12 @@ app.post("/api/rules", async (c) => {
 			return c.json({ success: false, error: decoded.error }, 400);
 		const body = {
 			...decoded.value,
-			conditions: decoded.value.conditions.map((condition) => ({ ...condition })),
+			conditions: decoded.value.conditions.map((condition) => ({
+				...condition,
+			})),
 			actions: decoded.value.actions.map((action) => ({ ...action })),
 		};
-		const rule = await createRule(
-			c.env,
-			workspaceId,
-			body,
-			session.user.id,
-		);
+		const rule = await createRule(c.env, workspaceId, body, session.user.id);
 		return c.json({ rule }, 201);
 	} catch (err) {
 		return manageError(c, err);
@@ -1401,7 +1861,9 @@ app.patch("/api/rules/:id", async (c) => {
 			return c.json({ success: false, error: decoded.error }, 400);
 		const body = {
 			...decoded.value,
-			conditions: decoded.value.conditions.map((condition) => ({ ...condition })),
+			conditions: decoded.value.conditions.map((condition) => ({
+				...condition,
+			})),
 			actions: decoded.value.actions.map((action) => ({ ...action })),
 		};
 		const rule = await updateRule(
@@ -1442,7 +1904,11 @@ app.get("/api/canned-replies", async (c) => {
 			session.user.id,
 		);
 		return c.json({
-			cannedReplies: await listCannedReplies(c.env, workspaceId, session.user.id),
+			cannedReplies: await listCannedReplies(
+				c.env,
+				workspaceId,
+				session.user.id,
+			),
 		});
 	} catch (err) {
 		return manageError(c, err);
@@ -1457,7 +1923,10 @@ app.post("/api/canned-replies", async (c) => {
 			drizzle(c.env.DB),
 			session.user.id,
 		);
-		const decoded = await decodeJsonBody(c.req.raw, CannedReplyWriteRequestSchema);
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			CannedReplyWriteRequestSchema,
+		);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
 		const reply = await createCannedReply(
@@ -1480,7 +1949,10 @@ app.patch("/api/canned-replies/:id", async (c) => {
 			drizzle(c.env.DB),
 			session.user.id,
 		);
-		const decoded = await decodeJsonBody(c.req.raw, CannedReplyWriteRequestSchema);
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			CannedReplyWriteRequestSchema,
+		);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
 		const reply = await updateCannedReply(
@@ -1545,7 +2017,9 @@ app.post("/webhooks/messenger", async (c) => {
 	} catch {
 		return c.text("invalid json", 400);
 	}
-	const decoded = Schema.decodeUnknownEither(MessengerWebhookEnvelopeSchema)(raw);
+	const decoded = Schema.decodeUnknownEither(MessengerWebhookEnvelopeSchema)(
+		raw,
+	);
 	if (Either.isLeft(decoded)) return c.text("invalid json", 400);
 
 	const inbound = normalizeFacebookWebhook(decoded.right);
@@ -1574,12 +2048,7 @@ export default {
 		env: Env,
 		_ctx: ExecutionContext,
 	): Promise<void> {
-		const parsed = await parseEmailMessage(message, env);
-		if (!parsed) return;
-		const inbound = normalizeEmailMessage(parsed);
-		if (inbound) {
-			await routeInbound(env, inbound);
-		}
+		await handleInboundEmail(env, message);
 	},
 
 	// Send-later: fires every minute, delivers due scheduled_messages rows.
@@ -1607,12 +2076,28 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		return new Response("unauthorized", { status: 401 });
 	}
 	const agentId = session.user.id;
+	// Authorize D1 workspace/mailbox ownership before resolving the globally
+	// derivable Durable Object name.
+	try {
+		const { workspaceId } = await requireDefaultWorkspaceAccess(
+			drizzle(env.DB),
+			agentId,
+		);
+		if (!(await getConversation(env, agentId, conversationId, workspaceId))) {
+			return new Response("not found", { status: 404 });
+		}
+	} catch (error) {
+		if (error instanceof ManageError)
+			return new Response("forbidden", { status: 403 });
+		throw error;
+	}
 
 	const id = env.CONVERSATION_DO.idFromName(conversationId);
 	const stub = env.CONVERSATION_DO.get(id);
 
 	const headers = new Headers(request.headers);
 	headers.set("x-agent-id", agentId);
+	headers.set("x-conversation-id", conversationId);
 	const upgraded = new Request(request.url, { method: "GET", headers });
 	return stub.fetch(upgraded);
 }
@@ -1665,45 +2150,6 @@ async function broadcastUpdate(
 		.catch(() => {});
 }
 
-async function parseEmailMessage(
-	message: ForwardableEmailMessage,
-	env: Env,
-): Promise<ParsedEmail | null> {
-	const raw = await new Response(message.raw).text();
-	const email = await new PostalMime().parse(raw);
-
-	let receivedAt = new Date().toISOString();
-	if (email.date) {
-		const parsed = new Date(email.date);
-		if (!Number.isNaN(parsed.getTime())) receivedAt = parsed.toISOString();
-	}
-
-	const attachments = [];
-	for (const attachment of email.attachments ?? []) {
-		const mimeType = attachment.mimeType ?? "";
-		const content = attachment.content;
-		if (!content || !["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType.toLowerCase())) continue;
-		try {
-			attachments.push(await storeImageBlob(env, new Blob([content], { type: mimeType }), attachment.filename));
-		} catch {
-			// Non-image, too-large, or malformed MIME content is never persisted.
-		}
-	}
-
-	return {
-		from: email.from?.address ?? "",
-		to: message.to,
-		subject: email.subject ?? "",
-		messageId: email.messageId ?? null,
-		inReplyTo: email.inReplyTo ?? null,
-		references: email.references
-			? email.references.split(/\s+/).filter(Boolean)
-			: null,
-		text: email.text ?? "",
-		attachments,
-		mailbox: message.to,
-		receivedAt,
-	};
-}
+app.route("/api", emailApi);
 
 export { app };

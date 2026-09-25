@@ -34,23 +34,31 @@ export interface TestCtx {
 	activityRequests: unknown[];
 }
 
-export async function createTestDb(): Promise<TestCtx> {
+export async function createTestDb(
+	options: { script?: string } = {},
+): Promise<TestCtx> {
 	// Miniflare v5 validates the new workers[] shape; the exported v4→v5
 	// converter keeps the classic script/modules/d1Databases form readable.
 	const mf = new Miniflare(
 		convertV4MiniflareOptions({
 			modules: true,
-			script: "export default { fetch() { return new Response('ok'); } }",
+			script:
+				options.script ??
+				"export default { fetch() { return new Response('ok'); } }",
+			durableObjects: options.script
+				? { CONVERSATION_DO: { className: "ConversationDO", useSQLite: true } }
+				: undefined,
 			d1Databases: {
 				DB: `msgflow-test-${Date.now()}-${Math.random()}`,
 			},
-			r2Buckets: ["ATTACHMENTS"],
+			r2Buckets: ["ATTACHMENTS", "EMAIL_ARCHIVE"],
 			compatibilityDate: "2025-01-01",
 		}),
 	);
 	await mf.ready;
 	const d1 = await mf.getD1Database("DB");
 	const attachments = await mf.getR2Bucket("ATTACHMENTS");
+	const emailArchive = await mf.getR2Bucket("EMAIL_ARCHIVE");
 	await applyMigrations(d1);
 	const db = drizzle(d1 as unknown as D1Database);
 	const activityRequests: unknown[] = [];
@@ -70,7 +78,10 @@ export async function createTestDb(): Promise<TestCtx> {
 			DB: d1 as unknown as Env["DB"],
 			CONVERSATION_DO: conversationDo,
 			ATTACHMENTS: attachments as unknown as Env["ATTACHMENTS"],
+			EMAIL_ARCHIVE: emailArchive as unknown as Env["EMAIL_ARCHIVE"],
 			ATTACHMENT_PUBLIC_BASE_URL: "https://attachments.test",
+			BETTER_AUTH_SECRET: "test-better-auth-secret-that-is-long-enough",
+			BETTER_AUTH_URL: "https://msgflow.test",
 		} as Env,
 		db,
 		mf,

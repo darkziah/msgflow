@@ -1,6 +1,3 @@
-import { Either, Schema } from "effect";
-import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
 import type {
 	SavedFilterCreateRequest,
 	SavedFilterFilters,
@@ -21,8 +18,8 @@ import {
 } from "@msgflow/contracts";
 import {
 	channels,
-	conversationTags,
 	conversations,
+	conversationTags,
 	inboxChannels,
 	inboxes,
 	savedFilters,
@@ -31,15 +28,22 @@ import {
 	userSidebarPreferences,
 	workspaces,
 } from "@msgflow/db";
-import type { Env } from "./env";
+import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+import { Either, Schema } from "effect";
 import {
-	requireWorkspaceAccess,
-	listUserWorkspaces,
-	userBelongsToWorkspace,
 	getWorkspaceAccess,
+	listUserWorkspaces,
+	requireWorkspaceAccess,
+	userBelongsToWorkspace,
 } from "./access";
-import { getOrCreateWorkspace } from "./workspace";
+import {
+	conversationReadPredicate,
+	mailboxReadPredicate,
+} from "./email-transport";
+import type { Env } from "./env";
 import { ManageError } from "./errors";
+import { getOrCreateWorkspace } from "./workspace";
 
 /**
  * Workspace-scoped inbox-routing surface: the left sidebar (Front-style),
@@ -90,10 +94,16 @@ export async function getSidebar(
 		lte(conversations.snoozedUntil, now),
 	);
 
+	const privacy = conversationReadPredicate(userId);
 	const allInboxes = await db
 		.select()
 		.from(inboxes)
-		.where(eq(inboxes.workspaceId, workspaceId))
+		.where(
+			and(
+				eq(inboxes.workspaceId, workspaceId),
+				sql`NOT EXISTS (SELECT 1 FROM inbox_channels ic JOIN channels c ON c.id = ic.channel_id JOIN mailboxes ON mailboxes.canonical_address = c.external_id AND mailboxes.workspace_id = ${inboxes.workspaceId} WHERE ic.inbox_id = ${inboxes.id} AND c.type = 'email' AND NOT (${mailboxReadPredicate(userId)}))`,
+			),
+		)
 		.orderBy(asc(inboxes.sortOrder), asc(inboxes.name))
 		.all();
 	const allInboxIds = allInboxes.map((row) => row.id);
@@ -134,6 +144,7 @@ export async function getSidebar(
 		.where(
 			and(
 				eq(conversations.assigneeId, userId),
+				privacy,
 				eq(conversations.status, "open"),
 				inArray(conversations.inboxId, allInboxIds),
 			),
@@ -171,6 +182,7 @@ export async function getSidebar(
 			.from(conversations)
 			.where(
 				and(
+					privacy,
 					inArray(conversations.inboxId, [...countInboxIds]),
 					eq(conversations.status, "open"),
 					visibleOutsideSnoozedQueue,
@@ -179,27 +191,32 @@ export async function getSidebar(
 			.groupBy(conversations.inboxId)
 			.all(),
 		countWhere(db, [
+			privacy,
 			inArray(conversations.inboxId, [...countInboxIds]),
 			visibleOutsideSnoozedQueue,
 		]),
 		countWhere(db, [
+			privacy,
 			inArray(conversations.inboxId, [...countInboxIds]),
 			eq(conversations.status, "open"),
 			eq(conversations.assigneeId, userId),
 			visibleOutsideSnoozedQueue,
 		]),
 		countWhere(db, [
+			privacy,
 			inArray(conversations.inboxId, [...visibleInboxIds]),
 			eq(conversations.status, "open"),
 			isNull(conversations.assigneeId),
 			visibleOutsideSnoozedQueue,
 		]),
 		countWhere(db, [
+			privacy,
 			inArray(conversations.inboxId, [...countInboxIds]),
 			eq(conversations.status, "open"),
 			gt(conversations.snoozedUntil, now),
 		]),
 		countWhere(db, [
+			privacy,
 			inArray(conversations.inboxId, [...countInboxIds]),
 			eq(conversations.status, "archived"),
 		]),
@@ -215,6 +232,7 @@ export async function getSidebar(
 			)
 			.where(
 				and(
+					privacy,
 					inArray(conversations.inboxId, [...countInboxIds]),
 					eq(conversations.status, "open"),
 					visibleOutsideSnoozedQueue,

@@ -10,8 +10,13 @@ export interface Attachment {
 	id: string;
 	/** Immutable R2 object key. */
 	key: string;
-	/** MIME type; attachments are currently image-only. */
-	type: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+	/** Messenger images or private email images/PDFs. */
+	type:
+		| "image/jpeg"
+		| "image/png"
+		| "image/gif"
+		| "image/webp"
+		| "application/pdf";
 	url: string;
 	name: string;
 	size: number;
@@ -109,6 +114,8 @@ export interface ApiResponse {
 
 // POST /api/conversations/:id/messages
 export interface SendMessageRequest {
+	/** Server draft CAS revision; omitted means a new draft. */
+	draftRevision?: number;
 	text: string;
 	/** Uploaded image metadata returned by POST /api/attachments. */
 	attachments?: Attachment[];
@@ -118,6 +125,9 @@ export interface SendMessageRequest {
 	sendAt?: string;
 	/** Client-generated idempotency key; the DO dedups on it. */
 	clientMessageId?: string;
+	/** Authorized email Reply Identity, defaulting to the receiving mailbox. */
+	mailboxId?: string;
+	confirmPrivateIdentity?: boolean;
 }
 
 export type SendMessageResult =
