@@ -10,8 +10,9 @@ function Login() {
 	const search = new URLSearchParams(window.location.search);
 	const invitation = search.get("invite");
 	const resetToken = search.get("token");
+	const next = search.get("next");
 	const [identifier, setIdentifier] = useState("");
-	const [username, setUsername] = useState("");
+
 	const [password, setPassword] = useState("");
 	const [message, setMessage] = useState<string | null>(
 		search.has("error")
@@ -64,6 +65,10 @@ function Login() {
 			if (result.error) throw new Error(result.error.message);
 			if (invitation) await post("invitations/accept", { token: invitation });
 			await router.invalidate();
+			if (next?.startsWith("/setup/channel?")) {
+				window.location.assign(next);
+				return;
+			}
 			await router.navigate({ to: "/" });
 		});
 	}
@@ -113,27 +118,17 @@ function Login() {
 				{invitation && !resetToken && (
 					<section className="space-y-3 border-t pt-4">
 						<p className="text-sm">
-							New account? Choose an immutable username. Your recovery email is
-							fixed by the invitation. Creating credentials does not join the
+							New account? Your immutable username and recovery email are fixed
+							by the invitation. Creating credentials does not join the
 							workspace until your email is verified.
 						</p>
-						<input
-							aria-label="New immutable username"
-							value={username}
-							minLength={3}
-							maxLength={30}
-							onChange={(e) => setUsername(e.target.value)}
-							placeholder="New immutable username"
-							className="input w-full"
-						/>
 						<Button
 							type="button"
-							disabled={busy || !username || password.length < 8}
+							disabled={busy || password.length < 8}
 							onClick={() =>
 								action(async () => {
 									const data = await post("invitations/register", {
 										token: invitation,
-										username,
 										password,
 									});
 									setPassword("");

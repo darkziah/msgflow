@@ -139,7 +139,7 @@ export const emailAdminApi = {
 			"POST",
 			{},
 		),
-	invite: (w: string, email: string) =>
+	invite: (w: string, email: string, username: string) =>
 		request<{
 			success: true;
 			data: {
@@ -147,7 +147,7 @@ export const emailAdminApi = {
 				expiresAt: number;
 				delivery: "copy_link" | "email_sent" | "email_delivery_failed";
 			};
-		}>(`${ws(w)}/invitations`, "POST", { email }),
+		}>(`${ws(w)}/invitations`, "POST", { email, username }),
 	username: (w: string, id: string, username: string) =>
 		request(`${ws(w)}/users/${enc(id)}/username`, "POST", { username }),
 };

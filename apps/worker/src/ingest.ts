@@ -24,8 +24,9 @@ import {
 import type { AuthorizedEmailInboundRoute } from "./email-transport";
 import type { Env } from "./env";
 import { evaluateRules } from "./rules";
-import { getOrCreateWorkspace } from "./workspace";
 
+// Legacy helper defaults retained only for migration-era helpers below. Runtime
+// ingress resolves explicit configured channels and never calls those helpers.
 const DEFAULT_INBOX_NAMES: Record<string, string> = {
 	facebook_page: "Facebook Support",
 	email: "Support",
@@ -74,8 +75,8 @@ async function fetchFacebookProfile(
  * rules (reroute/assign/tag), then forward the canonical Message to the
  * Conversation DO (which owns the timeline and mirrors the summary to D1).
  *
- * Single-tenant bootstrap: a "default" workspace is created lazily; the
- * workspace_members/teams RBAC wiring is a later phase.
+ * Every transport must resolve a pre-configured Channel and default Inbox;
+ * traffic never creates a Workspace, Channel, or Inbox.
  */
 export async function routeInbound(
 	env: Env,
@@ -100,9 +101,8 @@ export async function routeInbound(
 	if (!parsed) return;
 	const channelType = parsed.channel === "facebook" ? "facebook_page" : "email";
 
-	// Email ingress is authorization-first. It must receive an explicit route
-	// resolved from a ready logical mailbox; legacy lazy workspace/channel/inbox
-	// creation is retained only for the separate Facebook transport.
+	// Email ingress is authorization-first. Messenger likewise resolves an
+	// explicit Page Channel; neither transport may bootstrap configuration.
 	let workspaceId: string;
 	let channel: typeof channels.$inferSelect;
 	let inbox: typeof inboxes.$inferSelect;
@@ -138,22 +138,35 @@ export async function routeInbound(
 		channel = resolvedChannel;
 		inbox = resolvedInbox;
 	} else {
-		const workspace = await getOrCreateWorkspace(db, now);
-		workspaceId = workspace.id;
-		channel = await getOrCreateChannel(
-			db,
-			workspaceId,
-			channelType,
-			parsed.left,
-			now,
-		);
-		inbox = await getOrCreateDefaultInbox(
-			db,
-			workspaceId,
-			channel.id,
-			channelType,
-			now,
-		);
+		const resolvedChannel = await db
+			.select()
+			.from(channels)
+			.where(
+				and(
+					eq(channels.type, "facebook_page"),
+					eq(channels.externalId, parsed.left),
+					eq(channels.status, "active"),
+				),
+			)
+			.get();
+		if (!resolvedChannel) throw new Error("Facebook Page channel is not configured");
+		const resolvedInbox = await db
+			.select()
+			.from(inboxChannels)
+			.innerJoin(inboxes, eq(inboxChannels.inboxId, inboxes.id))
+			.where(
+				and(
+					eq(inboxChannels.channelId, resolvedChannel.id),
+					eq(inboxChannels.isDefault, true),
+					eq(inboxes.workspaceId, resolvedChannel.workspaceId),
+					eq(inboxes.isArchived, false),
+				),
+			)
+			.get();
+		if (!resolvedInbox) throw new Error("Facebook Page channel has no active default Inbox");
+		workspaceId = resolvedChannel.workspaceId;
+		channel = resolvedChannel;
+		inbox = resolvedInbox.inboxes;
 	}
 
 	// 3. Contact via its channel identity (PSIDs are Page-scoped → keyed by channel).
@@ -374,7 +387,7 @@ function syntheticMessageKey(
 	return `syn:${hash.toString(36)}:${source.length}`;
 }
 
-async function getOrCreateChannel(
+async function _getOrCreateChannel(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
 	channelType: "facebook_page" | "email",
@@ -506,7 +519,7 @@ async function getOrCreateContact(
 	return created;
 }
 
-async function getOrCreateDefaultInbox(
+async function _getOrCreateDefaultInbox(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
 	channelId: string,

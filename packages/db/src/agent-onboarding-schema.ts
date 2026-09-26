@@ -12,6 +12,7 @@ export const agentInvitations = sqliteTable(
 			.notNull()
 			.references(() => workspaces.id, { onDelete: "cascade" }),
 		email: text("email").notNull(),
+		reservedUsername: text("reserved_username"),
 		invitedBy: text("invited_by")
 			.notNull()
 			.references(() => user.id),
@@ -19,6 +20,8 @@ export const agentInvitations = sqliteTable(
 		claimedAt: integer("claimed_at"),
 		userId: text("user_id").references(() => user.id),
 		acceptedAt: integer("accepted_at"),
+		revokedAt: integer("revoked_at"),
+		cooldownUntil: integer("cooldown_until"),
 		createdAt: integer("created_at").notNull(),
 	},
 	(table) => [index("agent_invitations_workspace").on(table.workspaceId)],

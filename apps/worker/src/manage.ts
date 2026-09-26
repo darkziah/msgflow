@@ -5,6 +5,7 @@ import {
 	INBOX_ASSIGNMENT_STRATEGIES,
 	INBOX_ICON_KEYS,
 	type ChannelSummary,
+	type FacebookChannelCreateRequest,
 	type CannedReplySummary,
 	type CannedReplyWriteRequest,
 	type InboxChannelRequest,
@@ -25,6 +26,7 @@ import {
 	inboxChannels,
 	inboxMembers,
 	inboxes,
+	metaApps,
 	ruleActions,
 	ruleConditions,
 	rules,
@@ -34,11 +36,13 @@ import {
 import type { Env } from "./env";
 import {
 	requireAdminAccess,
+	requireOwnerAccess,
 	requireWorkspaceAccess,
 	userBelongsToWorkspace,
 } from "./access";
 import { ManageError } from "./errors";
 import { encryptChannelToken } from "./channel-token-crypto";
+import { validateAndSubscribeFacebookPage } from "./facebook-page";
 
 export { ManageError } from "./errors";
 
@@ -63,7 +67,11 @@ export async function listTags(
 		? eq(tags.workspaceId, workspaceId)
 		: and(
 				eq(tags.workspaceId, workspaceId),
-				or(eq(tags.visibility, "shared"), eq(tags.visibility, "company"), eq(tags.ownerUserId, userId)),
+				or(
+					eq(tags.visibility, "shared"),
+					eq(tags.visibility, "company"),
+					eq(tags.ownerUserId, userId),
+				),
 			);
 	const rows = await db
 		.select()
@@ -90,13 +98,18 @@ export async function createTag(
 		throw new ManageError("visibility must be 'shared' or 'private'");
 	}
 	if (visibility === "shared" && !access.isAdmin) {
-		throw new ManageError("workspace owner or admin role is required for this action", 403);
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
 	}
 	if (input.parentTagId) {
 		const parent = await db
 			.select({ id: tags.id })
 			.from(tags)
-			.where(and(eq(tags.id, input.parentTagId), eq(tags.workspaceId, workspaceId)))
+			.where(
+				and(eq(tags.id, input.parentTagId), eq(tags.workspaceId, workspaceId)),
+			)
 			.get();
 		if (!parent) throw new ManageError("parent tag not found", 404);
 	}
@@ -129,8 +142,14 @@ export async function updateTag(
 		.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
 		.get();
 	if (!existing) throw new ManageError("tag not found", 404);
-	if (!access.isAdmin && (existing.visibility !== "private" || existing.ownerUserId !== actorUserId)) {
-		throw new ManageError("workspace owner or admin role is required for this action", 403);
+	if (
+		!access.isAdmin &&
+		(existing.visibility !== "private" || existing.ownerUserId !== actorUserId)
+	) {
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
 	}
 
 	const set: Partial<typeof tags.$inferInsert> = {};
@@ -145,21 +164,33 @@ export async function updateTag(
 			throw new ManageError("visibility must be 'shared' or 'private'");
 		}
 		if (input.visibility === "shared" && !access.isAdmin) {
-			throw new ManageError("workspace owner or admin role is required for this action", 403);
+			throw new ManageError(
+				"workspace owner or admin role is required for this action",
+				403,
+			);
 		}
 		set.visibility = input.visibility;
 		// A shared tag can become private only through the admin path above; its
 		// new private owner is that administrator. Existing private ownership is
 		// preserved unless it becomes shared.
-		set.ownerUserId = input.visibility === "private" ? (existing.ownerUserId ?? actorUserId) : null;
+		set.ownerUserId =
+			input.visibility === "private"
+				? (existing.ownerUserId ?? actorUserId)
+				: null;
 	}
 	if (input.parentTagId !== undefined) {
-		if (input.parentTagId === id) throw new ManageError("a tag cannot be its own parent");
+		if (input.parentTagId === id)
+			throw new ManageError("a tag cannot be its own parent");
 		if (input.parentTagId) {
 			const parent = await db
 				.select({ id: tags.id })
 				.from(tags)
-				.where(and(eq(tags.id, input.parentTagId), eq(tags.workspaceId, workspaceId)))
+				.where(
+					and(
+						eq(tags.id, input.parentTagId),
+						eq(tags.workspaceId, workspaceId),
+					),
+				)
 				.get();
 			if (!parent) throw new ManageError("parent tag not found", 404);
 		}
@@ -167,7 +198,11 @@ export async function updateTag(
 	}
 
 	if (Object.keys(set).length > 0) {
-		await db.update(tags).set(set).where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId))).run();
+		await db
+			.update(tags)
+			.set(set)
+			.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
+			.run();
 	}
 	const updated = await db
 		.select()
@@ -192,11 +227,20 @@ export async function deleteTag(
 		.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
 		.get();
 	if (!existing) throw new ManageError("tag not found", 404);
-	if (!access.isAdmin && (existing.visibility !== "private" || existing.ownerUserId !== actorUserId)) {
-		throw new ManageError("workspace owner or admin role is required for this action", 403);
+	if (
+		!access.isAdmin &&
+		(existing.visibility !== "private" || existing.ownerUserId !== actorUserId)
+	) {
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
 	}
 	// conversation_tags rows cascade on tag delete (schema FK onDelete cascade).
-	await db.delete(tags).where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId))).run();
+	await db
+		.delete(tags)
+		.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
+		.run();
 }
 
 function toTagSummary(row: typeof tags.$inferSelect): TagSummary {
@@ -578,11 +622,16 @@ export async function updateCannedReply(
 	const existing = await db
 		.select()
 		.from(cannedReplies)
-		.where(and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)))
+		.where(
+			and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)),
+		)
 		.get();
 	if (!existing) throw new ManageError("canned reply not found", 404);
 	if (!access.isAdmin) {
-		throw new ManageError("workspace owner or admin role is required for this action", 403);
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
 	}
 	const name = input.name.trim();
 	const body = input.body.trim();
@@ -593,7 +642,9 @@ export async function updateCannedReply(
 	await db
 		.update(cannedReplies)
 		.set({ name, body, updatedAt })
-		.where(and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)))
+		.where(
+			and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)),
+		)
 		.run();
 	return { id, name, body, createdAt: existing.createdAt, updatedAt };
 }
@@ -609,15 +660,22 @@ export async function deleteCannedReply(
 	const existing = await db
 		.select()
 		.from(cannedReplies)
-		.where(and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)))
+		.where(
+			and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)),
+		)
 		.get();
 	if (!existing) throw new ManageError("canned reply not found", 404);
 	if (!access.isAdmin) {
-		throw new ManageError("workspace owner or admin role is required for this action", 403);
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
 	}
 	await db
 		.delete(cannedReplies)
-		.where(and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)))
+		.where(
+			and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)),
+		)
 		.run();
 }
 
@@ -661,6 +719,96 @@ export async function listChannels(
 	}));
 }
 
+/** Creates an explicit Messenger Page channel and its one default Inbox link. */
+export async function createFacebookChannel(
+	env: Env,
+	workspaceId: string,
+	input: FacebookChannelCreateRequest,
+	actorUserId: string,
+): Promise<ChannelSummary> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const inbox = await db
+		.select({ id: inboxes.id })
+		.from(inboxes)
+		.where(
+			and(
+				eq(inboxes.id, input.inboxId),
+				eq(inboxes.workspaceId, workspaceId),
+				eq(inboxes.isArchived, false),
+			),
+		)
+		.get();
+	if (!inbox) throw new ManageError("active inbox not found", 404);
+	const metaApp = await db
+		.select({ id: metaApps.id })
+		.from(metaApps)
+		.where(
+			and(
+				eq(metaApps.id, input.metaAppId),
+				eq(metaApps.workspaceId, workspaceId),
+			),
+		)
+		.get();
+	if (!metaApp) throw new ManageError("Meta App not found", 404);
+	try {
+		await validateAndSubscribeFacebookPage(input.pageId, input.accessToken);
+	} catch {
+		throw new ManageError(
+			"Facebook Page validation or subscription failed",
+			400,
+		);
+	}
+	let accessToken: string;
+	try {
+		accessToken = await encryptChannelToken(
+			input.accessToken,
+			env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+		);
+	} catch {
+		throw new ManageError("channel token encryption is unavailable", 503);
+	}
+	const id = crypto.randomUUID();
+	const now = new Date().toISOString();
+	try {
+		await env.DB.batch([
+			env.DB.prepare(
+				`INSERT INTO channels (id,workspace_id,type,display_name,external_id,access_token,meta_app_id,status,created_at,updated_at)
+ VALUES (?,?,?,?,?,?,?,'active',?,?)`,
+			).bind(
+				id,
+				workspaceId,
+				"facebook_page",
+				input.displayName,
+				input.pageId,
+				accessToken,
+				metaApp.id,
+				now,
+				now,
+			),
+			env.DB.prepare(
+				"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+			).bind(crypto.randomUUID(), inbox.id, id),
+		]);
+	} catch {
+		throw new ManageError(
+			"a channel for this Facebook Page already exists",
+			409,
+		);
+	}
+	return {
+		id,
+		type: "facebook_page",
+		displayName: input.displayName,
+		externalId: input.pageId,
+		status: "active",
+		hasToken: true,
+		tokenExpiresAt: null,
+		createdAt: now,
+		updatedAt: now,
+	};
+}
+
 export async function connectChannelToken(
 	env: Env,
 	workspaceId: string,
@@ -669,7 +817,7 @@ export async function connectChannelToken(
 	actorUserId: string,
 ): Promise<void> {
 	const db = drizzle(env.DB);
-	const access = await requireWorkspaceAccess(db, workspaceId, actorUserId);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
 	const channel = await db
 		.select({ id: channels.id })
 		.from(channels)
@@ -682,20 +830,38 @@ export async function connectChannelToken(
 		)
 		.get();
 	if (!channel) throw new ManageError("channel not found", 404);
-	if (!access.isAdmin) {
-		throw new ManageError("workspace owner or admin role is required for this action", 403);
-	}
 	const token = accessToken.trim();
 	if (!token) throw new ManageError("accessToken is required");
+	const page = await db
+		.select({ externalId: channels.externalId })
+		.from(channels)
+		.where(and(eq(channels.id, id), eq(channels.workspaceId, workspaceId)))
+		.get();
+	if (!page) throw new ManageError("channel not found", 404);
+	try {
+		await validateAndSubscribeFacebookPage(page.externalId, token);
+	} catch {
+		throw new ManageError(
+			"Facebook Page validation or subscription failed",
+			400,
+		);
+	}
 	let encryptedToken: string;
 	try {
-		encryptedToken = await encryptChannelToken(token, env.CHANNEL_TOKEN_ENCRYPTION_KEY);
+		encryptedToken = await encryptChannelToken(
+			token,
+			env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+		);
 	} catch {
 		throw new ManageError("channel token encryption is unavailable", 503);
 	}
 	await db
 		.update(channels)
-		.set({ accessToken: encryptedToken, status: "active", updatedAt: new Date().toISOString() })
+		.set({
+			accessToken: encryptedToken,
+			status: "active",
+			updatedAt: new Date().toISOString(),
+		})
 		.where(
 			and(
 				eq(channels.id, id),
@@ -713,16 +879,13 @@ export async function disconnectChannel(
 	actorUserId: string,
 ): Promise<void> {
 	const db = drizzle(env.DB);
-	const access = await requireWorkspaceAccess(db, workspaceId, actorUserId);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
 	const channel = await db
 		.select({ id: channels.id })
 		.from(channels)
 		.where(and(eq(channels.id, id), eq(channels.workspaceId, workspaceId)))
 		.get();
 	if (!channel) throw new ManageError("channel not found", 404);
-	if (!access.isAdmin) {
-		throw new ManageError("workspace owner or admin role is required for this action", 403);
-	}
 	await db
 		.update(channels)
 		.set({

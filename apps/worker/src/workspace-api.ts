@@ -32,7 +32,6 @@ import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { Either, Schema } from "effect";
 import {
-	getWorkspaceAccess,
 	listUserWorkspaces,
 	requireWorkspaceAccess,
 	userBelongsToWorkspace,
@@ -43,7 +42,7 @@ import {
 } from "./email-transport";
 import type { Env } from "./env";
 import { ManageError } from "./errors";
-import { getOrCreateWorkspace } from "./workspace";
+
 
 /**
  * Workspace-scoped inbox-routing surface: the left sidebar (Front-style),
@@ -737,15 +736,7 @@ export async function listWorkspacesForUser(
 	const db = drizzle(env.DB);
 	const rows = await listUserWorkspaces(db, userId);
 	if (rows.length > 0) return rows;
-	// Single-tenant bootstrap: a fresh signup has no membership rows yet, and
-	// the workspaces list is the FIRST call the web client makes — so claiming
-	// the lazy default workspace here (creating it on first use) is what makes
-	// the sidebar mount at all. Once the workspace has any members, new users
-	// are strictly gated by membership (they'd need an invite).
-	const ws = await getOrCreateWorkspace(db, new Date().toISOString());
-	const access = await getWorkspaceAccess(db, ws.id, userId);
-	if (!access) return [];
-	return [{ id: ws.id, name: ws.name, slug: ws.slug, role: access.role }];
+	return [];
 }
 
 function decodeStoredJson<A, I>(

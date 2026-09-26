@@ -13,7 +13,7 @@ export interface AuthEnv {
 	BETTER_AUTH_URL?: string;
 	/**
 	 * Comma-separated origins allowed for cookie/bearer auth requests, e.g.
-	 * "http://localhost:5174,https://inbox.yehey.jp". Required when the web app
+	 * "http://localhost:5174,https://inbox.example.com". Required when the web app
 	 * is served from a different origin than the Worker (dev proxy, split
 	 * hosting) — better-auth rejects cross-origin requests otherwise.
 	 */

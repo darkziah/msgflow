@@ -14,6 +14,7 @@ import type {
 	InboxSummary,
 	InboxUpdateRequest,
 	MarkReadRequest,
+	MetaAppSummary,
 	OwnerSetupRequest,
 	RuleSummary,
 	RuleWriteRequest,
@@ -91,6 +92,38 @@ export const api = {
 				verification: "pending_sender_configuration";
 			};
 		}>("/api/setup/owner", { method: "POST", body: JSON.stringify(body) });
+	},
+	createFacebookChannel(
+		workspaceId: string,
+		body: {
+			pageId: string;
+			displayName: string;
+			accessToken: string;
+			inboxId: string;
+			metaAppId: string;
+		},
+	) {
+		return request<{ channel: ChannelSummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/facebook-channels`,
+			{ method: "POST", body: JSON.stringify(body) },
+		);
+	},
+	startMetaOAuth(workspaceId: string, body: { metaAppId: string; inboxId: string }) {
+		return request<{ authorizationUrl: string }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-oauth/start`,
+			{ method: "POST", body: JSON.stringify(body) },
+		);
+	},
+	listAuthorizedFacebookPages(sessionId: string) {
+		return request<{ pages: { id: string; name: string }[] }>(
+			`/api/meta-oauth/${encodeURIComponent(sessionId)}/pages`,
+		);
+	},
+	connectAuthorizedFacebookPage(sessionId: string, pageId: string) {
+		return request<{ channel: ChannelSummary }>(
+			`/api/meta-oauth/${encodeURIComponent(sessionId)}/pages/${encodeURIComponent(pageId)}`,
+			{ method: "POST" },
+		);
 	},
 	listConversations(params?: {
 		mailboxId?: string;
@@ -316,6 +349,17 @@ export const api = {
 	},
 	listWorkspaces() {
 		return request<{ workspaces: WorkspaceSummary[] }>("/api/workspaces");
+	},
+	listMetaApps(workspaceId: string) {
+		return request<{ metaApps: MetaAppSummary[] }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-apps`,
+		);
+	},
+	createMetaApp(workspaceId: string, body: { displayName: string; appId: string; appSecret: string }) {
+		return request<{ metaApp: MetaAppSummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-apps`,
+			{ method: "POST", body: JSON.stringify(body) },
+		);
 	},
 	listEmailDomains(workspaceId: string) {
 		return request<{ emailDomains: EmailDomainSummary[] }>(

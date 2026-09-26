@@ -1,4 +1,4 @@
-import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { createFileRoute, Outlet, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 
@@ -21,7 +21,12 @@ function Setup() {
 	const [form, setForm] = useState(initialForm);
 	const [busy, setBusy] = useState(false);
 	const [created, setCreated] = useState(false);
+	const [createdWorkspace, setCreatedWorkspace] = useState<{
+		workspaceId: string;
+		inboxId: string;
+	} | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	if (window.location.pathname === "/setup/channel") return <Outlet />;
 
 	function update(field: keyof typeof form, value: string) {
 		setForm((current) => ({ ...current, [field]: value }));
@@ -43,6 +48,10 @@ function Setup() {
 			};
 			const result = await api.setupOwner(body);
 			setCreated(true);
+			setCreatedWorkspace({
+				workspaceId: result.setup.workspaceId,
+				inboxId: result.setup.inboxId,
+			});
 			setForm((current) => ({ ...current, password: "" }));
 			setError(
 				result.setup.verification === "pending_sender_configuration"
@@ -183,6 +192,27 @@ function Setup() {
 						{busy ? "Creating workspace…" : "Create workspace"}
 					</Button>
 				</div>
+				{createdWorkspace ? (
+					<div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950">
+						<p>
+							Next, sign in and connect a Facebook Page to your first shared
+							inbox. You can also skip this and add a Page later in Settings.
+						</p>
+						<Button
+							type="button"
+							onClick={() =>
+								router.navigate({
+									to: "/login",
+									search: {
+										next: `/setup/channel?workspaceId=${encodeURIComponent(createdWorkspace.workspaceId)}&inboxId=${encodeURIComponent(createdWorkspace.inboxId)}`,
+									},
+								})
+							}
+						>
+							Sign in and add Facebook Page
+						</Button>
+					</div>
+				) : null}
 			</form>
 		</div>
 	);

@@ -19,7 +19,7 @@ import { createHmac } from "node:crypto";
 
 const BASE = process.env.WORKER_URL ?? "http://localhost:8787";
 const APP_SECRET = process.env.MESSENGER_APP_SECRET ?? "test-secret";
-const EMAIL = `smoke-${Date.now()}@yehey.jp`;
+const EMAIL = `smoke-${Date.now()}@example.test`;
 const PASSWORD = "password123";
 const PAGE_ID = `page-smoke-${Date.now()}`;
 const PSID = "psid-smoke";

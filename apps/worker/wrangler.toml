@@ -1,5 +1,4 @@
-name = "msgflow-worker"
-account_id = "2b264b86e8b917f95fc97400900af720"
+name = "msgflow"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -14,18 +13,15 @@ run_worker_first = ["/api/*", "/health", "/webhooks/*", "/ws"]
 [observability]
 enabled = true
 
-# Non-secret production runtime configuration. Secrets are uploaded separately
-# with `wrangler secret put` and never belong in this file.
-[vars]
-ATTACHMENT_PUBLIC_BASE_URL = "https://attachments.msgflow.yeheyremit.jp"
-BETTER_AUTH_URL = "https://msgflow.yeheyremit.jp"
-BETTER_AUTH_TRUSTED_ORIGINS = "https://msgflow.yeheyremit.jp"
+# Deployment-specific account ID, D1 ID, public origins, hostnames, and sender
+# address belong in an uncommitted operator configuration. See
+# docs/runbooks/deploy-msgflow-cloudflare.md.
 
 [[d1_databases]]
 binding = "DB"
 database_name = "msgflow"
-# Production D1 database, created in the Yehey Japan Cloudflare account (APAC).
-database_id = "867d5b8c-d960-4782-98d5-be9a85d10edc"
+# Placeholder only: replace in an uncommitted operator configuration.
+database_id = "00000000-0000-0000-0000-000000000000"
 
 [[durable_objects.bindings]]
 name = "CONVERSATION_DO"
@@ -38,8 +34,8 @@ new_sqlite_classes = ["ConversationDO"]
 [[send_email]]
 name = "EMAIL"
 
-# Production R2 image bucket. Its public custom domain is a non-secret Worker
-# runtime variable, not a hard-coded application setting.
+# Public Messenger-image bucket. Its custom domain is an operator-managed
+# non-secret runtime variable, not a hard-coded application setting.
 [[r2_buckets]]
 binding = "ATTACHMENTS"
 bucket_name = "msgflow-attachments"

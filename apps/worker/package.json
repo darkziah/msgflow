@@ -17,6 +17,7 @@
 		"build": "tsc",
 		"dev": "wrangler dev --port 8787 --var MESSENGER_APP_SECRET:test-secret --var MESSENGER_VERIFY_TOKEN:test-verify --var BETTER_AUTH_SECRET:msgflow-local-dev-secret-change-me-32 --var BETTER_AUTH_URL:http://localhost:8787 --var BETTER_AUTH_TRUSTED_ORIGINS:http://localhost:5173,http://localhost:5174 --var AUTH_EMAIL_FROM:auth@example.test --var CHANNEL_TOKEN_ENCRYPTION_KEY:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		"deploy": "wrangler deploy",
+		"deploy:dev": "bun --env-file=.env.deploy.local x wrangler deploy --config wrangler.dev.toml --keep-vars",
 		"type-check": "tsc --noEmit",
 		"test": "bun test",
 		"smoke": "bun scripts/smoke.ts",

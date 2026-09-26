@@ -110,6 +110,7 @@ export const channels = sqliteTable(
 		externalId: text("external_id").notNull(),
 		// Encrypted at rest; only the Worker/channel layer reads these.
 		accessToken: text("access_token"),
+		metaAppId: text("meta_app_id"),
 		refreshToken: text("refresh_token"),
 		tokenExpiresAt: text("token_expires_at"),
 		webhookVerifyToken: text("webhook_verify_token"),
@@ -126,6 +127,28 @@ export const channels = sqliteTable(
 		uniqueIndex("idx_channels_workspace_external").on(
 			table.workspaceId,
 			table.externalId,
+		),
+	],
+);
+
+/** Installation-owned Meta Apps; each may authorize multiple Page Channels. */
+export const metaApps = sqliteTable(
+	"meta_apps",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "cascade" }),
+		displayName: text("display_name").notNull(),
+		appId: text("app_id").notNull(),
+		appSecret: text("app_secret").notNull(),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("idx_meta_apps_workspace_app_id").on(
+			table.workspaceId,
+			table.appId,
 		),
 	],
 );
@@ -293,7 +316,10 @@ export const conversations = sqliteTable(
 	},
 	(table) => [
 		index("idx_conversations_inbox_status").on(table.inboxId, table.status),
-		uniqueIndex("idx_conversation_workspace_identity").on(table.id, table.workspaceId),
+		uniqueIndex("idx_conversation_workspace_identity").on(
+			table.id,
+			table.workspaceId,
+		),
 		index("idx_conversations_assignee").on(table.assigneeId),
 		index("idx_conversations_contact").on(table.contactId),
 		index("idx_conversations_last_activity").on(table.lastMessageAt),
@@ -636,7 +662,10 @@ export const mailboxes = sqliteTable(
 			table.emailDomainId,
 			table.localPart,
 		),
-		uniqueIndex("idx_mailbox_workspace_identity").on(table.id, table.workspaceId),
+		uniqueIndex("idx_mailbox_workspace_identity").on(
+			table.id,
+			table.workspaceId,
+		),
 		index("idx_mailboxes_workspace_owner").on(
 			table.workspaceId,
 			table.ownerUserId,
@@ -714,7 +743,11 @@ export const emailIngress = sqliteTable(
 			table.dedupeKey,
 		),
 		index("idx_email_ingress_state").on(table.state, table.receivedAt),
-		uniqueIndex("idx_ingress_scope_identity").on(table.id, table.workspaceId, table.mailboxId),
+		uniqueIndex("idx_ingress_scope_identity").on(
+			table.id,
+			table.workspaceId,
+			table.mailboxId,
+		),
 	],
 );
 

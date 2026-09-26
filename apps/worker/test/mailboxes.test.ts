@@ -62,21 +62,21 @@ async function setup() {
 }
 
 describe("email domain and mailbox service", () => {
-	test("only workspace owners create globally unique pending domains", async () => {
+	test("verified workspace owners/admins create globally unique pending domains", async () => {
 		const workspaceId = await setup();
 		await expect(
 			createEmailDomain(
 				ctx.env,
 				workspaceId,
 				{ canonicalDomain: " Example.COM. " },
-				ADMIN,
+				MEMBER,
 			),
 		).rejects.toMatchObject({ status: 403 });
 		const domain = await createEmailDomain(
 			ctx.env,
 			workspaceId,
 			{ canonicalDomain: " Example.COM. " },
-			OWNER,
+			ADMIN,
 		);
 		expect(domain).toMatchObject({
 			canonicalDomain: "example.com",
@@ -90,7 +90,7 @@ describe("email domain and mailbox service", () => {
 				workspaceId,
 				domain.id,
 				{ inboundState: "ready" },
-				ADMIN,
+				MEMBER,
 			),
 		).rejects.toMatchObject({ status: 403 });
 
@@ -146,19 +146,11 @@ describe("email domain and mailbox service", () => {
 			})
 			.run();
 
-		await expect(
-			createSharedMailbox(
-				ctx.env,
-				workspaceId,
-				{ emailDomainId: domain.id, localPart: "support", inboxId, teamId },
-				ADMIN,
-			),
-		).rejects.toMatchObject({ status: 403 });
 		const mailbox = await createSharedMailbox(
 			ctx.env,
 			workspaceId,
 			{ emailDomainId: domain.id, localPart: "support", inboxId, teamId },
-			OWNER,
+			ADMIN,
 		);
 		expect(mailbox).toMatchObject({
 			canonicalAddress: "support@mail.example.com",

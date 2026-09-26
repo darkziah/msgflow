@@ -1,6 +1,6 @@
 # MsgFlow — Unified Inbox
 
-A unified inbox for Yehey Japan's business Pages — Front/Missive-style handling of Facebook Messenger and email conversations in one place, with real-time delivery to agents viewing a conversation.
+A unified inbox for business Pages — Front/Missive-style handling of Facebook Messenger and email conversations in one place, with real-time delivery to agents viewing a conversation.
 
 ## Stack
 

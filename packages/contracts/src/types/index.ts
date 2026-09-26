@@ -318,6 +318,16 @@ export interface ChannelSummary {
 	updatedAt: string;
 }
 
+/** Installation-level Meta App metadata. The App secret never leaves the Worker. */
+export interface MetaAppSummary {
+	id: string;
+	displayName: string;
+	appId: string;
+	hasSecret: boolean;
+	createdAt: string;
+	updatedAt: string;
+}
+
 // POST /api/channels/:id/token is defined by ChannelConnectRequestSchema.
 export type { ChannelConnectRequest } from "../channel-schema";
 

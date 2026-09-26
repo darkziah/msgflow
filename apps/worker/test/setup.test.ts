@@ -12,6 +12,7 @@ import {
 } from "@msgflow/db";
 import { getWorkspaceAccess } from "../src/access";
 import { OwnerSetupError, setupInitialOwner } from "../src/setup";
+import { isInitialSetupComplete } from "../src/setup-state";
 import { decodeJsonBody } from "../src/validation";
 import { OwnerSetupRequestSchema } from "@msgflow/contracts";
 import { createAuth } from "@msgflow/auth";
@@ -31,6 +32,17 @@ const input = {
 };
 
 describe("explicit initial Workspace Owner setup", () => {
+	test("keeps normal application gates closed until first-use setup completes", async () => {
+		ctx = await createTestDb();
+		expect(await isInitialSetupComplete(ctx.env)).toBeFalse();
+	});
+
+	test("opens normal application gates only after setup completes", async () => {
+		ctx = await createTestDb();
+		await setupInitialOwner(ctx.env, input);
+		expect(await isInitialSetupComplete(ctx.env)).toBeTrue();
+	});
+
 	test("uses Better Auth credentials and atomically creates the initial workspace graph", async () => {
 		ctx = await createTestDb();
 		const result = await setupInitialOwner(ctx.env, input);

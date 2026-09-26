@@ -14,6 +14,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as RulesRouteImport } from './routes/rules'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as SetupRouteImport } from './routes/setup'
+import { Route as SetupChannelRouteImport } from './routes/setup/channel'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -40,20 +41,27 @@ const SetupRoute = SetupRouteImport.update({
   path: '/setup',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SetupChannelRoute = SetupChannelRouteImport.update({
+  id: '/channel',
+  path: '/channel',
+  getParentRoute: () => SetupRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
-  '/setup': typeof SetupRoute
+  '/setup': typeof SetupRouteWithChildren
+  '/setup/channel': typeof SetupChannelRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
-  '/setup': typeof SetupRoute
+  '/setup': typeof SetupRouteWithChildren
+  '/setup/channel': typeof SetupChannelRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -61,14 +69,23 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
-  '/setup': typeof SetupRoute
+  '/setup': typeof SetupRouteWithChildren
+  '/setup/channel': typeof SetupChannelRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/rules' | '/settings' | '/setup'
+  fullPaths:
+    '/' | '/login' | '/rules' | '/settings' | '/setup' | '/setup/channel'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login' | '/rules' | '/settings' | '/setup'
-  id: '__root__' | '/' | '/login' | '/rules' | '/settings' | '/setup'
+  to: '/' | '/login' | '/rules' | '/settings' | '/setup' | '/setup/channel'
+  id:
+    | '__root__'
+    | '/'
+    | '/login'
+    | '/rules'
+    | '/settings'
+    | '/setup'
+    | '/setup/channel'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -76,7 +93,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   RulesRoute: typeof RulesRoute
   SettingsRoute: typeof SettingsRoute
-  SetupRoute: typeof SetupRoute
+  SetupRoute: typeof SetupRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -116,15 +133,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SetupRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/setup/channel': {
+      id: '/setup/channel'
+      path: '/channel'
+      fullPath: '/setup/channel'
+      preLoaderRoute: typeof SetupChannelRouteImport
+      parentRoute: typeof SetupRoute
+    }
   }
 }
+
+interface SetupRouteChildren {
+  SetupChannelRoute: typeof SetupChannelRoute
+}
+
+const SetupRouteChildren: SetupRouteChildren = {
+  SetupChannelRoute: SetupChannelRoute,
+}
+
+const SetupRouteWithChildren = SetupRoute._addFileChildren(SetupRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
   RulesRoute: RulesRoute,
   SettingsRoute: SettingsRoute,
-  SetupRoute: SetupRoute,
+  SetupRoute: SetupRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -7,6 +7,7 @@ import {
 	conversations,
 	inboxChannels,
 	inboxes,
+	metaApps,
 	ruleActions,
 	ruleConditions,
 	ruleExecutionLog,
@@ -19,8 +20,8 @@ import {
 import {
 	archiveInbox,
 	connectChannelToken,
+	createFacebookChannel,
 	createCannedReply,
-
 	createInbox,
 	createRule,
 	createTag,
@@ -54,8 +55,13 @@ import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
 
 // Each test gets a fresh Miniflare D1 with the full migration chain.
 let ctx: TestCtx;
+let restoreFetch: typeof fetch | null = null;
 afterEach(async () => {
-	await ctx?.mf?.dispose();
+	if (restoreFetch) {
+		globalThis.fetch = restoreFetch;
+		restoreFetch = null;
+	}
+	await ctx?.mf.dispose();
 });
 
 const ADMIN = "user-admin";
@@ -302,7 +308,6 @@ describe("workspace permission boundaries", () => {
 	});
 });
 
-
 // ---------------------------------------------------------------------------
 // Legacy management RBAC: tags, canned replies, and channel credentials
 // ---------------------------------------------------------------------------
@@ -320,18 +325,30 @@ describe("legacy management workspace RBAC", () => {
 			MEMBER,
 		);
 		expect(privateTag.ownerUserId).toBe(MEMBER);
-		expect((await listTags(ctx.env, workspaceId, MEMBER)).map((tag) => tag.id)).toContain(
-			privateTag.id,
-		);
-		expect((await listTags(ctx.env, workspaceId, OUTSIDER)).map((tag) => tag.id)).not.toContain(
-			privateTag.id,
-		);
-		expect((await listTags(ctx.env, workspaceId, ADMIN)).map((tag) => tag.id)).toContain(
-			privateTag.id,
-		);
+		expect(
+			(await listTags(ctx.env, workspaceId, MEMBER)).map((tag) => tag.id),
+		).toContain(privateTag.id);
+		expect(
+			(await listTags(ctx.env, workspaceId, OUTSIDER)).map((tag) => tag.id),
+		).not.toContain(privateTag.id);
+		expect(
+			(await listTags(ctx.env, workspaceId, ADMIN)).map((tag) => tag.id),
+		).toContain(privateTag.id);
 
-		await updateTag(ctx.env, workspaceId, privateTag.id, { name: "Renamed" }, MEMBER);
-		await updateTag(ctx.env, workspaceId, privateTag.id, { color: "#123456" }, ADMIN);
+		await updateTag(
+			ctx.env,
+			workspaceId,
+			privateTag.id,
+			{ name: "Renamed" },
+			MEMBER,
+		);
+		await updateTag(
+			ctx.env,
+			workspaceId,
+			privateTag.id,
+			{ color: "#123456" },
+			ADMIN,
+		);
 		await expect(
 			updateTag(
 				ctx.env,
@@ -342,10 +359,20 @@ describe("legacy management workspace RBAC", () => {
 			),
 		).rejects.toMatchObject({ status: 403 });
 		await expect(
-			createTag(ctx.env, workspaceId, { name: "Shared", visibility: "shared" }, MEMBER),
+			createTag(
+				ctx.env,
+				workspaceId,
+				{ name: "Shared", visibility: "shared" },
+				MEMBER,
+			),
 		).rejects.toMatchObject({ status: 403 });
 		await expect(
-			createCannedReply(ctx.env, workspaceId, { name: "No", body: "No" }, MEMBER),
+			createCannedReply(
+				ctx.env,
+				workspaceId,
+				{ name: "No", body: "No" },
+				MEMBER,
+			),
 		).rejects.toMatchObject({ status: 403 });
 
 		const cannedReply = await createCannedReply(
@@ -419,7 +446,11 @@ describe("legacy management workspace RBAC", () => {
 		).rejects.toMatchObject({ status: 404 });
 
 		const foreignRows = await ctx.db
-			.select({ tagName: tags.name, replyName: cannedReplies.name, token: channels.accessToken })
+			.select({
+				tagName: tags.name,
+				replyName: cannedReplies.name,
+				token: channels.accessToken,
+			})
 			.from(tags)
 			.innerJoin(cannedReplies, eq(cannedReplies.workspaceId, tags.workspaceId))
 			.innerJoin(channels, eq(channels.workspaceId, tags.workspaceId))
@@ -430,9 +461,17 @@ describe("legacy management workspace RBAC", () => {
 			replyName: "Foreign reply",
 			token: "enc:v1:credential",
 		});
-		expect((await listChannels(ctx.env, workspaceId, ADMIN))[0]).toBeUndefined();
+		expect(
+			(await listChannels(ctx.env, workspaceId, ADMIN))[0],
+		).toBeUndefined();
 		await expect(
-			connectChannelToken(ctx.env, workspaceId, foreignChannelId, "token", ADMIN),
+			connectChannelToken(
+				ctx.env,
+				workspaceId,
+				foreignChannelId,
+				"token",
+				ADMIN,
+			),
 		).rejects.toMatchObject({ status: 404 });
 	});
 });
@@ -442,6 +481,103 @@ describe("legacy management workspace RBAC", () => {
 // ---------------------------------------------------------------------------
 
 describe("inbox CRUD", () => {
+	test("owner creates an explicit Facebook Page channel with one default Inbox", async () => {
+		const { workspaceId } = await setup();
+		ctx.env.CHANNEL_TOKEN_ENCRYPTION_KEY =
+			"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+		restoreFetch = globalThis.fetch;
+		globalThis.fetch = (async (input) => {
+			const url = String(input);
+			return Response.json(
+				url.includes("subscribed_apps")
+					? { success: true }
+					: { id: "page-123" },
+			);
+		}) as typeof fetch;
+		const inbox = await createInbox(
+			ctx.env,
+			workspaceId,
+			{ name: "Messenger" },
+			ADMIN,
+		);
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(metaApps)
+			.values({
+				id: "meta-app",
+				workspaceId,
+				displayName: "Development App",
+				appId: "app-123",
+				appSecret: "enc:v1:test",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		const channel = await createFacebookChannel(
+			ctx.env,
+			workspaceId,
+			{
+				pageId: "page-123",
+				displayName: "Acme Support",
+				accessToken: "page-access-token",
+				inboxId: inbox.id,
+				metaAppId: "meta-app",
+			},
+			ADMIN,
+		);
+		expect(channel).toMatchObject({
+			type: "facebook_page",
+			externalId: "page-123",
+			hasToken: true,
+		});
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT is_default FROM inbox_channels WHERE inbox_id=? AND channel_id=?",
+			)
+				.bind(inbox.id, channel.id)
+				.first(),
+		).toEqual({ is_default: 1 });
+		await connectChannelToken(
+			ctx.env,
+			workspaceId,
+			channel.id,
+			"rotated-token",
+			ADMIN,
+		);
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT access_token,status FROM channels WHERE id=?",
+			)
+				.bind(channel.id)
+				.first<{ access_token: string | null; status: string }>(),
+		).toMatchObject({
+			status: "active",
+			access_token: expect.stringMatching(/^enc:v1:/),
+		});
+		await disconnectChannel(ctx.env, workspaceId, channel.id, ADMIN);
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT access_token,status FROM channels WHERE id=?",
+			)
+				.bind(channel.id)
+				.first(),
+		).toEqual({ access_token: null, status: "disconnected" });
+		await expect(
+			createFacebookChannel(
+				ctx.env,
+				workspaceId,
+				{
+					...channel,
+					pageId: "page-123",
+					accessToken: "another",
+					inboxId: inbox.id,
+					metaAppId: "meta-app",
+				},
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 409 });
+	});
+
 	test("admin creates an inbox with the full settings surface", async () => {
 		const { workspaceId } = await setup();
 		const inbox = await createInbox(

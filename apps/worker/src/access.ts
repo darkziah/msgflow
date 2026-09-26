@@ -1,6 +1,6 @@
 import { and, asc, eq } from "drizzle-orm";
 import type { drizzle } from "drizzle-orm/d1";
-import { workspaceMembers, workspaces } from "@msgflow/db";
+import { user, workspaceMembers, workspaces } from "@msgflow/db";
 import type { WorkspaceSummary } from "@msgflow/contracts";
 import { ManageError } from "./errors";
 
@@ -72,16 +72,31 @@ export async function requireWorkspaceAccess(
 	return access;
 }
 
-/** Email-domain and mailbox configuration changes require a workspace owner. */
+/**
+ * Email-domain and mailbox lifecycle changes require a verified Workspace Owner
+ * or Administrator. Workspace role grants lifecycle control only; mailbox
+ * content and send-as continue to use mailbox-specific authorization.
+ */
 export async function requireOwnerAccess(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
 	userId: string,
 ): Promise<WorkspaceAccess> {
 	const access = await requireWorkspaceAccess(db, workspaceId, userId);
-	if (access.role !== "owner") {
+	if (!access.isAdmin) {
 		throw new ManageError(
-			"workspace owner role is required for this action",
+			"workspace owner or admin role is required for this action",
+			403,
+		);
+	}
+	const actor = await db
+		.select({ emailVerified: user.emailVerified })
+		.from(user)
+		.where(eq(user.id, userId))
+		.get();
+	if (!actor?.emailVerified) {
+		throw new ManageError(
+			"a verified recovery email is required for this action",
 			403,
 		);
 	}

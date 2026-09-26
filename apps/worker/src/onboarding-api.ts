@@ -6,17 +6,18 @@ import {
 	createAgentInvitation,
 	OnboardingError,
 	registerInvitedAgent,
+	revokeAgentInvitation,
 } from "./agent-onboarding";
 import { decodeJsonBody } from "./validation";
 
 const token = Schema.String.pipe(Schema.pattern(/^[a-f0-9]{64}$/));
 const signup = Schema.Struct({
 	token,
-	username: Schema.String.pipe(Schema.maxLength(30)),
 	password: Schema.String.pipe(Schema.maxLength(128)),
 });
 const invite = Schema.Struct({
 	email: Schema.String.pipe(Schema.maxLength(254)),
+	username: Schema.String.pipe(Schema.maxLength(30)),
 });
 const accept = Schema.Struct({ token });
 
@@ -63,6 +64,7 @@ onboardingApi.post("/workspaces/:workspaceId/invitations", async (c) => {
 				session.user.id,
 				c.req.param("workspaceId"),
 				body.value.email,
+				body.value.username,
 			),
 		},
 		201,
@@ -77,12 +79,27 @@ onboardingApi.post("/invitations/register", async (c) => {
 			data: await registerInvitedAgent(
 				c.env,
 				body.value.token,
-				body.value.username,
 				body.value.password,
 			),
 		},
 		201,
 	);
+});
+onboardingApi.delete("/workspaces/:workspaceId/invitations/:invitationId", async (c) => {
+	const session = await createAuth(c.env).api.getSession({
+		headers: c.req.raw.headers,
+	});
+	if (!session)
+		return c.json({ success: false, error: "Authentication required" }, 401);
+	return c.json({
+		success: true,
+		data: await revokeAgentInvitation(
+			c.env,
+			session.user.id,
+			c.req.param("workspaceId"),
+			c.req.param("invitationId"),
+		),
+	});
 });
 onboardingApi.post("/invitations/accept", async (c) => {
 	const session = await createAuth(c.env).api.getSession({

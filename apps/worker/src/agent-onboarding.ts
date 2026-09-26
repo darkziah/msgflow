@@ -6,7 +6,9 @@ import {
 	isValidUsername,
 	sendAuthEmail,
 } from "@msgflow/auth";
+import { drizzle } from "drizzle-orm/d1";
 import { RESERVED_PRIVATE_LOCAL_PARTS } from "./email-address";
+import { requireOwnerAccess } from "./access";
 
 export class OnboardingError extends Error {
 	constructor(
@@ -54,17 +56,24 @@ export async function createAgentInvitation(
 	actorId: string,
 	workspaceId: string,
 	rawEmail: string,
+	rawUsername: string,
 ) {
-	const owner = await env.DB.prepare(
-		`SELECT u.email_verified FROM workspace_members m JOIN user u ON u.id=m.user_id WHERE m.workspace_id=? AND m.user_id=? AND m.role='owner'`,
-	)
-		.bind(workspaceId, actorId)
-		.first<{ email_verified: number }>();
-	if (owner?.email_verified !== 1)
-		throw new OnboardingError("A verified Workspace Owner is required", 403);
+	try {
+		await requireOwnerAccess(drizzle(env.DB), workspaceId, actorId);
+	} catch {
+		throw new OnboardingError(
+			"A verified Workspace Owner or Administrator is required",
+			403,
+		);
+	}
 	const email = rawEmail.trim().toLowerCase();
 	if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
 		throw new OnboardingError("Invalid recovery email");
+	const username = rawUsername.trim();
+	if (!isValidUsername(username) || RESERVED_PRIVATE_LOCAL_PARTS.has(username))
+		throw new OnboardingError(
+			"Choose a valid, non-reserved immutable username",
+		);
 	if (!env.BETTER_AUTH_URL)
 		throw new OnboardingError(
 			"Configure BETTER_AUTH_URL before inviting agents",
@@ -74,20 +83,47 @@ export async function createAgentInvitation(
 		b.toString(16).padStart(2, "0"),
 	).join("");
 	const id = crypto.randomUUID();
-	const expiresAt = Date.now() + 48 * 60 * 60 * 1000;
+	const now = Date.now();
+	const expiresAt = now + 48 * 60 * 60 * 1000;
 	await env.DB.prepare(
-		`INSERT INTO agent_invitations (id,token_hash,workspace_id,email,invited_by,expires_at,created_at) VALUES (?,?,?,?,?,?,?)`,
+		`UPDATE agent_invitations SET revoked_at=expires_at, cooldown_until=expires_at+86400000
+ WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at<=?`,
 	)
+		.bind(now)
+		.run();
+	const blocked = await env.DB.prepare(
+		`SELECT id FROM agent_invitations WHERE accepted_at IS NULL
+ AND (lower(email)=? OR reserved_username=?)
+ AND (revoked_at IS NULL OR cooldown_until>?) LIMIT 1`,
+	)
+		.bind(email, username, now)
+		.first();
+	if (blocked)
+		throw new OnboardingError(
+			"Recovery email or username is already reserved by an active invitation",
+			409,
+		);
+	try {
+		await env.DB.prepare(
+			`INSERT INTO agent_invitations (id,token_hash,workspace_id,email,reserved_username,invited_by,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?)`,
+		)
 		.bind(
 			id,
 			await hashToken(token),
 			workspaceId,
 			email,
+			username,
 			actorId,
 			expiresAt,
-			Date.now(),
+			now,
 		)
 		.run();
+	} catch {
+		throw new OnboardingError(
+			"Recovery email or username is already reserved by an active invitation",
+			409,
+		);
+	}
 	const url = new URL("/login", env.BETTER_AUTH_URL);
 	url.searchParams.set("invite", token);
 	let delivery: "copy_link" | "email_sent" | "email_delivery_failed" =
@@ -108,6 +144,7 @@ export async function createAgentInvitation(
 	return {
 		id,
 		email,
+		username,
 		workspaceId,
 		expiresAt,
 		invitationUrl: url.href,
@@ -115,25 +152,48 @@ export async function createAgentInvitation(
 	};
 }
 
+/** Revocation is available only before acceptance; the reservation cools down for one day. */
+export async function revokeAgentInvitation(
+	env: AuthEnv,
+	actorId: string,
+	workspaceId: string,
+	invitationId: string,
+) {
+	try {
+		await requireOwnerAccess(drizzle(env.DB), workspaceId, actorId);
+	} catch {
+		throw new OnboardingError(
+			"A verified Workspace Owner or Administrator is required",
+			403,
+		);
+	}
+	const now = Date.now();
+	const result = await env.DB.prepare(
+		`UPDATE agent_invitations SET revoked_at=?, cooldown_until=?
+ WHERE id=? AND workspace_id=? AND accepted_at IS NULL AND revoked_at IS NULL
+ RETURNING id,cooldown_until`,
+	)
+		.bind(now, now + 24 * 60 * 60 * 1000, invitationId, workspaceId)
+		.first<{ id: string; cooldown_until: number }>();
+	if (!result)
+		throw new OnboardingError("Invitation is already accepted, revoked, or unavailable", 409);
+	return { id: result.id, cooldownUntil: result.cooldown_until };
+}
+
 /** Reserves the capability before credential creation. Never accepts caller email/workspace/role. */
 export async function registerInvitedAgent(
 	env: AuthEnv,
 	token: string,
-	username: string,
 	password: string,
 ) {
-	if (!isValidUsername(username) || RESERVED_PRIVATE_LOCAL_PARTS.has(username))
-		throw new OnboardingError(
-			"Choose a valid, non-reserved immutable username",
-		);
 	if (password.length < 8 || password.length > 128)
 		throw new OnboardingError("Password must contain 8–128 characters");
 	const hash = await hashToken(token);
 	const invite = await env.DB.prepare(
-		`SELECT email FROM agent_invitations WHERE token_hash=? AND claimed_at IS NULL AND accepted_at IS NULL AND expires_at>?`,
+		`SELECT email,reserved_username FROM agent_invitations WHERE token_hash=? AND claimed_at IS NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?`,
 	)
 		.bind(hash, Date.now())
-		.first<{ email: string }>();
+		.first<{ email: string; reserved_username: string }>();
 	if (!invite)
 		throw new OnboardingError("Invitation expired or already claimed", 409);
 	// Existing accounts must sign in and use accept; never reset their credentials through an invite.
@@ -147,7 +207,7 @@ export async function registerInvitedAgent(
 			409,
 		);
 	const claim = await env.DB.prepare(
-		`UPDATE agent_invitations SET claimed_at=? WHERE token_hash=? AND claimed_at IS NULL AND accepted_at IS NULL AND expires_at>?`,
+		`UPDATE agent_invitations SET claimed_at=? WHERE token_hash=? AND claimed_at IS NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?`,
 	)
 		.bind(Date.now(), hash, Date.now())
 		.run();
@@ -156,7 +216,7 @@ export async function registerInvitedAgent(
 	let userId: string;
 	try {
 		const result = await createSetupAuth(env).api.signUpEmail({
-			body: { email: invite.email, name: username, username, password },
+			body: { email: invite.email, name: invite.reserved_username, password },
 		});
 		userId = result.user.id;
 		// Better Auth intentionally returns a synthetic user for duplicate signup. Do not trust it.
@@ -196,7 +256,7 @@ export async function acceptAgentInvitation(
 ) {
 	const result =
 		await env.DB.prepare(`UPDATE agent_invitations SET user_id=?, accepted_at=?
- WHERE token_hash=? AND accepted_at IS NULL AND expires_at>?
+ WHERE token_hash=? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?
  AND (user_id IS NULL OR user_id=?)
  AND EXISTS (SELECT 1 FROM user WHERE id=? AND lower(email)=agent_invitations.email AND email_verified=1)
  AND NOT EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id=agent_invitations.workspace_id AND user_id=?)
@@ -213,7 +273,7 @@ export async function acceptAgentInvitation(
 			.first<{ workspace_id: string }>();
 	if (!result)
 		throw new OnboardingError(
-			"Invitation expired, consumed, or account email is not verified/matching",
+			"Invitation expired, revoked, consumed, or account email is not verified/matching",
 			403,
 		);
 	return { workspaceId: result.workspace_id };

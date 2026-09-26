@@ -20,9 +20,12 @@ import type {
 import {
 	EmailDomainCreateRequestSchema,
 	EmailDomainStateUpdateRequestSchema,
+	FacebookChannelCreateRequestSchema,
 	OwnerSetupRequestSchema,
 	MailboxDelegateRequestSchema,
 	MailboxStateUpdateRequestSchema,
+	MetaAppCreateRequestSchema,
+	MetaOAuthStartRequestSchema,
 	PrivateMailboxCreateRequestSchema,
 	SharedMailboxCreateRequestSchema,
 	ChannelConnectRequestSchema,
@@ -48,11 +51,13 @@ import {
 import { createAuth } from "@msgflow/auth";
 import { drizzle } from "drizzle-orm/d1";
 import {
+	channels,
 	conversationReads,
 	commentNotifications,
 	conversationTags,
 	conversations,
 	inboxes,
+	metaApps,
 	tags,
 	user,
 	workspaceMembers,
@@ -67,6 +72,7 @@ import {
 	addInboxMember,
 	archiveInbox,
 	connectChannelToken,
+	createFacebookChannel,
 	createCannedReply,
 	createInbox,
 	createRule,
@@ -113,11 +119,19 @@ import {
 	updateEmailDomainState,
 	updateMailboxState,
 } from "./mailboxes";
-import { getOrCreateWorkspace } from "./workspace";
+import { getConfiguredWorkspace } from "./workspace";
+import { createMetaApp, listMetaApps } from "./meta-apps";
+import {
+	completeMetaOAuth,
+	connectAuthorizedPage,
+	listAuthorizedPages,
+	startMetaOAuth,
+} from "./meta-oauth";
 import { scheduleOutbound, sendOutbound } from "./outbound";
 import { getConversation, listConversations } from "./queries";
 import { handleScheduled } from "./scheduled";
-import { verifyFacebookSignature } from "./webhook";
+import { verifyFacebookSignatureForSecrets } from "./webhook";
+import { decryptChannelToken } from "./channel-token-crypto";
 import { requireDefaultWorkspaceAccess } from "./access";
 import { appendActivity } from "./activity";
 import {
@@ -128,6 +142,7 @@ import {
 } from "./attachments";
 import { decodeJsonBody } from "./validation";
 import { OwnerSetupError, setupInitialOwner } from "./setup";
+import { isInitialSetupComplete } from "./setup-state";
 import {
 	canReadConversation,
 	filterReadableNotifications,
@@ -146,6 +161,14 @@ export { ConversationDO };
 const app = new Hono<{ Bindings: Env }>();
 app.use("/api/*", async (c, next) => {
 	c.header("Cache-Control", "private, no-store");
+	// The first-use owner flow is the only public application route before the
+	// durable setup claim completes. An empty deployment is never a tenant.
+	if (
+		c.req.path !== "/api/setup/owner" &&
+		!(await isInitialSetupComplete(c.env))
+	) {
+		return c.json({ success: false, error: "MsgFlow setup is required" }, 503);
+	}
 	await next();
 });
 
@@ -193,7 +216,11 @@ app.on(["GET", "PUT", "DELETE"], "/api/conversations/:id/draft", async (c) => {
 			});
 		if (c.req.method === "DELETE") {
 			const expected = c.req.query("clientMessageId");
-			if (!expected) return c.json({ success: false, error: "submitted draft identifier required" }, 400);
+			if (!expected)
+				return c.json(
+					{ success: false, error: "submitted draft identifier required" },
+					400,
+				);
 			await deleteEmailDraft(c.env, workspaceId, id, session.user.id, expected);
 			return c.json({ success: true });
 		}
@@ -325,16 +352,20 @@ app.post("/api/conversations/:id/messages", async (c) => {
 		}
 	}
 
-	const result = await sendOutbound(c.env, {
-		conversationId,
-		text,
-		subject: body.subject,
-		attachments,
-		senderId: session.user.id,
-		clientMessageId: body.clientMessageId,
-		mailboxId: body.mailboxId,
-		confirmPrivateIdentity: body.confirmPrivateIdentity,
-	}, { retryDefinitiveFailure: true });
+	const result = await sendOutbound(
+		c.env,
+		{
+			conversationId,
+			text,
+			subject: body.subject,
+			attachments,
+			senderId: session.user.id,
+			clientMessageId: body.clientMessageId,
+			mailboxId: body.mailboxId,
+			confirmPrivateIdentity: body.confirmPrivateIdentity,
+		},
+		{ retryDefinitiveFailure: true },
+	);
 
 	if (!result.ok) {
 		return c.json({ success: false, error: result.error }, 502);
@@ -888,6 +919,145 @@ app.get("/api/channels", async (c) => {
 	}
 });
 
+app.post("/api/workspaces/:workspaceId/facebook-channels", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(
+		c.req.raw,
+		FacebookChannelCreateRequestSchema,
+	);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		return c.json(
+			{
+				channel: await createFacebookChannel(
+					c.env,
+					c.req.param("workspaceId"),
+					decoded.value,
+					session.user.id,
+				),
+			},
+			201,
+		);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.get("/api/workspaces/:workspaceId/meta-apps", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		return c.json({
+			metaApps: await listMetaApps(
+				c.env,
+				c.req.param("workspaceId"),
+				session.user.id,
+			),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.post("/api/workspaces/:workspaceId/meta-apps", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, MetaAppCreateRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		return c.json(
+			{
+				metaApp: await createMetaApp(
+					c.env,
+					c.req.param("workspaceId"),
+					decoded.value,
+					session.user.id,
+				),
+			},
+			201,
+		);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.post("/api/workspaces/:workspaceId/meta-oauth/start", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, MetaOAuthStartRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		return c.json(
+			await startMetaOAuth(
+				c.env,
+				c.req.param("workspaceId"),
+				decoded.value.metaAppId,
+				decoded.value.inboxId,
+				session.user.id,
+				new URL(c.req.url).origin,
+			),
+		);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.get("/api/meta-oauth/:sessionId/pages", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const pages = await listAuthorizedPages(
+			c.env,
+			c.req.param("sessionId"),
+			session.user.id,
+		);
+		return c.json({ pages: pages.map(({ id, name }) => ({ id, name })) });
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.post("/api/meta-oauth/:sessionId/pages/:pageId", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		return c.json(
+			{
+				channel: await connectAuthorizedPage(
+					c.env,
+					c.req.param("sessionId"),
+					c.req.param("pageId"),
+					session.user.id,
+				),
+			},
+			201,
+		);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+// Meta redirects through its origin, so callback authorization is bound to the
+// opaque, expiring state row rather than a browser session cookie.
+app.get("/api/meta-oauth/callback", async (c) => {
+	const state = c.req.query("state");
+	const code = c.req.query("code");
+	if (!state || !code) return c.text("Facebook authorization failed", 400);
+	try {
+		const { callbackOrigin, sessionId } = await completeMetaOAuth(
+			c.env,
+			state,
+			code,
+		);
+		return c.redirect(
+			`${callbackOrigin}/setup/channel?metaOauthSession=${encodeURIComponent(sessionId)}`,
+		);
+	} catch {
+		return c.text("Facebook authorization failed", 400);
+	}
+});
+
 // POST /api/channels/:id/token — store a Page access token (dev-mode connect;
 // the production flow will be a Meta OAuth callback that lands here).
 app.post("/api/channels/:id/token", async (c) => {
@@ -949,8 +1119,82 @@ app.post("/api/channels/:id/disconnect", async (c) => {
 
 async function defaultWorkspaceId(env: Env): Promise<string> {
 	const db = drizzle(env.DB);
-	const workspace = await getOrCreateWorkspace(db, new Date().toISOString());
+	const workspace = await getConfiguredWorkspace(db);
 	return workspace.id;
+}
+
+/**
+ * A Messenger delivery identifies its Page in `entry[].id`. Resolve only the
+ * Meta App secrets attached to those active Page Channels before verifying the
+ * HMAC; a secret belonging to an unrelated App must never authenticate it.
+ */
+async function verifyMessengerSignature(
+	env: Env,
+	rawBody: string,
+	signature: string | null | undefined,
+): Promise<boolean> {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(rawBody);
+	} catch {
+		return false;
+	}
+	if (
+		!payload ||
+		typeof payload !== "object" ||
+		(payload as { object?: unknown }).object !== "page" ||
+		!Array.isArray((payload as { entry?: unknown }).entry)
+	) {
+		return false;
+	}
+	const pageIds = [
+		...new Set(
+			(payload as { entry: unknown[] }).entry.flatMap((entry) =>
+				entry &&
+				typeof entry === "object" &&
+				typeof (entry as { id?: unknown }).id === "string"
+					? [(entry as { id: string }).id]
+					: [],
+			),
+		),
+	];
+	if (pageIds.length === 0) return false;
+
+	const db = drizzle(env.DB);
+	const matches = await db
+		.select({ pageId: channels.externalId, appSecret: metaApps.appSecret })
+		.from(channels)
+		.innerJoin(metaApps, eq(channels.metaAppId, metaApps.id))
+		.where(
+			and(
+				eq(channels.type, "facebook_page"),
+				eq(channels.status, "active"),
+				inArray(channels.externalId, pageIds),
+			),
+		)
+		.all();
+	if (new Set(matches.map((match) => match.pageId)).size !== pageIds.length) {
+		return false;
+	}
+
+	const secrets = await Promise.all(
+		[...new Set(matches.map((match) => match.appSecret))].map(
+			async (ciphertext) => {
+				try {
+					return await decryptChannelToken(
+						ciphertext,
+						env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+					);
+				} catch {
+					return null;
+				}
+			},
+		),
+	);
+	const usableSecrets = secrets.filter(
+		(secret): secret is string => secret !== null,
+	);
+	return verifyFacebookSignatureForSecrets(rawBody, signature, usableSecrets);
 }
 
 app.get("/api/inboxes", async (c) => {
@@ -1989,7 +2233,9 @@ app.delete("/api/canned-replies/:id", async (c) => {
 });
 
 // Meta webhook verification handshake (GET).
-app.get("/webhooks/messenger", (c) => {
+app.get("/webhooks/messenger", async (c) => {
+	if (!(await isInitialSetupComplete(c.env)))
+		return c.text("setup required", 503);
 	const verifyToken = c.req.query("hub.verify_token");
 	const challenge = c.req.query("hub.challenge");
 	if (verifyToken === c.env.MESSENGER_VERIFY_TOKEN && challenge) {
@@ -2000,13 +2246,11 @@ app.get("/webhooks/messenger", (c) => {
 
 // Meta webhook events (POST): verify signature → normalize → route to the DO.
 app.post("/webhooks/messenger", async (c) => {
+	if (!(await isInitialSetupComplete(c.env)))
+		return c.text("setup required", 503);
 	const rawBody = await c.req.text();
 	const signature = c.req.header("X-Hub-Signature-256");
-	const ok = await verifyFacebookSignature(
-		rawBody,
-		signature,
-		c.env.MESSENGER_APP_SECRET,
-	);
+	const ok = await verifyMessengerSignature(c.env, rawBody, signature);
 	if (!ok) {
 		return c.text("invalid signature", 403);
 	}
@@ -2048,6 +2292,10 @@ export default {
 		env: Env,
 		_ctx: ExecutionContext,
 	): Promise<void> {
+		if (!(await isInitialSetupComplete(env))) {
+			message.setReject("MsgFlow setup is required");
+			return;
+		}
 		await handleInboundEmail(env, message);
 	},
 

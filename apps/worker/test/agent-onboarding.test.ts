@@ -5,6 +5,7 @@ import {
 	createAgentInvitation,
 	registerInvitedAgent,
 	requestAccountVerification,
+	revokeAgentInvitation,
 } from "../src/agent-onboarding";
 import { onboardingApi } from "../src/onboarding-api";
 import { setupInitialOwner } from "../src/setup";
@@ -74,6 +75,7 @@ describe("verified owner and invited agent onboarding", () => {
 				owner.userId,
 				owner.workspaceId,
 				"agent@example.test",
+				"pilot.agent",
 			),
 		).rejects.toMatchObject({ status: 403 });
 		expect(
@@ -95,6 +97,7 @@ describe("verified owner and invited agent onboarding", () => {
 			owner.userId,
 			owner.workspaceId,
 			"Agent@example.test",
+			"pilot.agent",
 		);
 		expect(invitation.delivery).toBe("email_sent");
 		const capability = token(invitation.invitationUrl);
@@ -102,7 +105,6 @@ describe("verified owner and invited agent onboarding", () => {
 			await registerInvitedAgent(
 				env,
 				capability,
-				"pilot.agent",
 				ownerInput.password,
 			),
 		).toMatchObject({
@@ -124,7 +126,7 @@ describe("verified owner and invited agent onboarding", () => {
 			acceptAgentInvitation(env, capability, required(agent).id),
 		).rejects.toMatchObject({ status: 403 });
 		await expect(
-			registerInvitedAgent(env, capability, "pilot.other", ownerInput.password),
+			registerInvitedAgent(env, capability, ownerInput.password),
 		).rejects.toMatchObject({ status: 409 });
 		await verifyMail(env, sent);
 		const outcomes = await Promise.allSettled([
@@ -150,7 +152,7 @@ describe("verified owner and invited agent onboarding", () => {
 		});
 		expect(login.user.id).toBe(required(agent).id);
 	});
-	test("invites require owner, expire, reject wrong identities and reserved/unnormalized usernames", async () => {
+	test("invites require verified lifecycle access, reserve usernames, and expire", async () => {
 		const { env, owner } = await verifiedFixture();
 		await expect(
 			createAgentInvitation(
@@ -158,6 +160,7 @@ describe("verified owner and invited agent onboarding", () => {
 				owner.userId,
 				"other-workspace",
 				"agent@example.test",
+				"pilot.agent",
 			),
 		).rejects.toMatchObject({ status: 403 });
 		const invitation = await createAgentInvitation(
@@ -165,11 +168,18 @@ describe("verified owner and invited agent onboarding", () => {
 			owner.userId,
 			owner.workspaceId,
 			"agent@example.test",
+			"pilot.agent",
 		);
 		const capability = token(invitation.invitationUrl);
 		for (const username of ["support", "Agent", "two..dots", "a+b"])
 			await expect(
-				registerInvitedAgent(env, capability, username, ownerInput.password),
+				createAgentInvitation(
+					env,
+					owner.userId,
+					owner.workspaceId,
+					`${username}@example.test`,
+					username,
+				),
 			).rejects.toMatchObject({ status: 400 });
 		await expect(
 			acceptAgentInvitation(env, capability, owner.userId),
@@ -178,7 +188,7 @@ describe("verified owner and invited agent onboarding", () => {
 			.bind(invitation.id)
 			.run();
 		await expect(
-			registerInvitedAgent(env, capability, "pilot.agent", ownerInput.password),
+			registerInvitedAgent(env, capability, ownerInput.password),
 		).rejects.toMatchObject({ status: 409 });
 	});
 	test("copyable invitation fallback and mail failure are honest", async () => {
@@ -191,6 +201,7 @@ describe("verified owner and invited agent onboarding", () => {
 					owner.userId,
 					owner.workspaceId,
 					"copy@example.test",
+					"copy.agent",
 				)
 			).delivery,
 		).toBe("copy_link");
@@ -209,6 +220,7 @@ describe("verified owner and invited agent onboarding", () => {
 					owner.userId,
 					owner.workspaceId,
 					"failed@example.test",
+					"failed.agent",
 				)
 			).delivery,
 		).toBe("email_delivery_failed");
@@ -217,11 +229,11 @@ describe("verified owner and invited agent onboarding", () => {
 			owner.userId,
 			owner.workspaceId,
 			"unverified@example.test",
+			"unverified.agent",
 		);
 		await registerInvitedAgent(
 			noSender,
 			token(pending.invitationUrl),
-			"unverified.agent",
 			ownerInput.password,
 		);
 		expect(
@@ -289,19 +301,18 @@ describe("verified owner and invited agent onboarding", () => {
 			owner.userId,
 			owner.workspaceId,
 			"parallel@example.test",
+			"parallel.agent",
 		);
 		const capability = token(invitation.invitationUrl);
 		const outcomes = await Promise.allSettled([
 			registerInvitedAgent(
 				env,
 				capability,
-				"parallel.one",
 				ownerInput.password,
 			),
 			registerInvitedAgent(
 				env,
 				capability,
-				"parallel.two",
 				ownerInput.password,
 			),
 		]);
@@ -326,45 +337,58 @@ describe("verified owner and invited agent onboarding", () => {
 				.first(),
 		).toEqual({ accepted_at: null });
 	});
-	test("an existing verified account accepts only its invitation without credential overwrite", async () => {
-		const { env, owner, sent } = await verifiedFixture();
+	test("active invitations prevent a second recovery-email reservation", async () => {
+		const { env, owner } = await verifiedFixture();
 		const first = await createAgentInvitation(
 			env,
 			owner.userId,
 			owner.workspaceId,
 			"existing@example.test",
+			"existing.agent",
 		);
 		await registerInvitedAgent(
 			env,
 			token(first.invitationUrl),
-			"existing.agent",
 			ownerInput.password,
 		);
-		await verifyMail(env, sent);
-		const second = await createAgentInvitation(
+		await expect(
+			createAgentInvitation(
+				env,
+				owner.userId,
+				owner.workspaceId,
+				"existing@example.test",
+				"existing.other",
+			),
+		).rejects.toMatchObject({ status: 409 });
+	});
+	test("revocation blocks acceptance and keeps the username reserved for one day", async () => {
+		const { env, owner } = await verifiedFixture();
+		const invitation = await createAgentInvitation(
 			env,
 			owner.userId,
 			owner.workspaceId,
-			"existing@example.test",
+			"revoked@example.test",
+			"revoked.agent",
 		);
+		const revoked = await revokeAgentInvitation(
+			env,
+			owner.userId,
+			owner.workspaceId,
+			invitation.id,
+		);
+		expect(revoked.cooldownUntil).toBeGreaterThan(Date.now());
 		await expect(
-			registerInvitedAgent(
+			createAgentInvitation(
 				env,
-				token(second.invitationUrl),
-				"changed.agent",
-				"different password",
+				owner.userId,
+				owner.workspaceId,
+				"other@example.test",
+				"revoked.agent",
 			),
 		).rejects.toMatchObject({ status: 409 });
-		const existing = await createAuth(env).api.signInEmail({
-			body: { email: "existing@example.test", password: ownerInput.password },
-		});
-		expect(
-			await acceptAgentInvitation(
-				env,
-				token(second.invitationUrl),
-				existing.user.id,
-			),
-		).toEqual({ workspaceId: owner.workspaceId });
+		await expect(
+			registerInvitedAgent(env, token(invitation.invitationUrl), ownerInput.password),
+		).rejects.toMatchObject({ status: 409 });
 	});
 	test("HTTP routes deny unauthenticated owners, foreign origins and malformed capabilities", async () => {
 		const { env, owner } = await fixture(false);

@@ -1002,8 +1002,10 @@ function Operations({
 }
 function Invitation({ workspaceId }: { workspaceId: string }) {
 	const [email, setEmail] = useState("");
+	const [username, setUsername] = useState("");
 	const invite = useMutation({
-		mutationFn: () => emailApi.invite(workspaceId, email.trim()),
+		mutationFn: () =>
+			emailApi.invite(workspaceId, email.trim(), username.trim()),
 	});
 	return (
 		<details className="rounded-lg border p-4">
@@ -1016,9 +1018,9 @@ function Invitation({ workspaceId }: { workspaceId: string }) {
 				}}
 			>
 				<p className="text-sm">
-					A verified Workspace Owner can invite a recovery email. The Agent
-					chooses an immutable username; membership does not automatically
-					provision a mailbox.
+					A verified Workspace Owner or Administrator reserves the Agent's
+					immutable username and recovery email. Membership does not
+					automatically provision a mailbox.
 				</p>
 				<label className="block text-sm">
 					Recovery email{" "}
@@ -1030,7 +1032,21 @@ function Invitation({ workspaceId }: { workspaceId: string }) {
 						onChange={(e) => setEmail(e.target.value)}
 					/>
 				</label>
-				<Button size="sm" disabled={invite.isPending || !email.trim()}>
+				<label className="block text-sm">
+					Reserved immutable username
+					<input
+						required
+						minLength={3}
+						maxLength={30}
+						className={field}
+						value={username}
+						onChange={(e) => setUsername(e.target.value)}
+					/>
+				</label>
+				<Button
+					size="sm"
+					disabled={invite.isPending || !email.trim() || !username.trim()}
+				>
 					Create invitation
 				</Button>
 			</form>

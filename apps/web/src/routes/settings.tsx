@@ -5,7 +5,7 @@ import type {
 	TagUpdateRequest,
 } from "@msgflow/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { EmailAdmin } from "@/components/email-admin";
 import { TAG_COLOR_OPTIONS, TagChip } from "@/components/inbox/TagChip";
@@ -16,18 +16,117 @@ import { cn } from "@/lib/utils";
 export const Route = createFileRoute("/settings")({ component: Settings });
 
 function Settings() {
+	const navigate = useNavigate();
+	const [tab, setTab] = useState<SettingsTab>("email");
+	const tabs: { id: SettingsTab; label: string; detail: string }[] = [
+		{
+			id: "email",
+			label: "Email pilot",
+			detail: "Domains, mailboxes, DNS readiness and operations",
+		},
+		{
+			id: "inboxes",
+			label: "Inboxes",
+			detail: "Shared queues, channel links and default routing",
+		},
+		{
+			id: "channels",
+			label: "Channels",
+			detail: "Facebook Page connection state and access tokens",
+		},
+		{
+			id: "tags",
+			label: "Tags",
+			detail: "Conversation labels and filtering",
+		},
+	];
 	return (
-		<div className="mx-auto max-w-2xl px-6 py-8">
-			<h1 className="text-2xl font-black">Settings</h1>
-			<div className="mt-6 space-y-10">
-				<InboxesSection />
-				<ChannelsSection />
-				<TagsSection />
-				<EmailAdmin />
-			</div>
+		<div className="fixed inset-0 z-50 bg-slate-950/35 backdrop-blur-[1px]">
+			<button
+				type="button"
+				aria-label="Close settings"
+				className="absolute inset-0 cursor-default"
+				onClick={() => navigate({ to: "/" })}
+			/>
+			<aside
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby="settings-title"
+				className="absolute inset-y-0 right-0 flex w-full max-w-6xl flex-col border-l bg-background shadow-2xl"
+			>
+				<header className="flex shrink-0 items-start justify-between gap-6 border-b px-6 py-5">
+					<div>
+						<p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+							Workspace control room
+						</p>
+						<h1 id="settings-title" className="mt-1 text-2xl font-black">
+							Settings
+						</h1>
+						<p className="mt-1 text-sm text-muted-foreground">
+							Changes are server-authorized. Email DNS and Cloudflare actions
+							stay operator-controlled.
+						</p>
+					</div>
+					<Button
+						type="button"
+						variant="outline"
+						onClick={() => navigate({ to: "/" })}
+					>
+						Close settings
+					</Button>
+				</header>
+				<div className="flex min-h-0 flex-1">
+					<div
+						aria-label="Settings sections"
+						className="w-64 shrink-0 border-r bg-muted/20 p-3"
+						role="tablist"
+						aria-orientation="vertical"
+					>
+						{tabs.map((item) => (
+							<button
+								key={item.id}
+								id={`settings-tab-${item.id}`}
+								type="button"
+								role="tab"
+								aria-selected={tab === item.id}
+								aria-controls={`settings-panel-${item.id}`}
+								onClick={() => setTab(item.id)}
+								className={cn(
+									"mb-1 w-full rounded-lg px-3 py-3 text-left transition-colors",
+									tab === item.id
+										? "bg-background shadow-sm ring-1 ring-border"
+										: "text-muted-foreground hover:bg-background/70 hover:text-foreground",
+								)}
+							>
+								<span className="block text-sm font-semibold">
+									{item.label}
+								</span>
+								<span className="mt-1 block text-xs leading-4">
+									{item.detail}
+								</span>
+							</button>
+						))}
+					</div>
+					<main className="min-w-0 flex-1 overflow-y-auto px-6 py-7 sm:px-8">
+						<div
+							id={`settings-panel-${tab}`}
+							role="tabpanel"
+							aria-labelledby={`settings-tab-${tab}`}
+							className="mx-auto max-w-4xl"
+						>
+							{tab === "email" ? <EmailAdmin /> : null}
+							{tab === "inboxes" ? <InboxesSection /> : null}
+							{tab === "channels" ? <ChannelsSection /> : null}
+							{tab === "tags" ? <TagsSection /> : null}
+						</div>
+					</main>
+				</div>
+			</aside>
 		</div>
 	);
 }
+
+type SettingsTab = "email" | "inboxes" | "channels" | "tags";
 
 function InboxesSection() {
 	const queryClient = useQueryClient();
@@ -274,15 +373,192 @@ function ChannelsSection() {
 		queryKey: ["channels"],
 		queryFn: () => api.listChannels(),
 	});
+	const { data: inboxesData } = useQuery({
+		queryKey: ["inboxes"],
+		queryFn: () => api.listInboxes(),
+	});
+	const { data: workspacesData } = useQuery({
+		queryKey: ["workspaces"],
+		queryFn: () => api.listWorkspaces(),
+	});
+	const workspaceId = workspacesData?.workspaces[0]?.id;
+	const { data: metaAppsData } = useQuery({
+		queryKey: ["meta-apps", workspaceId],
+		queryFn: () => (workspaceId ? api.listMetaApps(workspaceId) : Promise.resolve({ metaApps: [] })),
+		enabled: Boolean(workspaceId),
+	});
+	const [adding, setAdding] = useState(false);
+	const [pageId, setPageId] = useState("");
+	const [displayName, setDisplayName] = useState("");
+	const [accessToken, setAccessToken] = useState("");
+	const [inboxId, setInboxId] = useState("");
+	const [error, setError] = useState<string | null>(null);
+	const [metaAppId, setMetaAppId] = useState("");
+	const [addingMetaApp, setAddingMetaApp] = useState(false);
+	const [metaAppName, setMetaAppName] = useState("");
+	const [metaAppPublicId, setMetaAppPublicId] = useState("");
+	const [metaAppSecret, setMetaAppSecret] = useState("");
+	const { mutate: createMetaApp, isPending: creatingMetaApp } = useMutation({
+		mutationFn: () => {
+			if (!workspaceId) throw new Error("Workspace not found.");
+			return api.createMetaApp(workspaceId, { displayName: metaAppName.trim(), appId: metaAppPublicId.trim(), appSecret: metaAppSecret.trim() });
+		},
+		onSuccess: (result) => {
+			setAddingMetaApp(false);
+			setMetaAppName("");
+			setMetaAppPublicId("");
+			setMetaAppSecret("");
+			setMetaAppId(result.metaApp.id);
+			queryClient.invalidateQueries({ queryKey: ["meta-apps"] });
+		},
+		onError: (err) => setError(err instanceof Error ? err.message : "Unable to add Meta App."),
+	});
+	const { mutate: createPage, isPending: creating } = useMutation({
+		mutationFn: () => {
+			if (!workspaceId) throw new Error("Workspace not found.");
+			return api.createFacebookChannel(workspaceId, {
+				pageId: pageId.trim(),
+				displayName: displayName.trim(),
+				accessToken: accessToken.trim(),
+				inboxId,
+				metaAppId,
+			});
+		},
+		onSuccess: () => {
+			setAdding(false);
+			setPageId("");
+			setDisplayName("");
+			setAccessToken("");
+			setInboxId("");
+			setError(null);
+			queryClient.invalidateQueries({ queryKey: ["channels"] });
+		},
+		onError: (err) =>
+			setError(err instanceof Error ? err.message : "Unable to add Page."),
+	});
 
 	return (
 		<section>
 			<h2 className="text-lg font-bold">Channels</h2>
 			<p className="mt-1 text-sm text-gray-500">
-				Connect a Facebook Page so replies can be sent. Email addresses must be
-				explicitly provisioned in Email domains and mailboxes below; incoming
-				mail never creates a new address automatically.
+				Each Facebook Page is an explicit Channel with one default shared Inbox.
+				Email addresses are provisioned separately through Email pilot.
 			</p>
+			<div className="mt-4 rounded-xl border bg-muted/20 p-4">
+				<div className="flex items-center justify-between gap-3">
+					<div>
+						<p className="font-semibold">Meta Apps</p>
+						<p className="text-sm text-muted-foreground">Add each Meta App once. Developers/testers of a development-mode App can connect its Pages without App Review.</p>
+					</div>
+					<Button type="button" size="sm" variant="outline" onClick={() => setAddingMetaApp((current) => !current)}>{addingMetaApp ? "Cancel" : "Add Meta App"}</Button>
+				</div>
+				{addingMetaApp ? (
+					<form onSubmit={(event) => { event.preventDefault(); createMetaApp(); }} className="mt-4 grid gap-3 sm:grid-cols-3">
+						<input required value={metaAppName} onChange={(event) => setMetaAppName(event.target.value)} placeholder="App display name" className="rounded-md border bg-background px-3 py-2 text-sm" />
+						<input required value={metaAppPublicId} onChange={(event) => setMetaAppPublicId(event.target.value)} placeholder="Meta App ID" className="rounded-md border bg-background px-3 py-2 text-sm" />
+						<input required type="password" value={metaAppSecret} onChange={(event) => setMetaAppSecret(event.target.value)} placeholder="Meta App secret" className="rounded-md border bg-background px-3 py-2 text-sm" />
+						<div className="sm:col-span-3 flex justify-end"><Button type="submit" size="sm" disabled={creatingMetaApp || !workspaceId || !metaAppName.trim() || !metaAppPublicId.trim() || !metaAppSecret.trim()}>{creatingMetaApp ? "Saving…" : "Save Meta App"}</Button></div>
+					</form>
+				) : null}
+			</div>
+			<div className="mt-4 rounded-xl border bg-muted/20 p-4">
+				<div className="flex items-center justify-between gap-3">
+					<div>
+						<p className="font-semibold">Facebook Messenger Page</p>
+						<p className="text-sm text-muted-foreground">
+							The Page token is encrypted and never shown again.
+						</p>
+					</div>
+					<Button
+						type="button"
+						size="sm"
+						onClick={() => setAdding((current) => !current)}
+					>
+						{adding ? "Cancel" : "Add Page channel"}
+					</Button>
+				</div>
+				{adding ? (
+					<form
+						onSubmit={(event) => {
+							event.preventDefault();
+							createPage();
+						}}
+						className="mt-4 grid gap-3 sm:grid-cols-2"
+					>
+						<input
+							required
+							value={displayName}
+							onChange={(event) => setDisplayName(event.target.value)}
+							placeholder="Page display name"
+							className="rounded-md border bg-background px-3 py-2 text-sm"
+						/>
+						<input
+							required
+							value={pageId}
+							onChange={(event) => setPageId(event.target.value)}
+							placeholder="Meta Page ID"
+							className="rounded-md border bg-background px-3 py-2 text-sm"
+						/>
+						<select
+							required
+							value={metaAppId}
+							onChange={(event) => setMetaAppId(event.target.value)}
+							className="rounded-md border bg-background px-3 py-2 text-sm"
+						>
+							<option value="">Select Meta App</option>
+							{metaAppsData?.metaApps.map((app) => (
+								<option key={app.id} value={app.id}>{app.displayName} · {app.appId}</option>
+							))}
+						</select>
+						<select
+							required
+							value={inboxId}
+							onChange={(event) => setInboxId(event.target.value)}
+							className="rounded-md border bg-background px-3 py-2 text-sm"
+						>
+							<option value="">Select shared Inbox</option>
+							{inboxesData?.inboxes
+								.filter((inbox) => !inbox.isArchived)
+								.map((inbox) => (
+									<option key={inbox.id} value={inbox.id}>
+										{inbox.name}
+									</option>
+								))}
+						</select>
+						<input
+							required
+							type="password"
+							value={accessToken}
+							onChange={(event) => setAccessToken(event.target.value)}
+							placeholder="Page access token"
+							className="rounded-md border bg-background px-3 py-2 text-sm"
+						/>
+						<div className="sm:col-span-2 flex items-center justify-between gap-3">
+							<p className="text-xs text-muted-foreground">
+								Disconnecting retains history but stops new traffic and replies.
+							</p>
+							<Button
+								type="submit"
+								size="sm"
+								disabled={
+									creating ||
+									!workspaceId ||
+									!metaAppId ||
+									!inboxId ||
+									!pageId.trim() ||
+									!displayName.trim() ||
+									!accessToken.trim()
+								}
+							>
+								{creating ? "Connecting…" : "Connect Page"}
+							</Button>
+						</div>
+					</form>
+				) : null}
+				{error ? (
+					<p className="mt-3 text-sm text-destructive">{error}</p>
+				) : null}
+			</div>
 			<div className="mt-4 space-y-4">
 				{isPending ? <p className="text-sm text-gray-400">Loading…</p> : null}
 				{data?.channels.map((channel) => (
@@ -296,7 +572,8 @@ function ChannelsSection() {
 				))}
 				{data && data.channels.length === 0 ? (
 					<p className="text-sm text-gray-400">
-						No channels yet — they appear here when the first message arrives.
+						No channels yet — add a Facebook Page above or provision an email
+						Mailbox.
 					</p>
 				) : null}
 			</div>
@@ -330,7 +607,7 @@ function ChannelRow({
 		onSuccess: onChanged,
 	});
 
-	const canConnect = channel.type === "facebook_page" && !channel.hasToken;
+	const canConnect = channel.type === "facebook_page";
 
 	return (
 		<div className="rounded-lg border p-4">
@@ -380,7 +657,11 @@ function ChannelRow({
 					<input
 						value={token}
 						onChange={(event) => setToken(event.target.value)}
-						placeholder="Paste a Page access token"
+						placeholder={
+							channel.hasToken
+								? "Paste a replacement Page access token"
+								: "Paste a Page access token"
+						}
 						className="flex-1 rounded-md border px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-ring/50"
 					/>
 					<Button
@@ -388,7 +669,11 @@ function ChannelRow({
 						size="sm"
 						disabled={connecting || !token.trim()}
 					>
-						{connecting ? "Saving…" : "Connect"}
+						{connecting
+							? "Saving…"
+							: channel.hasToken
+								? "Rotate token"
+								: "Connect"}
 					</Button>
 				</form>
 			) : null}
