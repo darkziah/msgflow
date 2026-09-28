@@ -2,30 +2,26 @@ import type {
 	SavedFilterCreateRequest,
 	SavedFilterFilters,
 	SavedFilterSummary,
-	SidebarGroup,
-	SidebarInboxItem,
-	SidebarItem,
+	SidebarNode,
 	SidebarPreferences,
 	SidebarPreferencesUpdate,
-	SidebarResponse,
-	SidebarSection,
-	SidebarTagItem,
+	SidebarTreeResponse,
 	WorkspaceCreateRequest,
 	WorkspaceSummary,
 } from "@msgflow/contracts";
 import {
+	SavedFilterFiltersSchema,
 	SidebarItemOrderSchema,
 	SidebarStringListSchema,
 } from "@msgflow/contracts";
 import {
 	channels,
 	conversations,
-	conversationTags,
 	inboxChannels,
 	inboxes,
+	mailboxes,
 	savedFilters,
 	tags,
-	teams,
 	userSidebarPreferences,
 	workspaces,
 } from "@msgflow/db";
@@ -38,12 +34,9 @@ import {
 	requireWorkspaceOwnerAccess,
 	userBelongsToWorkspace,
 } from "./access";
-import {
-	conversationReadPredicate,
-	mailboxReadPredicate,
-} from "./email-transport";
 import type { Env } from "./env";
 import { ManageError } from "./errors";
+import { getReadableInboxIds } from "./inbox-tree";
 import { provisionWorkspace } from "./workspace-provisioning";
 
 /**
@@ -57,6 +50,17 @@ import { provisionWorkspace } from "./workspace-provisioning";
  */
 
 const ITEM_ID_RE = /^(system|inbox|tag|view):/;
+const TREE_NODE_ID_RE =
+	/^(section|smart|inbox|channel-group|channel|tag|view):/;
+// These identifiers belong to the pre-tree renderer. They remain valid stored
+// preference values, but are not guessed into semantically different nodes.
+const LEGACY_ITEM_IDS = new Set([
+	"system:all",
+	"system:assigned-to-me",
+	"system:unassigned",
+	"system:snoozed",
+	"system:closed",
+]);
 // Section keys are NOT item ids — they are the sidebar section identifiers.
 const SECTION_KEYS = new Set(["inbox", "assigned", "teams", "tags", "views"]);
 const FILTER_KEYS = new Set([
@@ -76,7 +80,8 @@ export async function getSidebar(
 	env: Env,
 	workspaceId: string,
 	userId: string,
-): Promise<SidebarResponse> {
+	dependencies: SidebarQueryDependencies = {},
+): Promise<SidebarTreeResponse> {
 	const db = drizzle(env.DB);
 	const access = await requireWorkspaceAccess(db, workspaceId, userId);
 	const ws = await db
@@ -85,331 +90,441 @@ export async function getSidebar(
 		.where(eq(workspaces.id, workspaceId))
 		.get();
 	if (!ws) throw new ManageError("workspace not found", 404);
-
+	const readableIds = await getReadableInboxIds(db, workspaceId, userId);
+	const readable = new Set(readableIds);
 	const now = new Date().toISOString();
-	// Future-snoozed open conversations are counted only by the Snoozed virtual
-	// queue. Archived work remains visible in Closed even with a stale snooze.
-	const visibleOutsideSnoozedQueue = or(
-		eq(conversations.status, "archived"),
-		isNull(conversations.snoozedUntil),
-		lte(conversations.snoozedUntil, now),
+	const actionable = and(
+		eq(conversations.status, "open"),
+		or(
+			isNull(conversations.snoozedUntil),
+			lte(conversations.snoozedUntil, now),
+		),
 	);
-
-	const privacy = conversationReadPredicate(userId);
-	const allInboxes = await db
-		.select()
-		.from(inboxes)
-		.where(
-			and(
-				eq(inboxes.workspaceId, workspaceId),
-				sql`NOT EXISTS (SELECT 1 FROM inbox_channels ic JOIN channels c ON c.id = ic.channel_id JOIN mailboxes ON mailboxes.canonical_address = c.external_id AND mailboxes.workspace_id = ${inboxes.workspaceId} WHERE ic.inbox_id = ${inboxes.id} AND c.type = 'email' AND NOT (${mailboxReadPredicate(userId)}))`,
-			),
-		)
-		.orderBy(asc(inboxes.sortOrder), asc(inboxes.name))
-		.all();
-	const allInboxIds = allInboxes.map((row) => row.id);
-
-	const [links, teamRows] = await Promise.all([
-		db
-			.select({
-				inboxId: inboxChannels.inboxId,
-				channelId: inboxChannels.channelId,
-				isDefault: inboxChannels.isDefault,
-				channelType: channels.type,
-			})
-			.from(inboxChannels)
-			.innerJoin(channels, eq(inboxChannels.channelId, channels.id))
-			.where(inArray(inboxChannels.inboxId, allInboxIds))
-			.all(),
-		db
-			.select({ id: teams.id, name: teams.name })
-			.from(teams)
-			.where(eq(teams.workspaceId, workspaceId))
-			.all(),
-	]);
-	const teamNameById = new Map(teamRows.map((t) => [t.id, t.name]));
-
-	const channelTypeByInbox = new Map<string, Set<"facebook_page" | "email">>();
-	for (const link of links) {
-		const set = channelTypeByInbox.get(link.inboxId) ?? new Set();
-		set.add(link.channelType);
-		channelTypeByInbox.set(link.inboxId, set);
-	}
-
-	// Visibility: admins see every inbox; members see inboxes they joined or
-	// have an open conversation assigned to them inside (the never-remove rule
-	// keeps those visible even after archiving/hiding until resolved).
-	const openAssigned = await db
-		.select({ inboxId: conversations.inboxId })
-		.from(conversations)
-		.where(
-			and(
-				eq(conversations.assigneeId, userId),
-				privacy,
-				eq(conversations.status, "open"),
-				inArray(conversations.inboxId, allInboxIds),
-			),
-		)
-		.all();
-	const openAssignedInboxIds = new Set(openAssigned.map((row) => row.inboxId));
-
-	// Visibility: every workspace member sees all non-archived inboxes. This
-	// matches the app's read model (the conversation list is workspace-scoped,
-	// not inbox-membership-scoped), so the sidebar can never hide an inbox that
-	// the list would still show. Archived inboxes stay visible only when the
-	// user has an open conversation assigned inside them (the never-remove
-	// rule: an inbox with assigned work is never taken off the sidebar until
-	// that work is resolved or reassigned).
-	const visibleInboxIds = new Set(
-		allInboxes.filter((row) => !row.isArchived).map((row) => row.id),
+	const scope = readableIds.length
+		? inArray(conversations.inboxId, readableIds)
+		: sql`0`;
+	const safe = async <T>(
+		label: string,
+		run: () => Promise<T>,
+	): Promise<T | null> => {
+		try {
+			return await run();
+		} catch (error) {
+			console.error("sidebar query failed", {
+				label,
+				workspaceId,
+				error: String(error),
+			});
+			return null;
+		}
+	};
+	const rows = readableIds.length
+		? await db
+				.select()
+				.from(inboxes)
+				.where(
+					and(
+						eq(inboxes.workspaceId, workspaceId),
+						inArray(inboxes.id, readableIds),
+					),
+				)
+				.orderBy(asc(inboxes.sortOrder), asc(inboxes.name))
+				.all()
+		: [];
+	const countRows = await safe("inbox counts", () =>
+		(dependencies.countInboxDescendants ?? countInboxDescendants)(
+			env,
+			workspaceId,
+			readableIds,
+			userId,
+			now,
+		),
 	);
-	const countInboxIds = new Set([...visibleInboxIds, ...openAssignedInboxIds]);
-
-	// Counts, scoped to the visible inbox set.
-	const [
-		openCounts,
-		allCount,
-		assignedCount,
-		unassignedCount,
-		snoozedCount,
-		closedCount,
-		tagCounts,
-	] = await Promise.all([
-		db
-			.select({
-				inboxId: conversations.inboxId,
-				count: sqlCount(),
-			})
-			.from(conversations)
-			.where(
-				and(
-					privacy,
-					inArray(conversations.inboxId, [...countInboxIds]),
-					eq(conversations.status, "open"),
-					visibleOutsideSnoozedQueue,
-				),
-			)
-			.groupBy(conversations.inboxId)
-			.all(),
-		countWhere(db, [
-			privacy,
-			inArray(conversations.inboxId, [...countInboxIds]),
-			visibleOutsideSnoozedQueue,
-		]),
-		countWhere(db, [
-			privacy,
-			inArray(conversations.inboxId, [...countInboxIds]),
-			eq(conversations.status, "open"),
-			eq(conversations.assigneeId, userId),
-			visibleOutsideSnoozedQueue,
-		]),
-		countWhere(db, [
-			privacy,
-			inArray(conversations.inboxId, [...visibleInboxIds]),
-			eq(conversations.status, "open"),
-			isNull(conversations.assigneeId),
-			visibleOutsideSnoozedQueue,
-		]),
-		countWhere(db, [
-			privacy,
-			inArray(conversations.inboxId, [...countInboxIds]),
-			eq(conversations.status, "open"),
-			gt(conversations.snoozedUntil, now),
-		]),
-		countWhere(db, [
-			privacy,
-			inArray(conversations.inboxId, [...countInboxIds]),
-			eq(conversations.status, "archived"),
-		]),
-		db
-			.select({
-				tagId: conversationTags.tagId,
-				count: sqlCount(),
-			})
-			.from(conversationTags)
-			.innerJoin(
-				conversations,
-				eq(conversationTags.conversationId, conversations.id),
-			)
-			.where(
-				and(
-					privacy,
-					inArray(conversations.inboxId, [...countInboxIds]),
-					eq(conversations.status, "open"),
-					visibleOutsideSnoozedQueue,
-				),
-			)
-			.groupBy(conversationTags.tagId)
-			.all(),
-	]);
-
+	const directCounts = await safe("sidebar count", () =>
+		countWhere(db, [scope, actionable]),
+	);
 	const countByInbox = new Map(
-		openCounts.map((row) => [row.inboxId, row.count ?? 0]),
+		(countRows ?? []).map((row) => [row.inboxId, row]),
 	);
-	const tagCountById = new Map(
-		tagCounts.map((row) => [row.tagId, row.count ?? 0]),
-	);
-
-	// Inbox items visible in navigation (archived hidden unless open-assigned).
-	const inboxItemById = new Map<string, SidebarInboxItem>();
-	for (const row of allInboxes) {
-		const keepVisible =
-			visibleInboxIds.has(row.id) ||
-			(row.isArchived && openAssignedInboxIds.has(row.id));
-		if (!keepVisible) continue;
-		const item: SidebarInboxItem = {
-			kind: "inbox",
+	const make = (
+		partial: Omit<SidebarNode, "children" | "isHidden">,
+	): SidebarNode => ({ ...partial, children: [], isHidden: false });
+	const childrenByParent = new Map<string, typeof rows>();
+	for (const row of rows)
+		if (row.parentInboxId && readable.has(row.parentInboxId))
+			childrenByParent.set(row.parentInboxId, [
+				...(childrenByParent.get(row.parentInboxId) ?? []),
+				row,
+			]);
+	const buildInbox = (
+		row: (typeof rows)[number],
+		parentId: string,
+	): SidebarNode => {
+		const node = make({
 			id: `inbox:${row.id}`,
+			type: "inbox",
+			parentId,
 			label: row.name,
-			inboxId: row.id,
-			color: row.color,
 			icon: row.icon,
-			teamId: row.teamId,
-			isArchived: row.isArchived,
-			isDefault: links.some(
-				(link) => link.inboxId === row.id && link.isDefault,
-			),
-			count: countByInbox.get(row.id) ?? 0,
-			hasOpenAssigned: openAssignedInboxIds.has(row.id),
-		};
-		inboxItemById.set(row.id, item);
-	}
-
-	// Inbox section: All Messages + channel-type groups (+ linkless "General").
-	const inboxItems: SidebarItem[] = [
-		{
-			kind: "system",
-			id: "system:all",
-			label: "All Messages",
-			count: allCount,
-		},
+			color: row.color,
+			// Direct counts cannot prove an ancestor's total. If the recursive
+			// aggregate is unavailable, degrade every inbox-derived metric rather
+			// than incorrectly displaying zero for a leaf or parent.
+			count: countRows === null ? null : (countByInbox.get(row.id)?.count ?? 0),
+			unread:
+				countRows === null ? null : (countByInbox.get(row.id)?.unread ?? 0),
+			unassigned:
+				countRows === null ? null : (countByInbox.get(row.id)?.unassigned ?? 0),
+			isCollapsible: false,
+			isEditable:
+				access.isAdmin && row.visibilityType === "shared" && !row.isArchived,
+			permissionState: "allowed",
+			filter: { status: "open", inboxId: row.id },
+		});
+		node.children = (childrenByParent.get(row.id) ?? []).map((child) =>
+			buildInbox(child, node.id),
+		);
+		if (node.children.length) node.isCollapsible = true;
+		return node;
+	};
+	const roots = rows
+		.filter((row) => !row.parentInboxId || !readable.has(row.parentInboxId))
+		.map((row) => buildInbox(row, "section:shared-inboxes"));
+	const smartDefs: Array<[string, string, SavedFilterFilters, unknown[]]> = [
+		[
+			"assigned-to-me",
+			"Assigned to me",
+			{ status: "open", assigneeId: userId },
+			[eq(conversations.assigneeId, userId), actionable],
+		],
+		[
+			"unassigned",
+			"Unassigned",
+			{ status: "open", unassigned: true },
+			[isNull(conversations.assigneeId), actionable],
+		],
+		[
+			"snoozed",
+			"Snoozed",
+			{ status: "open", snoozed: true },
+			[eq(conversations.status, "open"), gt(conversations.snoozedUntil, now)],
+		],
+		[
+			"done",
+			"Done/Closed",
+			{ status: "archived" },
+			[eq(conversations.status, "archived")],
+		],
 	];
-	const inboxGroups: SidebarGroup[] = [];
-	const groupMap = new Map<string, SidebarInboxItem[]>();
-	for (const item of inboxItemById.values()) {
-		const types = channelTypeByInbox.get(item.inboxId);
-		if (!types || types.size === 0) {
-			groupMap.set("general", [...(groupMap.get("general") ?? []), item]);
-			continue;
-		}
-		for (const type of types) {
-			groupMap.set(type, [...(groupMap.get(type) ?? []), item]);
-		}
-	}
-	for (const [type, label] of [
-		["facebook_page", "Facebook"],
-		["email", "Email"],
-		["general", "General"],
-	] as const) {
-		const items = groupMap.get(type);
-		if (!items || items.length === 0) continue;
-		inboxGroups.push({ id: `channel:${type}`, label, items });
-	}
-
-	// Assigned section: the four virtual queues.
-	const assignedItems: SidebarItem[] = [
-		{
-			kind: "system",
-			id: "system:assigned-to-me",
-			label: "My open conversations",
-			count: assignedCount,
-		},
-		{
-			kind: "system",
-			id: "system:unassigned",
-			label: "Unassigned",
-			count: unassignedCount,
-		},
-		{
-			kind: "system",
-			id: "system:snoozed",
-			label: "Snoozed",
-			count: snoozedCount,
-		},
-		{
-			kind: "system",
-			id: "system:closed",
-			label: "Closed",
-			count: closedCount,
-		},
+	const smartChildren = await Promise.all(
+		smartDefs.map(async ([name, label, filter, conditions]) =>
+			make({
+				id: `smart:${name}`,
+				type: "smart-view",
+				parentId: "section:my-work",
+				label,
+				icon: null,
+				color: null,
+				count: await safe(name, async () =>
+					countWhere(db, [scope, ...(conditions as [])]),
+				),
+				isCollapsible: false,
+				isEditable: false,
+				permissionState: "allowed",
+				filter,
+			}),
+		),
+	);
+	const [legacyLinks, directMailboxLinks, channelCountRows] = readableIds.length
+		? await Promise.all([
+				db
+					.select({
+						inboxId: inboxChannels.inboxId,
+						channelId: channels.id,
+						type: channels.type,
+						label: channels.displayName,
+					})
+					.from(inboxChannels)
+					.innerJoin(channels, eq(inboxChannels.channelId, channels.id))
+					.where(inArray(inboxChannels.inboxId, readableIds))
+					.all(),
+				db
+					.select({
+						inboxId: mailboxes.inboxId,
+						channelId: channels.id,
+						label: mailboxes.canonicalAddress,
+					})
+					.from(mailboxes)
+					.innerJoin(
+						channels,
+						and(
+							eq(channels.workspaceId, mailboxes.workspaceId),
+							eq(channels.externalId, mailboxes.canonicalAddress),
+							eq(channels.type, "email"),
+						),
+					)
+					.where(
+						and(
+							eq(mailboxes.workspaceId, workspaceId),
+							inArray(mailboxes.inboxId, readableIds),
+						),
+					)
+					.all(),
+				db
+					.select({
+						channelId: conversations.channelId,
+						type: channels.type,
+						count: sqlCount(),
+					})
+					.from(conversations)
+					.innerJoin(channels, eq(conversations.channelId, channels.id))
+					.where(and(scope, actionable))
+					.groupBy(conversations.channelId, channels.type)
+					.all(),
+			])
+		: [
+				[],
+				[] as Array<{
+					inboxId: string | null;
+					channelId: string;
+					label: string;
+				}>,
+				[] as Array<{
+					channelId: string;
+					type: "facebook_page" | "email";
+					count: number;
+				}>,
+			];
+	const links = [
+		...legacyLinks,
+		...directMailboxLinks.flatMap((link) =>
+			link.inboxId === null
+				? []
+				: [{ ...link, inboxId: link.inboxId, type: "email" as const }],
+		),
 	];
-
-	// Teams section: inboxes grouped by their team.
-	const teamGroups: SidebarGroup[] = [];
-	const byTeam = new Map<string, SidebarInboxItem[]>();
-	for (const item of inboxItemById.values()) {
-		if (!item.teamId) continue;
-		const list = byTeam.get(item.teamId) ?? [];
-		list.push(item);
-		byTeam.set(item.teamId, list);
-	}
-	for (const [teamId, items] of byTeam) {
-		const name = teamNameById.get(teamId) ?? "Team";
-		teamGroups.push({ id: `team:${teamId}`, label: name, items });
-	}
-
-	// Tags section: root tags as items; parents with children become groups.
-	const tagRows = await db
+	const channelCountById = new Map(
+		channelCountRows.map((row) => [row.channelId, row.count]),
+	);
+	const channelGroups = (["facebook_page", "email"] as const)
+		.map((type) => {
+			const linked = links.filter((link) => link.type === type);
+			if (!linked.length) return null;
+			// Aggregate by actual conversation channel, not linked inbox: a mixed
+			// inbox must not make each channel appear to own every message.
+			const groupCount = [
+				...new Set(linked.map((link) => link.channelId)),
+			].reduce((sum, id) => sum + (channelCountById.get(id) ?? 0), 0);
+			const group = make({
+				id: `channel-group:${type === "facebook_page" ? "facebook" : "email"}`,
+				type: "channel-group",
+				parentId: "section:channels",
+				label: type === "facebook_page" ? "Facebook" : "Email",
+				icon: null,
+				color: null,
+				count: groupCount,
+				isCollapsible: true,
+				isEditable: false,
+				permissionState: "allowed",
+				filter: {
+					status: "open",
+					channel: type === "facebook_page" ? "facebook" : "email",
+				},
+			});
+			group.children = [
+				...new Map(linked.map((link) => [link.channelId, link])).values(),
+			].map((link) =>
+				make({
+					id: `channel:${link.channelId}`,
+					type: "channel",
+					parentId: group.id,
+					label: link.label,
+					icon: null,
+					color: null,
+					count: channelCountById.get(link.channelId) ?? 0,
+					isCollapsible: false,
+					isEditable: false,
+					permissionState: "allowed",
+					filter: {
+						status: "open",
+						channel: type === "facebook_page" ? "facebook" : "email",
+					},
+				}),
+			);
+			return group;
+		})
+		.filter((node): node is SidebarNode => node !== null);
+	const visibleTags = await db
 		.select()
 		.from(tags)
-		.where(eq(tags.workspaceId, workspaceId))
+		.where(
+			and(
+				eq(tags.workspaceId, workspaceId),
+				or(
+					eq(tags.visibility, "shared"),
+					eq(tags.visibility, "company"),
+					eq(tags.ownerUserId, userId),
+				),
+			),
+		)
 		.orderBy(asc(tags.name))
 		.all();
-	const tagItems: SidebarItem[] = [];
-	const tagGroups: SidebarGroup[] = [];
-	const childrenByParent = new Map<string, typeof tagRows>();
-	for (const tag of tagRows) {
-		if (tag.parentTagId) {
-			const list = childrenByParent.get(tag.parentTagId) ?? [];
-			list.push(tag);
-			childrenByParent.set(tag.parentTagId, list);
-		} else {
-			const hasChildren = tagRows.some((t) => t.parentTagId === tag.id);
-			if (!hasChildren) {
-				tagItems.push(toTagItem(tag, tagCountById));
-			}
-		}
-	}
-	for (const [parentId, children] of childrenByParent) {
-		const parent = tagRows.find((t) => t.id === parentId);
-		if (!parent) continue;
-		tagGroups.push({
-			id: `tag:${parentId}`,
-			label: parent.name,
-			items: children.map((child) => toTagItem(child, tagCountById)),
+	const tagsByParent = new Map<string, typeof visibleTags>();
+	for (const tag of visibleTags)
+		if (tag.parentTagId)
+			tagsByParent.set(tag.parentTagId, [
+				...(tagsByParent.get(tag.parentTagId) ?? []),
+				tag,
+			]);
+	const buildTag = (
+		tag: (typeof visibleTags)[number],
+		parentId: string,
+	): SidebarNode => {
+		const node = make({
+			id: `tag:${tag.id}`,
+			type: "tag",
+			parentId,
+			label: tag.name,
+			icon: null,
+			color: tag.color,
+			count: null,
+			isCollapsible: false,
+			isEditable: false,
+			permissionState: "allowed",
+			filter: { status: "open", tagId: tag.id },
 		});
-	}
-	// Childless roots with children already handled above; parents appear as
-	// group headers only (Front-style). Sort groups by parent name.
-
-	// Views section: saved filters.
-	const filterRows = await db
+		node.children = (tagsByParent.get(tag.id) ?? []).map((child) =>
+			buildTag(child, node.id),
+		);
+		node.isCollapsible = node.children.length > 0;
+		return node;
+	};
+	const tagChildren = visibleTags
+		.filter(
+			(tag) =>
+				!tag.parentTagId ||
+				!visibleTags.some((parent) => parent.id === tag.parentTagId),
+		)
+		.map((tag) => buildTag(tag, "section:tags"));
+	const filters = await db
 		.select()
 		.from(savedFilters)
-		.where(eq(savedFilters.workspaceId, workspaceId))
+		.where(
+			and(
+				eq(savedFilters.workspaceId, workspaceId),
+				eq(savedFilters.createdBy, userId),
+			),
+		)
 		.orderBy(asc(savedFilters.name))
 		.all();
-	const viewItems: SidebarItem[] = filterRows.map((row) => ({
-		kind: "view",
-		id: `view:${row.id}`,
-		label: row.name,
-	}));
-
-	const preferences = await loadPreferences(db, workspaceId, userId);
-
-	const sections: SidebarSection[] = [
-		{ key: "inbox", label: "Inbox", items: inboxItems, groups: inboxGroups },
-		{
-			key: "assigned",
-			label: "Assigned to me",
-			items: assignedItems,
-			groups: [],
-		},
-		{ key: "teams", label: "Teams", items: [], groups: teamGroups },
-		{ key: "tags", label: "Tags", items: tagItems, groups: tagGroups },
-		{ key: "views", label: "Views", items: viewItems, groups: [] },
+	const viewChildren = filters.flatMap((row) => {
+		const filter = decodeStoredJson(
+			row.filtersJson,
+			Schema.NullOr(SavedFilterFiltersSchema),
+			null,
+		);
+		return !filter ||
+			(filter.inboxId && !readable.has(filter.inboxId)) ||
+			(filter.tagId && !visibleTags.some((tag) => tag.id === filter.tagId))
+			? []
+			: [
+					make({
+						id: `view:${row.id}`,
+						type: "saved-view",
+						parentId: "section:saved-views",
+						label: row.name,
+						icon: null,
+						color: null,
+						count: null,
+						isCollapsible: false,
+						isEditable: false,
+						permissionState: "allowed",
+						filter,
+					}),
+				];
+	});
+	const sections: SidebarNode[] = [
+		make({
+			id: "section:my-work",
+			type: "section",
+			parentId: null,
+			label: "My Work",
+			icon: null,
+			color: null,
+			count: null,
+			isCollapsible: true,
+			isEditable: false,
+			permissionState: "allowed",
+			filter: {},
+		}),
+		make({
+			id: "section:shared-inboxes",
+			type: "section",
+			parentId: null,
+			label: "Shared Inboxes",
+			icon: null,
+			color: null,
+			count: directCounts,
+			isCollapsible: true,
+			isEditable: false,
+			permissionState: "allowed",
+			filter: { status: "open" },
+		}),
+		make({
+			id: "section:channels",
+			type: "section",
+			parentId: null,
+			label: "Channels",
+			icon: null,
+			color: null,
+			count: directCounts,
+			isCollapsible: true,
+			isEditable: false,
+			permissionState: "allowed",
+			filter: { status: "open" },
+		}),
+		make({
+			id: "section:tags",
+			type: "section",
+			parentId: null,
+			label: "Tags",
+			icon: null,
+			color: null,
+			count: null,
+			isCollapsible: true,
+			isEditable: false,
+			permissionState: "allowed",
+			filter: {},
+		}),
+		make({
+			id: "section:saved-views",
+			type: "section",
+			parentId: null,
+			label: "Saved Views",
+			icon: null,
+			color: null,
+			count: null,
+			isCollapsible: true,
+			isEditable: false,
+			permissionState: "allowed",
+			filter: {},
+		}),
 	];
-
+	for (const [section, children] of [
+		[sections[0], smartChildren],
+		[sections[1], roots],
+		[sections[2], channelGroups],
+		[sections[3], tagChildren],
+		[sections[4], viewChildren],
+	] as const) {
+		if (section) section.children = children;
+	}
+	const preferences = sanitizePreferences(
+		await loadPreferences(db, workspaceId, userId),
+		new Set(flattenNodes(sections).map((node) => node.id)),
+	);
+	for (const node of flattenNodes(sections))
+		node.isHidden = preferences.hiddenItemIds.includes(node.id);
 	return {
 		workspace: { id: ws.id, name: ws.name, slug: ws.slug },
 		permissions: { isAdmin: access.isAdmin },
@@ -418,16 +533,36 @@ export async function getSidebar(
 	};
 }
 
-function toTagItem(
-	tag: typeof tags.$inferSelect,
-	tagCountById: Map<string, number>,
-): SidebarTagItem {
+function flattenNodes(nodes: SidebarNode[]): SidebarNode[] {
+	return nodes.flatMap((node) => [node, ...flattenNodes(node.children)]);
+}
+
+function sanitizePreferences(
+	preferences: SidebarPreferences,
+	permittedIds: Set<string>,
+): SidebarPreferences {
+	const isPermitted = (id: string) =>
+		LEGACY_ITEM_IDS.has(id) || permittedIds.has(id);
+	const itemOrder: Record<string, number> = {};
+	for (const [id, value] of Object.entries(preferences.itemOrder)) {
+		if (isPermitted(id)) itemOrder[id] = value;
+	}
 	return {
-		kind: "tag",
-		id: `tag:${tag.id}`,
-		label: tag.name,
-		color: tag.color ?? null,
-		count: tagCountById.get(tag.id) ?? 0,
+		...preferences,
+		// Section keys are the legacy persisted collapse contract. They are not
+		// tree node ids and must not be remapped to a coincidentally named node.
+		collapsedSections: preferences.collapsedSections.filter((id) =>
+			SECTION_KEYS.has(id),
+		),
+		collapsedNodeIds: (preferences.collapsedNodeIds ?? []).filter((id) =>
+			permittedIds.has(id),
+		),
+		lastOpenBranchIds: (preferences.lastOpenBranchIds ?? []).filter((id) =>
+			permittedIds.has(id),
+		),
+		pinnedItemIds: preferences.pinnedItemIds.filter(isPermitted),
+		hiddenItemIds: preferences.hiddenItemIds.filter(isPermitted),
+		itemOrder,
 	};
 }
 
@@ -447,12 +582,68 @@ function sqlCount() {
 	return sql<number>`count(*)`;
 }
 
+type DescendantCount = {
+	inboxId: string;
+	count: number;
+	unread: number;
+	unassigned: number;
+};
+
+type SidebarQueryDependencies = {
+	/** Test seam: production uses the D1 recursive aggregate below. */
+	countInboxDescendants?: (
+		env: Env,
+		workspaceId: string,
+		readableIds: string[],
+		userId: string,
+		now: string,
+	) => Promise<DescendantCount[]>;
+};
+
+/** Uses one recursive CTE so every authorized descendant contributes to each
+ * ancestor exactly once; COUNT(DISTINCT ...) protects parent totals from joins. */
+async function countInboxDescendants(
+	env: Env,
+	workspaceId: string,
+	readableIds: string[],
+	userId: string,
+	now: string,
+): Promise<DescendantCount[]> {
+	if (!readableIds.length) return [];
+	const placeholders = readableIds.map(() => "?").join(", ");
+	const statement = `
+		WITH RECURSIVE descendants(parent_id, inbox_id) AS (
+			SELECT id, id FROM inboxes WHERE workspace_id = ? AND id IN (${placeholders})
+			UNION
+			SELECT descendants.parent_id, inboxes.id
+			FROM descendants JOIN inboxes ON inboxes.parent_inbox_id = descendants.inbox_id
+			WHERE inboxes.workspace_id = ? AND inboxes.id IN (${placeholders})
+		)
+		SELECT descendants.parent_id AS inboxId,
+			COUNT(DISTINCT conversations.id) AS count,
+			COUNT(DISTINCT CASE WHEN conversations.message_count > COALESCE(conversation_reads.last_read_seq, 0) THEN conversations.id END) AS unread,
+			COUNT(DISTINCT CASE WHEN conversations.assignee_id IS NULL THEN conversations.id END) AS unassigned
+		FROM descendants
+		LEFT JOIN conversations ON conversations.inbox_id = descendants.inbox_id
+			AND conversations.status = 'open'
+			AND (conversations.snoozed_until IS NULL OR conversations.snoozed_until <= ?)
+		LEFT JOIN conversation_reads ON conversation_reads.conversation_id = conversations.id
+			AND conversation_reads.agent_id = ?
+		GROUP BY descendants.parent_id`;
+	const result = await env.DB.prepare(statement)
+		.bind(workspaceId, ...readableIds, workspaceId, ...readableIds, now, userId)
+		.all<DescendantCount>();
+	return result.results;
+}
+
 // ---------------------------------------------------------------------------
 // SIDEBAR PREFERENCES (personal UI state; never shared routing/config)
 // ---------------------------------------------------------------------------
 
 const DEFAULT_PREFERENCES: SidebarPreferences = {
 	collapsedSections: [],
+	collapsedNodeIds: [],
+	lastOpenBranchIds: [],
 	pinnedItemIds: [],
 	hiddenItemIds: [],
 	itemOrder: {},
@@ -476,6 +667,8 @@ async function loadPreferences(
 	if (!row) return DEFAULT_PREFERENCES;
 	return {
 		collapsedSections: parseJsonArray(row.collapsedSectionsJson),
+		collapsedNodeIds: parseJsonArray(row.collapsedNodeIdsJson),
+		lastOpenBranchIds: parseJsonArray(row.lastOpenBranchIdsJson),
 		pinnedItemIds: parseJsonArray(row.pinnedItemIdsJson),
 		hiddenItemIds: parseJsonArray(row.hiddenItemIdsJson),
 		itemOrder: parseJsonRecord(row.itemOrderJson),
@@ -502,12 +695,20 @@ export async function updateSidebarPreferences(
 	const current = await loadPreferences(db, workspaceId, userId);
 	const next: SidebarPreferences = {
 		collapsedSections: current.collapsedSections,
+		collapsedNodeIds: current.collapsedNodeIds,
+		lastOpenBranchIds: current.lastOpenBranchIds,
 		pinnedItemIds: current.pinnedItemIds,
 		hiddenItemIds: current.hiddenItemIds,
 		itemOrder: current.itemOrder,
 	};
 	if (update.collapsedSections !== undefined) {
 		next.collapsedSections = validateSectionKeys(update.collapsedSections);
+	}
+	if (update.collapsedNodeIds !== undefined) {
+		next.collapsedNodeIds = validateNodeIds(update.collapsedNodeIds);
+	}
+	if (update.lastOpenBranchIds !== undefined) {
+		next.lastOpenBranchIds = validateNodeIds(update.lastOpenBranchIds);
 	}
 	if (update.pinnedItemIds !== undefined) {
 		next.pinnedItemIds = validateItemIds(update.pinnedItemIds);
@@ -518,6 +719,12 @@ export async function updateSidebarPreferences(
 	if (update.itemOrder !== undefined) {
 		next.itemOrder = validateItemOrder(update.itemOrder);
 	}
+	const permittedIds = new Set(
+		flattenNodes((await getSidebar(env, workspaceId, userId)).sections).map(
+			(node) => node.id,
+		),
+	);
+	const persisted = sanitizePreferences(next, permittedIds);
 
 	await db
 		.insert(userSidebarPreferences)
@@ -525,10 +732,12 @@ export async function updateSidebarPreferences(
 			id: crypto.randomUUID(),
 			userId,
 			workspaceId,
-			collapsedSectionsJson: JSON.stringify(next.collapsedSections),
-			pinnedItemIdsJson: JSON.stringify(next.pinnedItemIds),
-			hiddenItemIdsJson: JSON.stringify(next.hiddenItemIds),
-			itemOrderJson: JSON.stringify(next.itemOrder),
+			collapsedSectionsJson: JSON.stringify(persisted.collapsedSections),
+			collapsedNodeIdsJson: JSON.stringify(persisted.collapsedNodeIds),
+			lastOpenBranchIdsJson: JSON.stringify(persisted.lastOpenBranchIds),
+			pinnedItemIdsJson: JSON.stringify(persisted.pinnedItemIds),
+			hiddenItemIdsJson: JSON.stringify(persisted.hiddenItemIds),
+			itemOrderJson: JSON.stringify(persisted.itemOrder),
 			updatedAt: Date.now(),
 		})
 		.onConflictDoUpdate({
@@ -537,15 +746,17 @@ export async function updateSidebarPreferences(
 				userSidebarPreferences.workspaceId,
 			],
 			set: {
-				collapsedSectionsJson: JSON.stringify(next.collapsedSections),
-				pinnedItemIdsJson: JSON.stringify(next.pinnedItemIds),
-				hiddenItemIdsJson: JSON.stringify(next.hiddenItemIds),
-				itemOrderJson: JSON.stringify(next.itemOrder),
+				collapsedSectionsJson: JSON.stringify(persisted.collapsedSections),
+				collapsedNodeIdsJson: JSON.stringify(persisted.collapsedNodeIds),
+				lastOpenBranchIdsJson: JSON.stringify(persisted.lastOpenBranchIds),
+				pinnedItemIdsJson: JSON.stringify(persisted.pinnedItemIds),
+				hiddenItemIdsJson: JSON.stringify(persisted.hiddenItemIds),
+				itemOrderJson: JSON.stringify(persisted.itemOrder),
 				updatedAt: Date.now(),
 			},
 		})
 		.run();
-	return next;
+	return persisted;
 }
 
 function validateSectionKeys(keys: string[]): string[] {
@@ -572,10 +783,30 @@ function validateItemIds(ids: string[]): string[] {
 	const out: string[] = [];
 	const seen = new Set<string>();
 	for (const id of ids) {
-		if (typeof id !== "string" || !ITEM_ID_RE.test(id)) {
+		if (
+			typeof id !== "string" ||
+			(!ITEM_ID_RE.test(id) && !TREE_NODE_ID_RE.test(id))
+		) {
 			throw new ManageError(
 				`invalid sidebar item id: ${String(id)} — expected system:*, inbox:*, tag:* or view:*`,
 			);
+		}
+		if (!seen.has(id)) {
+			seen.add(id);
+			out.push(id);
+		}
+	}
+	return out;
+}
+
+function validateNodeIds(ids: string[]): string[] {
+	if (!Array.isArray(ids))
+		throw new ManageError("expected an array of node ids");
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const id of ids) {
+		if (typeof id !== "string" || !TREE_NODE_ID_RE.test(id)) {
+			throw new ManageError(`invalid sidebar node id: ${String(id)}`);
 		}
 		if (!seen.has(id)) {
 			seen.add(id);
@@ -593,7 +824,7 @@ function validateItemOrder(
 	}
 	const out: Record<string, number> = {};
 	for (const [id, value] of Object.entries(order)) {
-		if (!ITEM_ID_RE.test(id)) {
+		if (!ITEM_ID_RE.test(id) && !TREE_NODE_ID_RE.test(id)) {
 			throw new ManageError(`invalid sidebar item id in itemOrder: ${id}`);
 		}
 		if (!Number.isFinite(value)) {
@@ -618,7 +849,7 @@ export async function createSavedFilter(
 	await requireWorkspaceAccess(db, workspaceId, userId);
 	const name = input.name?.trim();
 	if (!name) throw new ManageError("name is required");
-	const filters = await validateFilters(db, workspaceId, input.filters);
+	const filters = await validateFilters(db, workspaceId, userId, input.filters);
 
 	const now = new Date().toISOString();
 	const id = crypto.randomUUID();
@@ -649,16 +880,30 @@ export async function deleteSavedFilter(
 		.select()
 		.from(savedFilters)
 		.where(
-			and(eq(savedFilters.id, id), eq(savedFilters.workspaceId, workspaceId)),
+			and(
+				eq(savedFilters.id, id),
+				eq(savedFilters.workspaceId, workspaceId),
+				eq(savedFilters.createdBy, userId),
+			),
 		)
 		.get();
 	if (!existing) throw new ManageError("saved filter not found", 404);
-	await db.delete(savedFilters).where(eq(savedFilters.id, id)).run();
+	await db
+		.delete(savedFilters)
+		.where(
+			and(
+				eq(savedFilters.id, id),
+				eq(savedFilters.workspaceId, workspaceId),
+				eq(savedFilters.createdBy, userId),
+			),
+		)
+		.run();
 }
 
 async function validateFilters(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
+	userId: string,
 	input: SavedFilterFilters,
 ): Promise<SavedFilterFilters> {
 	if (!input || typeof input !== "object") {
@@ -704,23 +949,26 @@ async function validateFilters(
 		}
 	}
 	if (out.inboxId) {
-		const inbox = await db
-			.select({ id: inboxes.id })
-			.from(inboxes)
-			.where(
-				and(eq(inboxes.id, out.inboxId), eq(inboxes.workspaceId, workspaceId)),
-			)
-			.get();
-		if (!inbox)
-			throw new ManageError("inbox does not belong to this workspace");
+		const readable = new Set(
+			await getReadableInboxIds(db, workspaceId, userId),
+		);
+		if (!readable.has(out.inboxId)) {
+			throw new ManageError("inbox is not accessible to this user");
+		}
 	}
 	if (out.tagId) {
 		const tag = await db
-			.select({ id: tags.id })
+			.select({
+				id: tags.id,
+				visibility: tags.visibility,
+				ownerUserId: tags.ownerUserId,
+			})
 			.from(tags)
 			.where(and(eq(tags.id, out.tagId), eq(tags.workspaceId, workspaceId)))
 			.get();
-		if (!tag) throw new ManageError("tag does not belong to this workspace");
+		if (!tag || (tag.visibility === "private" && tag.ownerUserId !== userId)) {
+			throw new ManageError("tag is not accessible to this user");
+		}
 	}
 	if (
 		out.assigneeId &&

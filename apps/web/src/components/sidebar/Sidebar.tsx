@@ -1,16 +1,8 @@
-import type {
-	InboxIconKey,
-	SidebarInboxItem,
-	SidebarItem,
-	SidebarPreferences,
-	SidebarResponse,
-	SidebarSection,
-} from "@msgflow/contracts";
+import type { InboxIconKey, SidebarPreferences } from "@msgflow/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
 	BadgeDollarSign,
-
 	Briefcase,
 	CheckCircle2,
 	ChevronDown,
@@ -45,7 +37,12 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { api } from "@/lib/api";
+import type {
+	SidebarRenderData,
+	SidebarRenderItem,
+	SidebarRenderSection,
+} from "@/lib/api";
+import { api, sidebarItemFilters } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { InboxSettingsDrawer } from "./InboxSettingsDrawer";
 import { MailboxSidebar } from "./MailboxSidebar";
@@ -107,7 +104,6 @@ export function Sidebar({
 	>(null);
 	const [dragId, setDragId] = useState<string | null>(null);
 
-
 	const { data: sidebar } = useQuery({
 		queryKey: ["sidebar", workspaceId],
 		queryFn: () => api.getSidebar(workspaceId),
@@ -119,6 +115,8 @@ export function Sidebar({
 	const patchPrefs = (patch: Partial<SidebarPreferences>) => {
 		const next: SidebarPreferences = {
 			collapsedSections: patch.collapsedSections ?? prefs.collapsedSections,
+			collapsedNodeIds: patch.collapsedNodeIds ?? prefs.collapsedNodeIds,
+			lastOpenBranchIds: patch.lastOpenBranchIds ?? prefs.lastOpenBranchIds,
 			pinnedItemIds: patch.pinnedItemIds ?? prefs.pinnedItemIds,
 			hiddenItemIds: patch.hiddenItemIds ?? prefs.hiddenItemIds,
 			itemOrder: patch.itemOrder ?? prefs.itemOrder,
@@ -126,7 +124,7 @@ export function Sidebar({
 		// Optimistic: roll back on failure (the PATCH returns the canonical state).
 		queryClient.setQueryData(
 			["sidebar", workspaceId],
-			(old: SidebarResponse | undefined) =>
+			(old: SidebarRenderData | undefined) =>
 				old ? { ...old, preferences: next } : old,
 		);
 		api
@@ -134,7 +132,7 @@ export function Sidebar({
 			.then(({ preferences }) => {
 				queryClient.setQueryData(
 					["sidebar", workspaceId],
-					(old: SidebarResponse | undefined) =>
+					(old: SidebarRenderData | undefined) =>
 						old ? { ...old, preferences } : old,
 				);
 			})
@@ -143,7 +141,7 @@ export function Sidebar({
 			});
 	};
 
-	const toggleSection = (section: SidebarSection) => {
+	const toggleSection = (section: SidebarRenderSection) => {
 		const collapsed = isSectionCollapsed(section, prefs);
 		const next = collapsed
 			? prefs.collapsedSections.filter((key) => key !== section.key)
@@ -227,7 +225,6 @@ export function Sidebar({
 				compact ? "w-14" : "w-[232px]",
 			)}
 		>
-
 			{/* Sections */}
 			<nav className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
 				<MailboxSidebar
@@ -304,6 +301,8 @@ export function Sidebar({
 function emptyPrefs(): SidebarPreferences {
 	return {
 		collapsedSections: [],
+		collapsedNodeIds: [],
+		lastOpenBranchIds: [],
 		pinnedItemIds: [],
 		hiddenItemIds: [],
 		itemOrder: {},
@@ -311,7 +310,7 @@ function emptyPrefs(): SidebarPreferences {
 }
 
 interface SectionProps {
-	section: SidebarSection;
+	section: SidebarRenderSection;
 	prefs: SidebarPreferences;
 	compact: boolean;
 	isAdmin: boolean;
@@ -400,10 +399,10 @@ function SidebarSectionView(props: SectionProps) {
 	);
 }
 
-function ItemRow(props: SectionProps & { item: SidebarItem }) {
+function ItemRow(props: SectionProps & { item: SidebarRenderItem }) {
 	const { item, compact, isAdmin, activeFilters } = props;
 
-	const filters = itemFilters(item, props.currentUserId);
+	const filters = itemFilters(item);
 	const active = filtersEqual(activeFilters, filters);
 
 	const icon = itemIcon(item);
@@ -443,8 +442,11 @@ function ItemRow(props: SectionProps & { item: SidebarItem }) {
 				{!compact ? (
 					<>
 						<span className="min-w-0 flex-1 truncate">{item.label}</span>
-						{count !== null && count > 0 ? (
-							<Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">
+						{count != null && count > 0 ? (
+							<Badge
+								variant="secondary"
+								className="shrink-0 px-1.5 text-[10px]"
+							>
 								{count}
 							</Badge>
 						) : null}
@@ -480,7 +482,13 @@ function ItemRow(props: SectionProps & { item: SidebarItem }) {
 						{item.kind === "inbox" && isAdmin ? (
 							<>
 								<DropdownMenuSeparator />
-								<DropdownMenuItem onSelect={() => props.onEditInbox(item.inboxId)}>
+								<DropdownMenuItem
+									onSelect={() =>
+										props.onEditInbox(
+											item.inboxId ?? item.id.slice("inbox:".length),
+										)
+									}
+								>
 									Edit inbox
 								</DropdownMenuItem>
 								<DropdownMenuItem onSelect={props.onCreateRule}>
@@ -499,8 +507,7 @@ function prefsPinned(prefs: SidebarPreferences, itemId: string): boolean {
 	return prefs.pinnedItemIds.includes(itemId);
 }
 
-
-function itemIcon(item: SidebarItem) {
+function itemIcon(item: SidebarRenderItem) {
 	switch (item.kind) {
 		case "system": {
 			const Icon = SYSTEM_ICONS[item.id] ?? InboxIcon;
@@ -509,12 +516,12 @@ function itemIcon(item: SidebarItem) {
 		case "inbox": {
 			if (item.icon) {
 				const Icon = INBOX_ICONS[item.icon as InboxIconKey] ?? InboxIcon;
-				return <Icon size={14} style={{ color: item.color }} />;
+				return <Icon size={14} style={{ color: item.color ?? undefined }} />;
 			}
 			return (
 				<span
 					className="block h-3 w-3 rounded-full"
-					style={{ backgroundColor: item.color }}
+					style={{ backgroundColor: item.color ?? undefined }}
 				/>
 			);
 		}
@@ -525,36 +532,11 @@ function itemIcon(item: SidebarItem) {
 	}
 }
 
-function itemFilters(item: SidebarItem, currentUserId: string): ListFilters {
-	switch (item.id) {
-		case "system:all":
-			return { status: "all", queueLabel: item.label };
-		case "system:assigned-to-me":
-			return { status: "open", assigneeId: currentUserId, queueLabel: item.label };
-		case "system:unassigned":
-			return { status: "open", unassigned: true, queueLabel: item.label };
-		case "system:snoozed":
-			return { status: "open", snoozed: true, queueLabel: item.label };
-		case "system:closed":
-			return { status: "archived", queueLabel: item.label };
-		default:
-			if (item.kind === "inbox") {
-				return { status: "open", inboxId: item.inboxId, queueLabel: item.label };
-			}
-			if (item.kind === "tag") {
-				return {
-					status: "open",
-					tagId: item.id.replace("tag:", ""),
-					queueLabel: item.label,
-				};
-			}
-			return { status: "open", queueLabel: item.label };
-	}
+function itemFilters(item: SidebarRenderItem): ListFilters {
+	return { ...sidebarItemFilters(item), queueLabel: item.label };
 }
 
 /** Cheap structural equality for highlighting the active sidebar row. */
 function filtersEqual(a: ListFilters, b: ListFilters): boolean {
 	return JSON.stringify(a) === JSON.stringify(b);
 }
-
-export type { SidebarInboxItem };

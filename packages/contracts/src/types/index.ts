@@ -493,10 +493,41 @@ export interface TeamSummary {
 	name: string;
 }
 
-// Stable item identifiers used in sidebar JSON preferences:
-//   system:all | system:assigned-to-me | system:unassigned | system:snoozed
-//   | system:closed | inbox:<inbox-id> | tag:<tag-id> | view:<saved-filter-id>
-export type SidebarItemKind = "system" | "inbox" | "tag" | "view";
+/** Authoritative normalized navigation node returned by the sidebar endpoint. */
+export type SidebarNodeType =
+	| "section"
+	| "smart-view"
+	| "inbox"
+	| "channel-group"
+	| "channel"
+	| "tag"
+	| "saved-view";
+
+export interface SidebarNode {
+	id: string;
+	type: SidebarNodeType;
+	parentId: string | null;
+	label: string;
+	icon: string | null;
+	color: string | null;
+	count: number | null;
+	unread?: number | null;
+	unassigned?: number | null;
+	children: SidebarNode[];
+	isCollapsible: boolean;
+	isEditable: boolean;
+	isHidden: boolean;
+	permissionState: "allowed" | "readonly";
+	filter: SavedFilterFilters;
+}
+
+/** New server-authoritative sidebar response. */
+export interface SidebarTreeResponse {
+	workspace: { id: string; name: string; slug: string };
+	permissions: { isAdmin: boolean };
+	preferences: SidebarPreferences;
+	sections: SidebarNode[];
+}
 
 /** Persisted visibility classification for an inbox tree node. */
 export type InboxVisibilityType = "shared" | "team" | "private" | "system";
@@ -507,84 +538,20 @@ export interface SidebarTreePreferences {
 	lastOpenBranchIds: string[];
 }
 
-export interface SidebarItemBase {
-	kind: SidebarItemKind;
-	/** Stable id (see above). */
-	id: string;
-	label: string;
-}
-
-export interface SidebarSystemItem extends SidebarItemBase {
-	kind: "system";
-	count: number;
-}
-
-export interface SidebarInboxItem extends SidebarItemBase {
-	kind: "inbox";
-	inboxId: string;
-	color: string;
-	icon: string | null;
-	teamId: string | null;
-	isArchived: boolean;
-	/** This inbox is a channel's current default (never hide/archive without checks). */
-	isDefault: boolean;
-	/** Open conversations in the inbox. */
-	count: number;
-	/**
-	 * The user has an open conversation assigned to them inside this inbox.
-	 * Such an inbox must stay visible even if the user hides it (the never-
-	 * remove rule) until the work is resolved or reassigned.
-	 */
-	hasOpenAssigned: boolean;
-}
-
-export interface SidebarTagItem extends SidebarItemBase {
-	kind: "tag";
-	color: string | null;
-	count: number;
-}
-
-export interface SidebarViewItem extends SidebarItemBase {
-	kind: "view";
-}
-
-export type SidebarItem =
-	| SidebarSystemItem
-	| SidebarInboxItem
-	| SidebarTagItem
-	| SidebarViewItem;
-
-export interface SidebarGroup {
-	id: string;
-	label: string;
-	items: SidebarItem[];
-}
-
-export interface SidebarSection {
-	key: "inbox" | "assigned" | "teams" | "tags" | "views";
-	label: string;
-	/** Ungrouped items rendered before the groups (e.g. All Messages). */
-	items: SidebarItem[];
-	groups: SidebarGroup[];
-}
-
 export interface SidebarPreferences {
 	collapsedSections: string[];
+	collapsedNodeIds: string[];
+	lastOpenBranchIds: string[];
 	pinnedItemIds: string[];
 	hiddenItemIds: string[];
 	itemOrder: Record<string, number>;
 }
 
-export interface SidebarResponse {
-	workspace: { id: string; name: string; slug: string };
-	permissions: { isAdmin: boolean };
-	preferences: SidebarPreferences;
-	sections: SidebarSection[];
-}
-
 // PATCH /api/workspaces/:workspaceId/sidebar-preferences — personal UI state.
 export interface SidebarPreferencesUpdate {
 	collapsedSections?: string[];
+	collapsedNodeIds?: string[];
+	lastOpenBranchIds?: string[];
 	pinnedItemIds?: string[];
 	hiddenItemIds?: string[];
 	itemOrder?: Record<string, number>;

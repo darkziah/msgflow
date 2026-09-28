@@ -1,10 +1,10 @@
 import { Schema } from "effect";
-import {
-	INBOX_ASSIGNMENT_STRATEGIES,
-	INBOX_ICON_KEYS,
-} from "./inbox-schema";
+import { INBOX_ASSIGNMENT_STRATEGIES, INBOX_ICON_KEYS } from "./inbox-schema";
 
-const Identifier = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(255));
+const Identifier = Schema.String.pipe(
+	Schema.minLength(1),
+	Schema.maxLength(255),
+);
 const Name = Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(120));
 const HexColor = Schema.String.pipe(Schema.pattern(/^#[0-9A-Fa-f]{6}$/));
 
@@ -35,7 +35,9 @@ export const InboxMemberRequestSchema = Schema.Struct({
 	userId: Schema.optionalWith(Identifier, { exact: true }),
 });
 
-export const SetDefaultInboxRequestSchema = Schema.Struct({ inboxId: Identifier });
+export const SetDefaultInboxRequestSchema = Schema.Struct({
+	inboxId: Identifier,
+});
 
 export const InboxReorderRequestSchema = Schema.Struct({
 	inboxIds: Schema.Array(Identifier).pipe(Schema.minItems(1)),
@@ -51,15 +53,37 @@ export const SidebarPreferencesUpdateSchema = Schema.Struct({
 	collapsedSections: Schema.optionalWith(SidebarStringListSchema, {
 		exact: true,
 	}),
+	collapsedNodeIds: Schema.optionalWith(SidebarStringListSchema, {
+		exact: true,
+	}),
+	lastOpenBranchIds: Schema.optionalWith(SidebarStringListSchema, {
+		exact: true,
+	}),
 	pinnedItemIds: Schema.optionalWith(SidebarStringListSchema, { exact: true }),
 	hiddenItemIds: Schema.optionalWith(SidebarStringListSchema, { exact: true }),
-	itemOrder: Schema.optionalWith(SidebarItemOrderSchema, { exact: true },
-	),
+	itemOrder: Schema.optionalWith(SidebarItemOrderSchema, { exact: true }),
+});
+
+export const SavedFilterFiltersSchema = Schema.Struct({
+	status: Schema.optionalWith(Schema.Literal("open", "archived", "all"), {
+		exact: true,
+	}),
+	inboxId: Schema.optionalWith(Identifier, { exact: true }),
+	q: Schema.optionalWith(Schema.String, { exact: true }),
+	assigneeId: Schema.optionalWith(Identifier, { exact: true }),
+	unassigned: Schema.optionalWith(Schema.Boolean, { exact: true }),
+	snoozed: Schema.optionalWith(Schema.Boolean, { exact: true }),
+	channel: Schema.optionalWith(Schema.Literal("facebook", "email"), {
+		exact: true,
+	}),
+	tagId: Schema.optionalWith(Identifier, { exact: true }),
+	dateFrom: Schema.optionalWith(Schema.String, { exact: true }),
+	dateTo: Schema.optionalWith(Schema.String, { exact: true }),
 });
 
 export const SavedFilterCreateRequestSchema = Schema.Struct({
 	name: Name,
-	filters: Schema.Unknown,
+	filters: SavedFilterFiltersSchema,
 });
 
 export const TagCreateRequestSchema = Schema.Struct({

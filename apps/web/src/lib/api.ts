@@ -25,7 +25,7 @@ import type {
 	SendMessageResult,
 	SidebarPreferences,
 	SidebarPreferencesUpdate,
-	SidebarResponse,
+	SidebarTreeResponse,
 	TagCreateRequest,
 	TagSummary,
 	TagUpdateRequest,
@@ -79,6 +79,111 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		throw new Error(body?.error ?? `request failed: ${res.status}`);
 	}
 	return res.json() as Promise<T>;
+}
+
+type SidebarRenderKind = "system" | "inbox" | "tag" | "view";
+export type SidebarRenderItem = {
+	kind: SidebarRenderKind;
+	id: string;
+	parentId: string | null;
+	order: number;
+	label: string;
+	/** The server-authoritative selection facet for this stable node id. */
+	filter: import("@msgflow/contracts").SavedFilterFilters;
+	count?: number;
+	color?: string | null;
+	icon?: string | null;
+	inboxId?: string;
+	hasOpenAssigned?: boolean;
+};
+export type SidebarRenderSection = {
+	key: "inbox" | "assigned" | "teams" | "tags" | "views";
+	nodeId: string;
+	label: string;
+	filter: import("@msgflow/contracts").SavedFilterFilters;
+	items: SidebarRenderItem[];
+	groups: { id: string; label: string; items: SidebarRenderItem[] }[];
+};
+export type SidebarRenderData = {
+	workspace: SidebarTreeResponse["workspace"];
+	permissions: SidebarTreeResponse["permissions"];
+	preferences: SidebarPreferences;
+	sections: SidebarRenderSection[];
+	/** Includes every normalized node, including non-rendered section nodes. */
+	filtersByNodeId: Record<
+		string,
+		import("@msgflow/contracts").SavedFilterFilters
+	>;
+};
+
+/** The renderer has not yet adopted tree nodes, so this facade is the only
+ * compatibility boundary; API data remains SidebarTreeResponse end-to-end. */
+export function adaptSidebarTree(tree: SidebarTreeResponse): SidebarRenderData {
+	const flatten = (
+		nodes: SidebarTreeResponse["sections"],
+	): SidebarTreeResponse["sections"] =>
+		nodes.flatMap((node) => [node, ...flatten(node.children)]);
+	const filtersByNodeId = Object.fromEntries(
+		flatten(tree.sections).map((node) => [node.id, node.filter]),
+	);
+	const toItem = (
+		node: SidebarTreeResponse["sections"][number],
+		order: number,
+	): SidebarRenderItem => ({
+		kind:
+			node.type === "inbox"
+				? "inbox"
+				: node.type === "tag"
+					? "tag"
+					: node.type === "saved-view"
+						? "view"
+						: "system",
+		id: node.id,
+		parentId: node.parentId,
+		order,
+		label: node.label,
+		filter: node.filter,
+		inboxId: node.filter.inboxId,
+		color: node.color,
+		icon: node.icon,
+		count: node.count ?? undefined,
+		hasOpenAssigned: false,
+	});
+	const section = (index: number, key: SidebarRenderSection["key"]) => {
+		const node = tree.sections[index];
+		return {
+			key,
+			nodeId: node?.id ?? `section:${key}`,
+			label: node?.label ?? key,
+			filter: node?.filter ?? {},
+		};
+	};
+	const flatItems = (index: number) =>
+		flatten(tree.sections[index]?.children ?? []).map(toItem);
+	const inboxes = flatItems(1).filter((item) => item.kind === "inbox");
+	return {
+		workspace: tree.workspace,
+		permissions: tree.permissions,
+		preferences: tree.preferences,
+		filtersByNodeId,
+		sections: [
+			{
+				...section(1, "inbox"),
+				items: [],
+				groups: [{ id: "legacy:inboxes", label: "Inboxes", items: inboxes }],
+			},
+			{ ...section(0, "assigned"), items: flatItems(0), groups: [] },
+			{ ...section(2, "teams"), items: flatItems(2), groups: [] },
+			{ ...section(3, "tags"), items: flatItems(3), groups: [] },
+			{ ...section(4, "views"), items: flatItems(4), groups: [] },
+		],
+	};
+}
+
+export function sidebarItemFilters(
+	item: SidebarRenderItem,
+): import("@msgflow/contracts").SavedFilterFilters {
+	return item.filter;
 }
 
 export const api = {
@@ -183,9 +288,12 @@ export const api = {
 		);
 	},
 	markCommentNotificationRead(id: string, workspaceId: string) {
-		return request<{ success: true }>(`/api/comment-notifications/${id}/read?workspaceId=${encodeURIComponent(workspaceId)}`, {
-			method: "POST",
-		});
+		return request<{ success: true }>(
+			`/api/comment-notifications/${id}/read?workspaceId=${encodeURIComponent(workspaceId)}`,
+			{
+				method: "POST",
+			},
+		);
 	},
 	sendMessage(
 		id: string,
@@ -209,7 +317,10 @@ export const api = {
 	markRead(id: string, workspaceId: string, lastReadSeq: number) {
 		return request<{ success: true }>(`/api/conversations/${id}/read`, {
 			method: "POST",
-			body: JSON.stringify({ workspaceId, lastReadSeq } satisfies MarkReadRequest),
+			body: JSON.stringify({
+				workspaceId,
+				lastReadSeq,
+			} satisfies MarkReadRequest),
 		});
 	},
 	updateConversation(id: string, patch: ConversationUpdateRequest) {
@@ -229,11 +340,7 @@ export const api = {
 		);
 	},
 
-	connectChannel(
-		workspaceId: string,
-		id: string,
-		accessToken: string,
-	) {
+	connectChannel(workspaceId: string, id: string, accessToken: string) {
 		return request<{ success: true }>(
 			`/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(id)}/token`,
 			{ method: "POST", body: JSON.stringify({ accessToken }) },
@@ -259,25 +366,37 @@ export const api = {
 		);
 	},
 	createTag(workspaceId: string, body: TagCreateRequest) {
-		return request<{ tag: TagSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/tags`, {
-			method: "POST",
-			body: JSON.stringify(body),
-		});
+		return request<{ tag: TagSummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/tags`,
+			{
+				method: "POST",
+				body: JSON.stringify(body),
+			},
+		);
 	},
 	updateTag(workspaceId: string, id: string, body: TagUpdateRequest) {
-		return request<{ tag: TagSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/tags/${encodeURIComponent(id)}`, {
-			method: "PATCH",
-			body: JSON.stringify(body),
-		});
+		return request<{ tag: TagSummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/tags/${encodeURIComponent(id)}`,
+			{
+				method: "PATCH",
+				body: JSON.stringify(body),
+			},
+		);
 	},
 	deleteTag(workspaceId: string, id: string) {
-		return request<{ success: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/tags/${encodeURIComponent(id)}`, { method: "DELETE" });
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/tags/${encodeURIComponent(id)}`,
+			{ method: "DELETE" },
+		);
 	},
 	addConversationTag(workspaceId: string, id: string, tagId: string) {
-		return request<{ success: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/conversations/${encodeURIComponent(id)}/tags`, {
-			method: "POST",
-			body: JSON.stringify({ tagId }),
-		});
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/conversations/${encodeURIComponent(id)}/tags`,
+			{
+				method: "POST",
+				body: JSON.stringify({ tagId }),
+			},
+		);
 	},
 	removeConversationTag(workspaceId: string, id: string, tagId: string) {
 		return request<{ success: true }>(
@@ -291,19 +410,28 @@ export const api = {
 		);
 	},
 	createRule(workspaceId: string, body: RuleWriteRequest) {
-		return request<{ rule: RuleSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/rules`, {
-			method: "POST",
-			body: JSON.stringify(body),
-		});
+		return request<{ rule: RuleSummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/rules`,
+			{
+				method: "POST",
+				body: JSON.stringify(body),
+			},
+		);
 	},
 	updateRule(workspaceId: string, id: string, body: RuleWriteRequest) {
-		return request<{ rule: RuleSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/rules/${encodeURIComponent(id)}`, {
-			method: "PATCH",
-			body: JSON.stringify(body),
-		});
+		return request<{ rule: RuleSummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/rules/${encodeURIComponent(id)}`,
+			{
+				method: "PATCH",
+				body: JSON.stringify(body),
+			},
+		);
 	},
 	deleteRule(workspaceId: string, id: string) {
-		return request<{ success: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/rules/${encodeURIComponent(id)}`, { method: "DELETE" });
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/rules/${encodeURIComponent(id)}`,
+			{ method: "DELETE" },
+		);
 	},
 	listCannedReplies(workspaceId: string) {
 		return request<{ cannedReplies: CannedReplySummary[] }>(
@@ -311,21 +439,31 @@ export const api = {
 		);
 	},
 	createCannedReply(workspaceId: string, body: CannedReplyWriteRequest) {
-		return request<{ cannedReply: CannedReplySummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies`, {
-			method: "POST",
-			body: JSON.stringify(body),
-		});
+		return request<{ cannedReply: CannedReplySummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies`,
+			{
+				method: "POST",
+				body: JSON.stringify(body),
+			},
+		);
 	},
-	updateCannedReply(workspaceId: string, id: string, body: CannedReplyWriteRequest) {
+	updateCannedReply(
+		workspaceId: string,
+		id: string,
+		body: CannedReplyWriteRequest,
+	) {
 		return request<{ cannedReply: CannedReplySummary }>(
 			`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies/${encodeURIComponent(id)}`,
 			{ method: "PATCH", body: JSON.stringify(body) },
 		);
 	},
 	deleteCannedReply(workspaceId: string, id: string) {
-		return request<{ success: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies/${encodeURIComponent(id)}`, {
-			method: "DELETE",
-		});
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies/${encodeURIComponent(id)}`,
+			{
+				method: "DELETE",
+			},
+		);
 	},
 
 	listWorkspaces() {
@@ -342,10 +480,13 @@ export const api = {
 	) {
 		return request<{
 			workspace: WorkspaceSummary & { teamId: string; inboxId: string };
-		}>(`/api/workspaces?sourceWorkspaceId=${encodeURIComponent(sourceWorkspaceId)}`, {
-			method: "POST",
-			body: JSON.stringify(body),
-		});
+		}>(
+			`/api/workspaces?sourceWorkspaceId=${encodeURIComponent(sourceWorkspaceId)}`,
+			{
+				method: "POST",
+				body: JSON.stringify(body),
+			},
+		);
 	},
 	listMetaApps(workspaceId: string) {
 		return request<{ metaApps: MetaAppSummary[] }>(
@@ -418,7 +559,9 @@ export const api = {
 		);
 	},
 	getSidebar(workspaceId: string) {
-		return request<SidebarResponse>(`/api/workspaces/${workspaceId}/sidebar`);
+		return request<SidebarTreeResponse>(
+			`/api/workspaces/${workspaceId}/sidebar`,
+		).then(adaptSidebarTree);
 	},
 	updateSidebarPreferences(
 		workspaceId: string,
@@ -512,7 +655,10 @@ export const api = {
 };
 
 /** WebSocket URL for the conversation's realtime channel (authenticated via session cookie). */
-export function conversationSocketUrl(conversationId: string, workspaceId: string): string {
+export function conversationSocketUrl(
+	conversationId: string,
+	workspaceId: string,
+): string {
 	const base = import.meta.env.VITE_SERVER_URL;
 	if (base) {
 		const url = new URL(base);

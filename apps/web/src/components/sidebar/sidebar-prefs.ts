@@ -1,8 +1,5 @@
-import type {
-	SidebarItem,
-	SidebarPreferences,
-	SidebarSection,
-} from "@msgflow/contracts";
+import type { SidebarPreferences } from "@msgflow/contracts";
+import type { SidebarRenderItem, SidebarRenderSection } from "@/lib/api";
 
 /**
  * Filters a sidebar item list by the user's personal preferences (hidden /
@@ -12,9 +9,9 @@ import type {
  * visible until the work is resolved.
  */
 export function applyPreferences(
-	items: SidebarItem[],
+	items: SidebarRenderItem[],
 	prefs: SidebarPreferences,
-): SidebarItem[] {
+): SidebarRenderItem[] {
 	const pinned = new Set(prefs.pinnedItemIds);
 	const hidden = new Set(prefs.hiddenItemIds);
 	const visible = items.filter((item) => {
@@ -36,7 +33,7 @@ export function applyPreferences(
 }
 
 export function isSectionCollapsed(
-	section: SidebarSection,
+	section: SidebarRenderSection,
 	prefs: SidebarPreferences,
 ): boolean {
 	return prefs.collapsedSections.includes(section.key);

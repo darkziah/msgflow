@@ -190,7 +190,11 @@ export async function getReadableInboxIds(
 					? mailbox.ownerUserId === userId ||
 						delegateMailboxIds.has(mailbox.mailboxId)
 					: mailbox.teamId
-						? validTeamIds.has(mailbox.teamId) && teamIds.has(mailbox.teamId)
+						? // A team mailbox may only back its matching team inbox.
+							inbox.visibilityType === "team" &&
+							inbox.teamId === mailbox.teamId &&
+							validTeamIds.has(mailbox.teamId) &&
+							teamIds.has(mailbox.teamId)
 						: // A no-team shared mailbox follows its linked inbox's
 							// public/restricted policy: no grants means workspace-public.
 							grantsForInbox.size === 0 || grantsForInbox.has(userId),

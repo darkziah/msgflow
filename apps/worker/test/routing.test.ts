@@ -67,6 +67,7 @@ import { getConversation, listConversations } from "../src/queries";
 import { evaluateRules, type RuleEvaluationContext } from "../src/rules";
 import {
 	createSavedFilter,
+	deleteSavedFilter,
 	getSidebar,
 	updateSidebarPreferences,
 } from "../src/workspace-api";
@@ -136,7 +137,11 @@ function baseContext(
 	};
 }
 
-async function insertChannel(workspaceId: string): Promise<string> {
+async function insertChannel(
+	workspaceId: string,
+	type: "email" | "facebook_page" = "email",
+	label = "channel",
+): Promise<string> {
 	const channelId = crypto.randomUUID();
 	const now = new Date().toISOString();
 	await ctx.db
@@ -144,8 +149,8 @@ async function insertChannel(workspaceId: string): Promise<string> {
 		.values({
 			id: channelId,
 			workspaceId,
-			type: "email",
-			displayName: "channel",
+			type,
+			displayName: label,
 			externalId: channelId,
 			status: "active",
 			createdAt: now,
@@ -1656,7 +1661,7 @@ describe("inbox tree persistence", () => {
 // ---------------------------------------------------------------------------
 
 describe("sidebar + preferences", () => {
-	test("sidebar shows all active inboxes; archived only when open-assigned", async () => {
+	test("sidebar returns ordered authorized normalized sections and inbox counts", async () => {
 		const { workspaceId } = await setup();
 		await addMember(workspaceId, MEMBER);
 		const inboxA = (
@@ -1668,56 +1673,267 @@ describe("sidebar + preferences", () => {
 
 		await channelContactConversation(workspaceId, inboxA);
 		await channelContactConversation(workspaceId, inboxB);
-
-		// Members see every active (non-archived) workspace inbox — the list
-		// read model is workspace-scoped, so the sidebar never hides an inbox
-		// the conversation list would still show.
-		const sidebar = await getSidebar(ctx.env, workspaceId, MEMBER);
-		const inboxSection = sidebar.sections.find((s) => s.key === "inbox");
-		expect(inboxSection).toBeDefined();
-		const items = inboxSection?.groups.flatMap((g) => g.items) ?? [];
-		expect(items.some((item) => item.id === `inbox:${inboxB}`)).toBe(true);
-		const allItem = inboxSection?.items.find(
-			(item) => item.id === "system:all",
-		);
-		if (allItem && allItem.kind === "system") {
-			expect(allItem.count).toBe(2); // both conversations
-		}
-
-		// Archived inboxes disappear from navigation…
 		await ctx.db
 			.update(inboxes)
-			.set({ isArchived: true })
+			.set({ parentInboxId: inboxA })
 			.where(eq(inboxes.id, inboxB))
 			.run();
-		const afterArchive = await getSidebar(ctx.env, workspaceId, MEMBER);
-		const afterItems =
-			afterArchive.sections
-				.find((s) => s.key === "inbox")
-				?.groups.flatMap((g) => g.items) ?? [];
-		expect(afterItems.some((item) => item.id === `inbox:${inboxB}`)).toBe(
-			false,
-		);
 
-		// …unless the user has an open conversation assigned inside them (the
-		// never-remove rule keeps assigned work visible until resolved).
+		const sidebar = await getSidebar(ctx.env, workspaceId, ADMIN);
+		expect(sidebar.sections.map((section) => section.id)).toEqual([
+			"section:my-work",
+			"section:shared-inboxes",
+			"section:channels",
+			"section:tags",
+			"section:saved-views",
+		]);
+		const inboxSection = sidebar.sections[1];
+		expect(inboxSection).toBeDefined();
+		if (!inboxSection) throw new Error("missing shared inboxes section");
+		const items = inboxSection.children;
+		const inboxANode = items.find((item) => item.id === `inbox:${inboxA}`);
+		expect(
+			inboxANode?.children.some((item) => item.id === `inbox:${inboxB}`),
+		).toBe(true);
+		expect(inboxSection.count).toBe(2);
+		expect(inboxANode?.count).toBe(2);
+		expect(inboxANode?.children[0]?.count).toBe(1);
+		expect(inboxANode?.isEditable).toBe(true);
+	});
+
+	test("degrades every inbox count to null when descendant aggregation fails", async () => {
+		const { workspaceId } = await setup();
+		const parent = (
+			await createInbox(ctx.env, workspaceId, { name: "Parent" }, ADMIN)
+		).id;
+		const child = (
+			await createInbox(ctx.env, workspaceId, { name: "Child" }, ADMIN)
+		).id;
+		await ctx.db
+			.update(inboxes)
+			.set({ parentInboxId: parent })
+			.where(eq(inboxes.id, child))
+			.run();
+		await channelContactConversation(workspaceId, parent);
+		await channelContactConversation(workspaceId, child);
+
+		const sidebar = await getSidebar(ctx.env, workspaceId, ADMIN, {
+			countInboxDescendants: async () => {
+				throw new Error("forced descendant aggregate failure");
+			},
+		});
+		const parentNode = sidebar.sections[1]?.children.find(
+			(node) => node.id === `inbox:${parent}`,
+		);
+		expect(sidebar.sections[1]?.count).toBe(2); // direct aggregate still worked
+		expect(parentNode).toMatchObject({
+			count: null,
+			unread: null,
+			unassigned: null,
+		});
+		expect(parentNode?.children[0]).toMatchObject({
+			id: `inbox:${child}`,
+			count: null,
+			unread: null,
+			unassigned: null,
+		});
+	});
+
+	test("counts channel groups and leaves by their actual conversation channel", async () => {
+		const { workspaceId } = await setup();
+		const inbox = (
+			await createInbox(ctx.env, workspaceId, { name: "Mixed" }, ADMIN)
+		).id;
+		const facebookA = await insertChannel(
+			workspaceId,
+			"facebook_page",
+			"Facebook A",
+		);
+		const facebookB = await insertChannel(
+			workspaceId,
+			"facebook_page",
+			"Facebook B",
+		);
+		const email = await insertChannel(workspaceId, "email", "Email");
+		await ctx.db
+			.insert(inboxChannels)
+			.values(
+				[facebookA, facebookB, email].map((channelId) => ({
+					id: crypto.randomUUID(),
+					inboxId: inbox,
+					channelId,
+					isDefault: false,
+				})),
+			)
+			.run();
+		for (const [channelId, id] of [
+			[facebookA, "facebook-a"],
+			[facebookB, "facebook-b"],
+			[email, "email"],
+		] as const) {
+			await insertConversation(
+				workspaceId,
+				channelId,
+				inbox,
+				await insertContact(workspaceId),
+				id,
+			);
+		}
+
+		const channelsSection = (await getSidebar(ctx.env, workspaceId, ADMIN))
+			.sections[2];
+		const facebook = channelsSection?.children.find(
+			(node) => node.id === "channel-group:facebook",
+		);
+		const emailGroup = channelsSection?.children.find(
+			(node) => node.id === "channel-group:email",
+		);
+		expect(facebook?.count).toBe(2);
+		expect(facebook?.children.map((node) => node.count).sort()).toEqual([1, 1]);
+		expect(emailGroup).toMatchObject({ count: 1 });
+		expect(emailGroup?.children).toEqual([
+			expect.objectContaining({ id: `channel:${email}`, count: 1 }),
+		]);
+	});
+
+	test("uses exact My Work predicates and omits another user's private tags", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		const inbox = (
+			await createInbox(ctx.env, workspaceId, { name: "Work" }, ADMIN)
+		).id;
+		const ids = await Promise.all(
+			["mine", "unassigned", "snoozed", "done", "other"].map(async (id) => {
+				const channelId = await insertChannel(workspaceId);
+				await insertConversation(
+					workspaceId,
+					channelId,
+					inbox,
+					await insertContact(workspaceId),
+					id,
+				);
+				return id;
+			}),
+		);
+		const future = new Date(Date.now() + 60_000).toISOString();
 		await ctx.db
 			.update(conversations)
-			.set({ assigneeId: MEMBER, status: "open" })
-			.where(eq(conversations.inboxId, inboxB))
+			.set({ assigneeId: ADMIN })
+			.where(eq(conversations.id, ids[0] ?? ""))
 			.run();
-		const withAssigned = await getSidebar(ctx.env, workspaceId, MEMBER);
-		const assignedItems =
-			withAssigned.sections
-				.find((s) => s.key === "inbox")
-				?.groups.flatMap((g) => g.items) ?? [];
-		const assignedItem = assignedItems.find(
-			(item) => item.id === `inbox:${inboxB}`,
+		await ctx.db
+			.update(conversations)
+			.set({ snoozedUntil: future })
+			.where(eq(conversations.id, ids[2] ?? ""))
+			.run();
+		await ctx.db
+			.update(conversations)
+			.set({ status: "archived" })
+			.where(eq(conversations.id, ids[3] ?? ""))
+			.run();
+		await ctx.db
+			.update(conversations)
+			.set({ assigneeId: MEMBER })
+			.where(eq(conversations.id, ids[4] ?? ""))
+			.run();
+		await ctx.db
+			.insert(tags)
+			.values([
+				{
+					id: "private-member",
+					workspaceId,
+					name: "Private",
+					visibility: "private",
+					ownerUserId: MEMBER,
+					createdAt: new Date().toISOString(),
+				},
+				{
+					id: "shared-tag",
+					workspaceId,
+					name: "Shared",
+					visibility: "shared",
+					createdAt: new Date().toISOString(),
+				},
+			])
+			.run();
+
+		const sidebar = await getSidebar(ctx.env, workspaceId, ADMIN);
+		const counts = new Map(
+			(sidebar.sections[0]?.children ?? []).map((node) => [
+				node.id,
+				node.count,
+			]),
 		);
-		expect(assignedItem?.kind).toBe("inbox");
-		if (assignedItem && assignedItem.kind === "inbox") {
-			expect(assignedItem.hasOpenAssigned).toBe(true);
-		}
+		expect(counts).toEqual(
+			new Map([
+				["smart:assigned-to-me", 1],
+				["smart:unassigned", 1],
+				["smart:snoozed", 1],
+				["smart:done", 1],
+			]),
+		);
+		expect(sidebar.sections[3]?.children.map((node) => node.id)).toEqual([
+			"tag:shared-tag",
+		]);
+	});
+
+	test("omits inaccessible ancestors and recovers malformed preferences", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "private-parent", {
+			visibilityType: "private",
+		});
+		await insertTreeInbox(workspaceId, "readable-child", {
+			parentInboxId: "private-parent",
+			visibilityType: "shared",
+		});
+		await channelContactConversation(workspaceId, "readable-child");
+		await ctx.db
+			.insert(userSidebarPreferences)
+			.values({
+				id: crypto.randomUUID(),
+				workspaceId,
+				userId: MEMBER,
+				collapsedSectionsJson: "not-json",
+				collapsedNodeIdsJson: JSON.stringify([
+					"inbox:private-parent",
+					"inbox:readable-child",
+				]),
+				lastOpenBranchIdsJson: "[broken",
+				pinnedItemIdsJson: JSON.stringify([
+					"inbox:private-parent",
+					"inbox:readable-child",
+				]),
+				hiddenItemIdsJson: JSON.stringify([
+					"inbox:private-parent",
+					"inbox:readable-child",
+				]),
+				itemOrderJson: JSON.stringify({
+					"inbox:private-parent": 0,
+					"inbox:readable-child": 1,
+				}),
+				updatedAt: Date.now(),
+			})
+			.run();
+
+		const sidebar = await getSidebar(ctx.env, workspaceId, MEMBER);
+		const inboxes = sidebar.sections[1]?.children ?? [];
+		expect(inboxes.map((node) => node.id)).toContain("inbox:readable-child");
+		expect(JSON.stringify(sidebar)).not.toContain("private-parent");
+		expect(
+			inboxes.find((node) => node.id === "inbox:readable-child"),
+		).toMatchObject({
+			count: 1,
+			isEditable: false,
+			isHidden: true,
+		});
+		expect(sidebar.preferences.collapsedNodeIds).toEqual([
+			"inbox:readable-child",
+		]);
+		expect(sidebar.preferences.lastOpenBranchIds).toEqual([]);
+		expect(sidebar.preferences.itemOrder).toEqual({
+			"inbox:readable-child": 1,
+		});
 	});
 
 	test("sidebar preferences validate stable item ids and persist per user", async () => {
@@ -1774,10 +1990,30 @@ describe("sidebar + preferences", () => {
 		});
 		expect(view.name).toBe("Urgent");
 		const sidebar = await getSidebar(ctx.env, workspaceId, ADMIN);
-		const views = sidebar.sections.find((s) => s.key === "views");
-		expect(views?.items.some((item) => item.id === `view:${view.id}`)).toBe(
+		const views = sidebar.sections.find((s) => s.id === "section:saved-views");
+		expect(views?.children.some((item) => item.id === `view:${view.id}`)).toBe(
 			true,
 		);
+	});
+
+	test("a member cannot delete another member's saved filter", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		const view = await createSavedFilter(ctx.env, workspaceId, ADMIN, {
+			name: "Owner only",
+			filters: { status: "open" },
+		});
+
+		await expect(
+			deleteSavedFilter(ctx.env, workspaceId, view.id, MEMBER),
+		).rejects.toMatchObject({ status: 404 });
+
+		const ownerSidebar = await getSidebar(ctx.env, workspaceId, ADMIN);
+		expect(
+			ownerSidebar.sections
+				.find((section) => section.id === "section:saved-views")
+				?.children.some((node) => node.id === `view:${view.id}`),
+		).toBe(true);
 	});
 
 	test("reorder rejects inboxes from another workspace", async () => {
@@ -1817,9 +2053,8 @@ describe("sidebar + preferences", () => {
 		expect(updated.icon).toBe("headphones");
 		const sidebar = await getSidebar(ctx.env, workspaceId, ADMIN);
 		const item = sidebar.sections
-			.find((s) => s.key === "inbox")
-			?.groups.flatMap((g) => g.items)
-			.find((i) => i.id === `inbox:${inbox.id}`);
+			.find((s) => s.id === "section:shared-inboxes")
+			?.children.find((i) => i.id === `inbox:${inbox.id}`);
 		expect(item?.label).toBe("New");
 	});
 });
@@ -2018,6 +2253,18 @@ describe("inbox tree authorization and moves", () => {
 		expect(await getReadableInboxIds(ctx.db, workspaceId, MEMBER)).toContain(
 			"mail-shared-public",
 		);
+		const sidebar = await getSidebar(ctx.env, workspaceId, MEMBER);
+		const email = sidebar.sections[2]?.children.find(
+			(node) => node.id === "channel-group:email",
+		);
+		expect(email?.children).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: `channel:${channelId}`,
+					label: "support@test.dev",
+				}),
+			]),
+		);
 		await ctx.db
 			.insert(inboxMembers)
 			.values({
@@ -2090,7 +2337,7 @@ describe("inbox tree authorization and moves", () => {
 		expect(
 			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
 		).not.toContain("direct-team-mailbox");
-		expect(await getReadableInboxIds(ctx.db, workspaceId, ADMIN)).toContain(
+		expect(await getReadableInboxIds(ctx.db, workspaceId, ADMIN)).not.toContain(
 			"direct-team-mailbox",
 		);
 	});
