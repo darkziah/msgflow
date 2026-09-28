@@ -1,28 +1,45 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { and, eq } from "drizzle-orm";
 import {
 	cannedReplies,
 	channels,
 	contacts,
 	conversations,
+	emailDomains,
 	inboxChannels,
 	inboxes,
+	inboxMembers,
+	mailboxDelegates,
+	mailboxes,
 	metaApps,
 	ruleActions,
 	ruleConditions,
 	ruleExecutionLog,
 	rules,
 	tags,
+	teamMembers,
+	teams,
 	userSidebarPreferences,
 	workspaceMembers,
 	workspaces,
 } from "@msgflow/db";
+import { and, eq } from "drizzle-orm";
+import {
+	getWorkspaceAccess,
+	requireAdminAccess,
+	requireWorkspaceAccess,
+} from "../src/access";
+import { ManageError } from "../src/errors";
+import {
+	assertValidInboxParent,
+	getInboxDescendantIds,
+	getReadableInboxIds,
+} from "../src/inbox-tree";
 import {
 	archiveInbox,
 	connectChannelToken,
-	createFacebookChannel,
 	createCannedReply,
+	createFacebookChannel,
 	createInbox,
 	createRule,
 	createTag,
@@ -36,6 +53,7 @@ import {
 	listInboxes,
 	listRules,
 	listTags,
+	moveInboxInTree,
 	reorderInboxes,
 	setDefaultInbox,
 	unlinkChannelFromInbox,
@@ -43,18 +61,12 @@ import {
 	updateInbox,
 	updateTag,
 } from "../src/manage";
-import {
-	getWorkspaceAccess,
-	requireAdminAccess,
-	requireWorkspaceAccess,
-} from "../src/access";
 import { evaluateRules, type RuleEvaluationContext } from "../src/rules";
 import {
 	createSavedFilter,
 	getSidebar,
 	updateSidebarPreferences,
 } from "../src/workspace-api";
-import { ManageError } from "../src/errors";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
 
 // Each test gets a fresh Miniflare D1 with the full migration chain.
@@ -172,6 +184,23 @@ async function insertConversation(
 			messageCount: 0,
 			createdAt: now,
 			updatedAt: now,
+		})
+		.run();
+}
+
+async function insertTreeInbox(
+	workspaceId: string,
+	id: string,
+	options: Partial<typeof inboxes.$inferInsert> = {},
+): Promise<void> {
+	await ctx.db
+		.insert(inboxes)
+		.values({
+			id,
+			workspaceId,
+			name: id,
+			createdAt: new Date().toISOString(),
+			...options,
 		})
 		.run();
 }
@@ -1315,13 +1344,21 @@ describe("rule evaluation", () => {
 describe("inbox tree persistence", () => {
 	test("fresh migrated D1 enforces tree integrity and Drizzle roundtrips defaults", async () => {
 		const { workspaceId } = await setup();
-		const inboxColumns = await ctx.env.DB.prepare("PRAGMA table_info(inboxes)").all<{
+		const inboxColumns = await ctx.env.DB.prepare(
+			"PRAGMA table_info(inboxes)",
+		).all<{
 			name: string;
 		}>();
 		expect(inboxColumns.results.map((column) => column.name)).toEqual(
-			expect.arrayContaining(["parent_inbox_id", "visibility_type", "tree_version"]),
+			expect.arrayContaining([
+				"parent_inbox_id",
+				"visibility_type",
+				"tree_version",
+			]),
 		);
-		const inboxIndexes = await ctx.env.DB.prepare("PRAGMA index_list(inboxes)").all<{
+		const inboxIndexes = await ctx.env.DB.prepare(
+			"PRAGMA index_list(inboxes)",
+		).all<{
 			name: string;
 		}>();
 		expect(inboxIndexes.results.map((index) => index.name)).toEqual(
@@ -1331,22 +1368,27 @@ describe("inbox tree persistence", () => {
 			]),
 		);
 		const indexColumns = async (name: string): Promise<string[]> => {
-			const result = await ctx.env.DB.prepare(`PRAGMA index_info(${name})`).all<{
+			const result = await ctx.env.DB.prepare(
+				`PRAGMA index_info(${name})`,
+			).all<{
 				name: string;
 			}>();
 			return result.results.map((column: { name: string }) => column.name);
 		};
-		expect(
-			await indexColumns("idx_inboxes_workspace_parent_order"),
-		).toEqual(["workspace_id", "parent_inbox_id", "sort_order", "id"]);
+		expect(await indexColumns("idx_inboxes_workspace_parent_order")).toEqual([
+			"workspace_id",
+			"parent_inbox_id",
+			"sort_order",
+			"id",
+		]);
 		expect(await indexColumns("idx_inboxes_workspace_visibility")).toEqual([
 			"workspace_id",
 			"visibility_type",
 			"is_archived",
 		]);
-		const preferenceColumns = await ctx.env.DB
-			.prepare("PRAGMA table_info(user_sidebar_preferences)")
-			.all<{ name: string }>();
+		const preferenceColumns = await ctx.env.DB.prepare(
+			"PRAGMA table_info(user_sidebar_preferences)",
+		).all<{ name: string }>();
 		expect(preferenceColumns.results.map((column) => column.name)).toEqual(
 			expect.arrayContaining([
 				"collapsed_node_ids_json",
@@ -1412,25 +1454,22 @@ describe("inbox tree persistence", () => {
 		// These use the fresh Miniflare D1 after the real migration, bypassing
 		// Worker validation so the SQLite triggers and constraints are exercised.
 		await expect(
-			ctx.env.DB
-				.prepare("UPDATE inboxes SET workspace_id = ? WHERE id = ?")
+			ctx.env.DB.prepare("UPDATE inboxes SET workspace_id = ? WHERE id = ?")
 				.bind(foreignWorkspaceId, parentId)
 				.run(),
 		).rejects.toThrow(
 			"inbox workspace cannot change while children remain in another workspace",
 		);
 		await expect(
-			ctx.env.DB
-				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+			ctx.env.DB.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
 				.bind(childId, parentId)
 				.run(),
 		).rejects.toThrow("inbox parent would create a cycle");
 		const crossWorkspaceChildId = crypto.randomUUID();
 		await expect(
-			ctx.env.DB
-				.prepare(
-					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
-				)
+			ctx.env.DB.prepare(
+				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
 				.bind(
 					crossWorkspaceChildId,
 					workspaceId,
@@ -1442,36 +1481,31 @@ describe("inbox tree persistence", () => {
 		).rejects.toThrow("inbox parent must belong to the same workspace");
 		const selfInsertId = crypto.randomUUID();
 		await expect(
-			ctx.env.DB
-				.prepare(
-					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
-				)
+			ctx.env.DB.prepare(
+				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
 				.bind(selfInsertId, workspaceId, selfInsertId, "Self parent", now)
 				.run(),
 		).rejects.toThrow("inbox cannot be its own parent");
 		await expect(
-			ctx.env.DB
-				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+			ctx.env.DB.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
 				.bind(foreignParentId, childId)
 				.run(),
 		).rejects.toThrow("inbox parent must belong to the same workspace");
 		await expect(
-			ctx.env.DB
-				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+			ctx.env.DB.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
 				.bind(childId, childId)
 				.run(),
 		).rejects.toThrow("inbox cannot be its own parent");
 		await expect(
-			ctx.env.DB
-				.prepare("UPDATE inboxes SET workspace_id = ? WHERE id = ?")
+			ctx.env.DB.prepare("UPDATE inboxes SET workspace_id = ? WHERE id = ?")
 				.bind(foreignWorkspaceId, childId)
 				.run(),
 		).rejects.toThrow("inbox parent must belong to the same workspace");
 		await expect(
-			ctx.env.DB
-				.prepare(
-					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
-				)
+			ctx.env.DB.prepare(
+				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
 				.bind(
 					crypto.randomUUID(),
 					workspaceId,
@@ -1482,24 +1516,27 @@ describe("inbox tree persistence", () => {
 				.run(),
 		).rejects.toThrow(/FOREIGN KEY constraint failed/);
 		await expect(
-			ctx.env.DB
-				.prepare(
-					"INSERT INTO inboxes (id, workspace_id, name, created_at, visibility_type) VALUES (?, ?, ?, ?, ?)",
+			ctx.env.DB.prepare(
+				"INSERT INTO inboxes (id, workspace_id, name, created_at, visibility_type) VALUES (?, ?, ?, ?, ?)",
+			)
+				.bind(
+					crypto.randomUUID(),
+					workspaceId,
+					"Bad visibility",
+					now,
+					"invalid",
 				)
-				.bind(crypto.randomUUID(), workspaceId, "Bad visibility", now, "invalid")
 				.run(),
 		).rejects.toThrow(/CHECK constraint failed/);
 
 		const grandchildId = crypto.randomUUID();
-		await ctx.env.DB
-			.prepare(
-				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
-			)
+		await ctx.env.DB.prepare(
+			"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+		)
 			.bind(grandchildId, workspaceId, childId, "Grandchild", now)
 			.run();
 		await expect(
-			ctx.env.DB
-				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+			ctx.env.DB.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
 				.bind(grandchildId, parentId)
 				.run(),
 		).rejects.toThrow("inbox parent would create a cycle");
@@ -1507,58 +1544,41 @@ describe("inbox tree persistence", () => {
 		// A root plus 63 descendants has a 63-edge path; adding one more child
 		// reaches the allowed 64-edge maximum, while the 65th must be rejected.
 		let deepestId = crypto.randomUUID();
-		await ctx.env.DB
-			.prepare(
-				"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
-			)
+		await ctx.env.DB.prepare(
+			"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
+		)
 			.bind(deepestId, workspaceId, "Depth root", now)
 			.run();
 		for (let depth = 1; depth <= 64; depth += 1) {
 			const childAtDepthId = crypto.randomUUID();
-			await ctx.env.DB
-				.prepare(
-					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
-				)
-				.bind(
-					childAtDepthId,
-					workspaceId,
-					deepestId,
-					`Depth ${depth}`,
-					now,
-				)
+			await ctx.env.DB.prepare(
+				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
+				.bind(childAtDepthId, workspaceId, deepestId, `Depth ${depth}`, now)
 				.run();
 			deepestId = childAtDepthId;
 		}
 		await expect(
-			ctx.env.DB
-				.prepare(
-					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
-				)
-				.bind(
-					crypto.randomUUID(),
-					workspaceId,
-					deepestId,
-					"Depth 65",
-					now,
-				)
+			ctx.env.DB.prepare(
+				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
+				.bind(crypto.randomUUID(), workspaceId, deepestId, "Depth 65", now)
 				.run(),
 		).rejects.toThrow("inbox parent hierarchy exceeds maximum depth");
 
 		// The maximum is 64 edges from a root to a node. Reparenting must account
 		// for the moved node's entire existing subtree, not merely the moved node.
 		let depth63TargetId = crypto.randomUUID();
-		await ctx.env.DB
-			.prepare(
-				"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
-			)
+		await ctx.env.DB.prepare(
+			"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
+		)
 			.bind(depth63TargetId, workspaceId, "Move target root", now)
 			.run();
 		for (let depth = 1; depth <= 63; depth += 1) {
 			const childAtDepthId = crypto.randomUUID();
-			await ctx.env.DB
-				.prepare(
-					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
-				)
+			await ctx.env.DB.prepare(
+				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
 				.bind(
 					childAtDepthId,
 					workspaceId,
@@ -1571,21 +1591,24 @@ describe("inbox tree persistence", () => {
 		}
 		const subtreeRootId = crypto.randomUUID();
 		const subtreeChildId = crypto.randomUUID();
-		await ctx.env.DB
-			.prepare(
-				"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
-			)
+		await ctx.env.DB.prepare(
+			"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
+		)
 			.bind(subtreeRootId, workspaceId, "Move subtree root", now)
 			.run();
-		await ctx.env.DB
-			.prepare(
-				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+		await ctx.env.DB.prepare(
+			"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+		)
+			.bind(
+				subtreeChildId,
+				workspaceId,
+				subtreeRootId,
+				"Move subtree child",
+				now,
 			)
-			.bind(subtreeChildId, workspaceId, subtreeRootId, "Move subtree child", now)
 			.run();
 		await expect(
-			ctx.env.DB
-				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+			ctx.env.DB.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
 				.bind(depth63TargetId, subtreeRootId)
 				.run(),
 		).rejects.toThrow("inbox parent hierarchy exceeds maximum depth");
@@ -1795,5 +1818,771 @@ describe("sidebar + preferences", () => {
 			?.groups.flatMap((g) => g.items)
 			.find((i) => i.id === `inbox:${inbox.id}`);
 		expect(item?.label).toBe("New");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// ADR 0026 tree visibility and navigation-only moves
+// ---------------------------------------------------------------------------
+
+describe("inbox tree authorization and moves", () => {
+	test("uses the accepted shared grant convention and all visibility modes", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "shared-public");
+		await insertTreeInbox(workspaceId, "shared-restricted");
+		await insertTreeInbox(workspaceId, "private", {
+			visibilityType: "private",
+		});
+		await insertTreeInbox(workspaceId, "system", { visibilityType: "system" });
+		await ctx.db
+			.insert(teams)
+			.values({
+				id: "team",
+				workspaceId,
+				name: "Team",
+				createdAt: new Date().toISOString(),
+			})
+			.run();
+		await insertTreeInbox(workspaceId, "team", {
+			visibilityType: "team",
+			teamId: "team",
+		});
+		await ctx.db
+			.insert(inboxMembers)
+			.values({
+				id: crypto.randomUUID(),
+				inboxId: "shared-restricted",
+				userId: ADMIN,
+			})
+			.run();
+		await ctx.db
+			.insert(inboxMembers)
+			.values({ id: crypto.randomUUID(), inboxId: "private", userId: MEMBER })
+			.run();
+		await ctx.db
+			.insert(teamMembers)
+			.values({
+				id: crypto.randomUUID(),
+				teamId: "team",
+				userId: MEMBER,
+				createdAt: new Date().toISOString(),
+			})
+			.run();
+
+		expect(await getReadableInboxIds(ctx.db, workspaceId, MEMBER)).toEqual(
+			expect.arrayContaining(["shared-public", "private", "system", "team"]),
+		);
+		expect(
+			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
+		).not.toContain("shared-restricted");
+		await ctx.db
+			.insert(inboxMembers)
+			.values({ id: crypto.randomUUID(), inboxId: "team", userId: ADMIN })
+			.run();
+		expect(await getReadableInboxIds(ctx.db, workspaceId, ADMIN)).not.toContain(
+			"team",
+		);
+		expect(await getReadableInboxIds(ctx.db, workspaceId, ADMIN)).not.toContain(
+			"private",
+		);
+	});
+
+	test("intersects mailbox policy with synchronized private inbox grants", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "mail-private", {
+			visibilityType: "private",
+		});
+		await ctx.db
+			.insert(inboxMembers)
+			.values({
+				id: crypto.randomUUID(),
+				inboxId: "mail-private",
+				userId: MEMBER,
+			})
+			.run();
+		const channelId = await insertChannel(workspaceId);
+		await ctx.db
+			.update(channels)
+			.set({ externalId: "private@test.dev" })
+			.where(eq(channels.id, channelId))
+			.run();
+		const mailboxNow = new Date().toISOString();
+		await ctx.db
+			.insert(emailDomains)
+			.values({
+				id: "domain",
+				workspaceId,
+				canonicalDomain: "test.dev",
+				inboundState: "pending",
+				outboundState: "pending",
+				dnsStatusJson: "{}",
+				createdAt: mailboxNow,
+				updatedAt: mailboxNow,
+			})
+			.run();
+		await ctx.db
+			.insert(mailboxes)
+			.values({
+				id: "mailbox",
+				workspaceId,
+				emailDomainId: "domain",
+				localPart: "private",
+				canonicalAddress: "private@test.dev",
+				type: "private",
+				ownerUserId: ADMIN,
+				inboxId: null,
+				isEnabled: false,
+				isSendEnabled: false,
+				createdAt: mailboxNow,
+				updatedAt: mailboxNow,
+			})
+			.run();
+		await ctx.db
+			.insert(inboxChannels)
+			.values({
+				id: crypto.randomUUID(),
+				inboxId: "mail-private",
+				channelId,
+				isDefault: false,
+			})
+			.run();
+		expect(
+			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
+		).not.toContain("mail-private");
+		await ctx.db
+			.insert(mailboxDelegates)
+			.values({
+				mailboxId: "mailbox",
+				userId: MEMBER,
+				createdBy: ADMIN,
+				createdAt: new Date().toISOString(),
+			})
+			.run();
+		expect(await getReadableInboxIds(ctx.db, workspaceId, MEMBER)).toContain(
+			"mail-private",
+		);
+		await ctx.db
+			.delete(mailboxDelegates)
+			.where(eq(mailboxDelegates.mailboxId, "mailbox"))
+			.run();
+		expect(
+			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
+		).not.toContain("mail-private");
+	});
+
+	test("allows workspace members into public shared mailboxes", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "mail-shared-public");
+		const channelId = await insertChannel(workspaceId);
+		await ctx.db
+			.update(channels)
+			.set({ externalId: "support@test.dev" })
+			.where(eq(channels.id, channelId))
+			.run();
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(emailDomains)
+			.values({
+				id: "shared-domain",
+				workspaceId,
+				canonicalDomain: "test.dev",
+				inboundState: "pending",
+				outboundState: "pending",
+				dnsStatusJson: "{}",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(mailboxes)
+			.values({
+				id: "shared-mailbox",
+				workspaceId,
+				emailDomainId: "shared-domain",
+				localPart: "support",
+				canonicalAddress: "support@test.dev",
+				type: "shared",
+				inboxId: "mail-shared-public",
+				isEnabled: false,
+				isSendEnabled: false,
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		expect(await getReadableInboxIds(ctx.db, workspaceId, MEMBER)).toContain(
+			"mail-shared-public",
+		);
+		await ctx.db
+			.insert(inboxMembers)
+			.values({
+				id: crypto.randomUUID(),
+				inboxId: "mail-shared-public",
+				userId: ADMIN,
+			})
+			.run();
+		expect(
+			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
+		).not.toContain("mail-shared-public");
+	});
+
+	test("enforces direct shared-mailbox team policy without a legacy channel link", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "direct-team-mailbox");
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(teams)
+			.values({
+				id: "direct-mailbox-team",
+				workspaceId,
+				name: "Direct mailbox team",
+				createdAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(teamMembers)
+			.values({
+				id: crypto.randomUUID(),
+				teamId: "direct-mailbox-team",
+				userId: ADMIN,
+				createdAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(emailDomains)
+			.values({
+				id: "direct-team-domain",
+				workspaceId,
+				canonicalDomain: "test.dev",
+				inboundState: "pending",
+				outboundState: "pending",
+				dnsStatusJson: "{}",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(mailboxes)
+			.values({
+				id: "direct-team-mailbox",
+				workspaceId,
+				emailDomainId: "direct-team-domain",
+				localPart: "team",
+				canonicalAddress: "team@test.dev",
+				type: "shared",
+				inboxId: "direct-team-mailbox",
+				teamId: "direct-mailbox-team",
+				isEnabled: false,
+				isSendEnabled: false,
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+
+		// There is intentionally no inbox_channels row: authorization follows
+		// the direct mailbox inbox_id association.
+		expect(
+			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
+		).not.toContain("direct-team-mailbox");
+		expect(await getReadableInboxIds(ctx.db, workspaceId, ADMIN)).toContain(
+			"direct-team-mailbox",
+		);
+	});
+
+	test("bounds descendants and preserves routing data during a versioned move", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "root");
+		await insertTreeInbox(workspaceId, "child", {
+			parentInboxId: "root",
+			sortOrder: 0,
+			updatedAt: 456,
+		});
+		await insertTreeInbox(workspaceId, "leaf", {
+			parentInboxId: "child",
+			sortOrder: 0,
+			updatedAt: 123,
+		});
+		const foreignWorkspaceId = crypto.randomUUID();
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(workspaces)
+			.values({
+				id: foreignWorkspaceId,
+				name: "Foreign tree",
+				slug: "foreign-tree",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await insertTreeInbox(foreignWorkspaceId, "foreign");
+		expect(
+			await getInboxDescendantIds(
+				ctx.db,
+				workspaceId,
+				"root",
+				new Set(["root", "child", "leaf"]),
+			),
+		).toEqual(["root", "child", "leaf"]);
+		await expect(
+			getInboxDescendantIds(ctx.db, workspaceId, "missing", new Set()),
+		).rejects.toMatchObject({ status: 404 });
+		await expect(
+			getInboxDescendantIds(
+				ctx.db,
+				workspaceId,
+				"foreign",
+				new Set(["foreign"]),
+			),
+		).rejects.toMatchObject({ status: 404 });
+		await expect(
+			getInboxDescendantIds(ctx.db, workspaceId, "root", new Set()),
+		).rejects.toMatchObject({ status: 403 });
+		await expect(
+			assertValidInboxParent(ctx.db, workspaceId, "root", "root"),
+		).rejects.toThrow(ManageError);
+		await expect(
+			assertValidInboxParent(ctx.db, workspaceId, "root", "leaf"),
+		).rejects.toThrow(ManageError);
+		await expect(
+			assertValidInboxParent(ctx.db, workspaceId, "root", "foreign"),
+		).rejects.toThrow(ManageError);
+		const channelId = await insertChannel(workspaceId);
+		const contactId = await insertContact(workspaceId);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"leaf",
+			contactId,
+			"tree-conversation",
+		);
+		await insertRule(workspaceId, "tree-rule", 0, false, [], []);
+		await ctx.db
+			.insert(inboxChannels)
+			.values({
+				id: "tree-default",
+				inboxId: "leaf",
+				channelId,
+				isDefault: false,
+			})
+			.run();
+		const before = await Promise.all([
+			ctx.env.DB.prepare(
+				"SELECT inbox_id FROM conversations WHERE id='tree-conversation'",
+			).first(),
+			ctx.env.DB.prepare(
+				"SELECT inbox_id FROM rules WHERE id='tree-rule'",
+			).first(),
+			ctx.env.DB.prepare(
+				"SELECT inbox_id, is_default FROM inbox_channels WHERE id='tree-default'",
+			).first(),
+		]);
+		const leafBeforeMove = await ctx.db
+			.select()
+			.from(inboxes)
+			.where(eq(inboxes.id, "leaf"))
+			.get();
+		await moveInboxInTree(
+			ctx.env,
+			workspaceId,
+			{
+				inboxId: "leaf",
+				parentInboxId: "root",
+				expectedTreeVersion: leafBeforeMove?.treeVersion ?? 0,
+				sortOrder: 0,
+			},
+			ADMIN,
+		);
+		expect(
+			await Promise.all([
+				ctx.env.DB.prepare(
+					"SELECT inbox_id FROM conversations WHERE id='tree-conversation'",
+				).first(),
+				ctx.env.DB.prepare(
+					"SELECT inbox_id FROM rules WHERE id='tree-rule'",
+				).first(),
+				ctx.env.DB.prepare(
+					"SELECT inbox_id, is_default FROM inbox_channels WHERE id='tree-default'",
+				).first(),
+			]),
+		).toEqual(before);
+		const moved = await ctx.db
+			.select()
+			.from(inboxes)
+			.where(eq(inboxes.id, "leaf"))
+			.get();
+		const sibling = await ctx.db
+			.select()
+			.from(inboxes)
+			.where(eq(inboxes.id, "child"))
+			.get();
+		expect(moved).toMatchObject({
+			parentInboxId: "root",
+			sortOrder: 0,
+			treeVersion: 1,
+			updatedAt: 123,
+		});
+		expect(sibling).toMatchObject({ sortOrder: 1, updatedAt: 456 });
+		await expect(
+			moveInboxInTree(
+				ctx.env,
+				workspaceId,
+				{ inboxId: "leaf", parentInboxId: null, expectedTreeVersion: 0 },
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 409 });
+	});
+
+	test("permits wide trees while enforcing depth and leaves siblings intact on stale moves", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "wide-root");
+		for (let index = 0; index < 65; index += 1) {
+			await insertTreeInbox(workspaceId, `wide-${index}`, {
+				parentInboxId: "wide-root",
+				sortOrder: index,
+			});
+		}
+		const readable = new Set([
+			"wide-root",
+			...Array.from({ length: 65 }, (_, index) => `wide-${index}`),
+		]);
+		expect(
+			await getInboxDescendantIds(ctx.db, workspaceId, "wide-root", readable),
+		).toHaveLength(66);
+		await insertTreeInbox(workspaceId, "depth-root");
+		let depthParentId = "depth-root";
+		for (let depth = 1; depth <= 63; depth += 1) {
+			const id = `depth-${depth}`;
+			await insertTreeInbox(workspaceId, id, { parentInboxId: depthParentId });
+			depthParentId = id;
+		}
+		await insertTreeInbox(workspaceId, "subtree");
+		await insertTreeInbox(workspaceId, "subtree-child", {
+			parentInboxId: "subtree",
+		});
+		await expect(
+			assertValidInboxParent(ctx.db, workspaceId, "subtree", depthParentId),
+		).rejects.toMatchObject({ status: 409 });
+
+		await insertTreeInbox(workspaceId, "move-root");
+		await insertTreeInbox(workspaceId, "first", {
+			parentInboxId: "move-root",
+			sortOrder: 0,
+		});
+		await insertTreeInbox(workspaceId, "stale-source", {
+			parentInboxId: "move-root",
+			sortOrder: 1,
+		});
+		await expect(
+			moveInboxInTree(
+				ctx.env,
+				workspaceId,
+				{
+					inboxId: "stale-source",
+					parentInboxId: "move-root",
+					expectedTreeVersion: 1,
+					sortOrder: 0,
+				},
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 409 });
+		const siblings = await ctx.db
+			.select({
+				id: inboxes.id,
+				sortOrder: inboxes.sortOrder,
+				treeVersion: inboxes.treeVersion,
+			})
+			.from(inboxes)
+			.where(eq(inboxes.parentInboxId, "move-root"))
+			.orderBy(inboxes.sortOrder);
+		expect(siblings).toEqual([
+			{ id: "first", sortOrder: 0, treeVersion: 0 },
+			{ id: "stale-source", sortOrder: 1, treeVersion: 0 },
+		]);
+	});
+
+	test("invalidates a sibling's prepared move when its sort order changes", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "concurrent-root");
+		await insertTreeInbox(workspaceId, "concurrent-first", {
+			parentInboxId: "concurrent-root",
+			sortOrder: 0,
+			updatedAt: 101,
+		});
+		await insertTreeInbox(workspaceId, "concurrent-sibling", {
+			parentInboxId: "concurrent-root",
+			sortOrder: 1,
+			updatedAt: 202,
+		});
+		const preparedSibling = await ctx.db
+			.select({ treeVersion: inboxes.treeVersion })
+			.from(inboxes)
+			.where(eq(inboxes.id, "concurrent-sibling"))
+			.get();
+		await moveInboxInTree(
+			ctx.env,
+			workspaceId,
+			{
+				inboxId: "concurrent-first",
+				parentInboxId: "concurrent-root",
+				expectedTreeVersion: 0,
+				sortOrder: 1,
+			},
+			ADMIN,
+		);
+		const afterFirstMove = await ctx.db
+			.select({
+				id: inboxes.id,
+				parentInboxId: inboxes.parentInboxId,
+				sortOrder: inboxes.sortOrder,
+				treeVersion: inboxes.treeVersion,
+				updatedAt: inboxes.updatedAt,
+			})
+			.from(inboxes)
+			.where(eq(inboxes.parentInboxId, "concurrent-root"))
+			.orderBy(inboxes.sortOrder);
+		expect(afterFirstMove).toEqual([
+			{
+				id: "concurrent-sibling",
+				parentInboxId: "concurrent-root",
+				sortOrder: 0,
+				treeVersion: 1,
+				updatedAt: 202,
+			},
+			{
+				id: "concurrent-first",
+				parentInboxId: "concurrent-root",
+				sortOrder: 1,
+				treeVersion: 1,
+				updatedAt: 101,
+			},
+		]);
+		await expect(
+			moveInboxInTree(
+				ctx.env,
+				workspaceId,
+				{
+					inboxId: "concurrent-sibling",
+					parentInboxId: "concurrent-root",
+					expectedTreeVersion: preparedSibling?.treeVersion ?? 0,
+					sortOrder: 1,
+				},
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 409 });
+		expect(
+			await ctx.db
+				.select({
+					id: inboxes.id,
+					parentInboxId: inboxes.parentInboxId,
+					sortOrder: inboxes.sortOrder,
+					treeVersion: inboxes.treeVersion,
+					updatedAt: inboxes.updatedAt,
+				})
+				.from(inboxes)
+				.where(eq(inboxes.parentInboxId, "concurrent-root"))
+				.orderBy(inboxes.sortOrder),
+		).toEqual(afterFirstMove);
+	});
+
+	test("reorders only ordinary inboxes without touching lifecycle timestamps", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "ordinary-first", {
+			sortOrder: 0,
+			updatedAt: 101,
+		});
+		await insertTreeInbox(workspaceId, "ordinary-second", {
+			sortOrder: 1,
+			updatedAt: 202,
+		});
+		await reorderInboxes(
+			ctx.env,
+			workspaceId,
+			["ordinary-second", "ordinary-first"],
+			ADMIN,
+		);
+		const rows = await ctx.db
+			.select({
+				id: inboxes.id,
+				sortOrder: inboxes.sortOrder,
+				updatedAt: inboxes.updatedAt,
+			})
+			.from(inboxes)
+			.where(eq(inboxes.workspaceId, workspaceId))
+			.orderBy(inboxes.sortOrder);
+		expect(rows).toEqual([
+			{ id: "ordinary-second", sortOrder: 0, updatedAt: 202 },
+			{ id: "ordinary-first", sortOrder: 1, updatedAt: 101 },
+		]);
+	});
+
+	test("rejects system inbox reorder requests and implicit system reindexing", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "ordinary-before", {
+			sortOrder: 0,
+			updatedAt: 101,
+		});
+		await insertTreeInbox(workspaceId, "system-fixed", {
+			visibilityType: "system",
+			sortOrder: 1,
+			updatedAt: 202,
+		});
+		await insertTreeInbox(workspaceId, "ordinary-after", {
+			sortOrder: 2,
+			updatedAt: 303,
+		});
+		const before = await ctx.db
+			.select({
+				id: inboxes.id,
+				sortOrder: inboxes.sortOrder,
+				updatedAt: inboxes.updatedAt,
+			})
+			.from(inboxes)
+			.where(eq(inboxes.workspaceId, workspaceId))
+			.orderBy(inboxes.sortOrder);
+		await expect(
+			reorderInboxes(ctx.env, workspaceId, ["system-fixed"], ADMIN),
+		).rejects.toMatchObject({ status: 403 });
+		await expect(
+			reorderInboxes(ctx.env, workspaceId, ["ordinary-after"], ADMIN),
+		).rejects.toMatchObject({ status: 409 });
+		expect(
+			await ctx.db
+				.select({
+					id: inboxes.id,
+					sortOrder: inboxes.sortOrder,
+					updatedAt: inboxes.updatedAt,
+				})
+				.from(inboxes)
+				.where(eq(inboxes.workspaceId, workspaceId))
+				.orderBy(inboxes.sortOrder),
+		).toEqual(before);
+	});
+
+	test("rejects moves of system inboxes without changing their tree state", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "system-root", {
+			visibilityType: "system",
+			sortOrder: 2,
+			updatedAt: 999,
+		});
+		await expect(
+			moveInboxInTree(
+				ctx.env,
+				workspaceId,
+				{
+					inboxId: "system-root",
+					parentInboxId: null,
+					expectedTreeVersion: 0,
+					sortOrder: 0,
+				},
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 403 });
+		expect(
+			await ctx.db
+				.select()
+				.from(inboxes)
+				.where(eq(inboxes.id, "system-root"))
+				.get(),
+		).toMatchObject({
+			parentInboxId: null,
+			sortOrder: 2,
+			treeVersion: 0,
+			updatedAt: 999,
+		});
+	});
+
+	test("rejects moving an ordinary tree containing a system descendant", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "destination-root", {
+			sortOrder: 0,
+			updatedAt: 100,
+		});
+		await insertTreeInbox(workspaceId, "ordinary-root", {
+			sortOrder: 1,
+			updatedAt: 200,
+		});
+		await insertTreeInbox(workspaceId, "system-descendant", {
+			parentInboxId: "ordinary-root",
+			sortOrder: 0,
+			visibilityType: "system",
+			updatedAt: 300,
+		});
+		const before = await ctx.db
+			.select({
+				id: inboxes.id,
+				parentInboxId: inboxes.parentInboxId,
+				sortOrder: inboxes.sortOrder,
+				treeVersion: inboxes.treeVersion,
+			})
+			.from(inboxes)
+			.where(eq(inboxes.workspaceId, workspaceId))
+			.orderBy(inboxes.id);
+		await expect(
+			moveInboxInTree(
+				ctx.env,
+				workspaceId,
+				{
+					inboxId: "ordinary-root",
+					parentInboxId: "destination-root",
+					expectedTreeVersion: 0,
+					sortOrder: 0,
+				},
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 409 });
+		expect(
+			await ctx.db
+				.select({
+					id: inboxes.id,
+					parentInboxId: inboxes.parentInboxId,
+					sortOrder: inboxes.sortOrder,
+					treeVersion: inboxes.treeVersion,
+				})
+				.from(inboxes)
+				.where(eq(inboxes.workspaceId, workspaceId))
+				.orderBy(inboxes.id),
+		).toEqual(before);
+	});
+
+	test("rejects ordinary moves that would reindex a system sibling", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "system-sibling", {
+			visibilityType: "system",
+			sortOrder: 0,
+			updatedAt: 701,
+		});
+		await insertTreeInbox(workspaceId, "ordinary-source", {
+			sortOrder: 1,
+			updatedAt: 702,
+		});
+		const systemBefore = await ctx.db
+			.select({ sortOrder: inboxes.sortOrder, updatedAt: inboxes.updatedAt })
+			.from(inboxes)
+			.where(eq(inboxes.id, "system-sibling"))
+			.get();
+		await expect(
+			moveInboxInTree(
+				ctx.env,
+				workspaceId,
+				{
+					inboxId: "ordinary-source",
+					parentInboxId: null,
+					expectedTreeVersion: 0,
+					sortOrder: 0,
+				},
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 409 });
+		expect(
+			await ctx.db
+				.select({ sortOrder: inboxes.sortOrder, updatedAt: inboxes.updatedAt })
+				.from(inboxes)
+				.where(eq(inboxes.id, "system-sibling"))
+				.get(),
+		).toEqual(systemBefore);
 	});
 });
