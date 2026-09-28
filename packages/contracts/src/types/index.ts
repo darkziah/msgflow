@@ -20,6 +20,10 @@ export interface Attachment {
 	url: string;
 	name: string;
 	size: number;
+	/** MIME disposition from an email part; omitted for existing channels. */
+	disposition?: "attachment" | "inline";
+	/** Normalized MIME Content-ID for an inline email image. */
+	contentId?: string;
 }
 
 export interface Message {
@@ -30,6 +34,8 @@ export interface Message {
 	providerMessageId: string | null;
 	senderId: string;
 	text: string;
+	/** Server-sanitized inbound email HTML. Never present for chat channels. */
+	html?: string;
 	payload: unknown;
 	attachments: Attachment[];
 	createdAt: string;
@@ -311,7 +317,7 @@ export interface ChannelSummary {
 	type: "facebook_page" | "email";
 	displayName: string;
 	externalId: string;
-	status: "active" | "disconnected" | "error";
+	status: "active" | "disconnected" | "error" | "deleted";
 	hasToken: boolean;
 	tokenExpiresAt: string | null;
 	createdAt: string;
@@ -326,6 +332,12 @@ export interface MetaAppSummary {
 	hasSecret: boolean;
 	createdAt: string;
 	updatedAt: string;
+}
+
+/** Returned only when an App is created or its webhook token is rotated. */
+export interface MetaAppWebhookSetup {
+	metaApp: MetaAppSummary;
+	webhookVerifyToken: string;
 }
 
 // POST /api/channels/:id/token is defined by ChannelConnectRequestSchema.

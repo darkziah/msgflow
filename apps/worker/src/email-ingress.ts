@@ -17,6 +17,7 @@ import {
 	resolveInboundEmailRoute,
 } from "./email-transport";
 import type { Env } from "./env";
+import { normalizeContentId, sanitizeInboundEmailHtml } from "./email-html";
 import { routeInbound } from "./ingest";
 export const MAX_INBOUND_EMAIL_BYTES = MAX_EMAIL_BYTES;
 // Leave room for JSON escaping and metadata under D1's 2 MiB row limit.
@@ -187,8 +188,7 @@ async function processIngress(env: Env, row: IngressRow): Promise<boolean> {
 				total += bytes.length;
 				if (total > MAX_EMAIL_BYTES)
 					throw new EmailIngressRejectError("attachments exceed 5 MiB");
-				attachments.push(
-					await storePrivateEmailAttachment(
+				const stored = await storePrivateEmailAttachment(
 						env,
 						{
 							workspaceId: row.workspace_id,
@@ -199,9 +199,22 @@ async function processIngress(env: Env, row: IngressRow): Promise<boolean> {
 						attachment.mimeType,
 						bytes,
 						`${row.id}-${index}`,
-					),
-				);
+					);
+					attachments.push({
+						...stored,
+						disposition: attachment.disposition ?? "attachment",
+						contentId: normalizeContentId(attachment.contentId) ?? undefined,
+					});
 			}
+			const inlineCidUrls = new Map(
+				attachments
+					.filter((attachment) => attachment.disposition === "inline" && attachment.contentId)
+					.map((attachment) => [
+						attachment.contentId as string,
+						`${attachment.url}?inline=1`,
+					]),
+			);
+			const html = await sanitizeInboundEmailHtml(email.html, inlineCidUrls);
 			const metadata = {
 				subject: email.subject ?? "",
 				from,
@@ -223,6 +236,7 @@ async function processIngress(env: Env, row: IngressRow): Promise<boolean> {
 					providerMessageId: messageId,
 					senderId: from,
 					text,
+					html,
 					createdAt: row.received_at,
 					payload: metadata,
 					attachments,

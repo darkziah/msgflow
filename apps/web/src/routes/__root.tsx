@@ -4,10 +4,10 @@ import {
 	Outlet,
 	useRouter,
 } from "@tanstack/react-router";
-import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { useSession } from "@/lib/auth-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 export const Route = createRootRoute({
 	component: Root,
@@ -27,7 +27,7 @@ function Root() {
 
 	if (isPending || cacheOwner !== identity) {
 		return (
-			<div className="flex min-h-screen items-center justify-center text-sm text-gray-400">
+			<div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
 				Loading…
 			</div>
 		);
@@ -39,9 +39,8 @@ function Root() {
 		return <Navigate to="/login" />;
 	}
 	return (
-		<>
+		<TooltipProvider>
 			<Outlet key={identity ?? "anonymous"} />
-			<TanStackRouterDevtools />
-		</>
+		</TooltipProvider>
 	);
 }

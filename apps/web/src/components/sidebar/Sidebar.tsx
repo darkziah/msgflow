@@ -1,9 +1,16 @@
+import type {
+	InboxIconKey,
+	SidebarInboxItem,
+	SidebarItem,
+	SidebarPreferences,
+	SidebarResponse,
+	SidebarSection,
+} from "@msgflow/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
 import {
 	BadgeDollarSign,
-	Bell,
+
 	Briefcase,
 	CheckCircle2,
 	ChevronDown,
@@ -20,22 +27,33 @@ import {
 	Users,
 	Zap,
 } from "lucide-react";
-import type {
-	InboxIconKey,
-	SidebarInboxItem,
-	SidebarItem,
-	SidebarPreferences,
-	SidebarResponse,
-	SidebarSection,
-	WorkspaceSummary,
-} from "@msgflow/contracts";
+import { useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { applyPreferences, isSectionCollapsed } from "./sidebar-prefs";
 import { InboxSettingsDrawer } from "./InboxSettingsDrawer";
 import { MailboxSidebar } from "./MailboxSidebar";
+import { applyPreferences, isSectionCollapsed } from "./sidebar-prefs";
 
 export interface ListFilters {
+	/** Client-only label for the currently selected sidebar queue; never sent to the API. */
+	queueLabel?: string;
 	mailboxId?: string;
 	status?: "open" | "archived" | "all";
 	inboxId?: string;
@@ -67,22 +85,18 @@ const INBOX_ICONS: Record<InboxIconKey, typeof InboxIcon> = {
 
 export interface SidebarProps {
 	workspaceId: string;
-	workspaces: WorkspaceSummary[];
 	currentUserId: string;
 	activeFilters: ListFilters;
 	onSelect: (filters: ListFilters) => void;
-	onChangeWorkspace: (workspaceId: string) => void;
 	compact: boolean;
 	onToggleCompact: () => void;
 }
 
 export function Sidebar({
 	workspaceId,
-	workspaces,
 	currentUserId,
 	activeFilters,
 	onSelect,
-	onChangeWorkspace,
 	compact,
 	onToggleCompact,
 }: SidebarProps) {
@@ -92,23 +106,7 @@ export function Sidebar({
 		{ mode: "create" } | { mode: "edit"; inboxId: string } | null
 	>(null);
 	const [dragId, setDragId] = useState<string | null>(null);
-	const [notificationsOpen, setNotificationsOpen] = useState(false);
-	const { data: notifications } = useQuery({
-		queryKey: ["comment-notifications"],
-		queryFn: () => api.listCommentNotifications(),
-		refetchInterval: 15000,
-	});
-	const openNotification = (
-		notification: NonNullable<typeof notifications>["notifications"][number],
-	) => {
-		api
-			.markCommentNotificationRead(notification.id)
-			.finally(() =>
-				queryClient.invalidateQueries({ queryKey: ["comment-notifications"] }),
-			);
-		setNotificationsOpen(false);
-		navigate({ to: "/", search: { c: notification.conversationId } });
-	};
+
 
 	const { data: sidebar } = useQuery({
 		queryKey: ["sidebar", workspaceId],
@@ -210,10 +208,14 @@ export function Sidebar({
 			<aside
 				className={cn(
 					"flex h-full shrink-0 flex-col border-r bg-muted/30",
-					compact ? "w-14" : "w-60",
+					compact ? "w-14" : "w-[232px]",
 				)}
 			>
-				<div className="p-4 text-xs text-gray-400">Loading…</div>
+				<div className="space-y-3 p-4">
+					<Skeleton className="h-5 w-28" />
+					<Skeleton className="h-8 w-full" />
+					<Skeleton className="h-8 w-4/5" />
+				</div>
 			</aside>
 		);
 	}
@@ -222,79 +224,9 @@ export function Sidebar({
 		<aside
 			className={cn(
 				"flex h-full shrink-0 flex-col border-r bg-muted/30 transition-[width]",
-				compact ? "w-14" : "w-60",
+				compact ? "w-14" : "w-[232px]",
 			)}
 		>
-			{/* Header: logo + workspace switcher */}
-			<div className="flex items-center gap-2 border-b px-3 py-2">
-				{!compact ? (
-					<>
-						<h1 className="text-sm font-black">MsgFlow</h1>
-						<select
-							value={workspaceId}
-							onChange={(event) => onChangeWorkspace(event.target.value)}
-							className="min-w-0 flex-1 rounded border bg-transparent px-1 py-0.5 text-xs outline-none"
-							title="Switch workspace"
-						>
-							{workspaces.map((workspace) => (
-								<option key={workspace.id} value={workspace.id}>
-									{workspace.name}
-								</option>
-							))}
-						</select>
-						<div className="relative">
-							<button
-								type="button"
-								className="relative rounded p-1 hover:bg-accent"
-								onClick={() => setNotificationsOpen((open) => !open)}
-								aria-label="Comment mentions"
-							>
-								<Bell size={16} />
-								{notifications?.unreadCount ? (
-									<span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-red-600 px-1 text-center text-[10px] text-white">
-										{notifications.unreadCount}
-									</span>
-								) : null}
-							</button>
-							{notificationsOpen ? (
-								<div className="absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-md border bg-background shadow-lg">
-									<p className="border-b px-3 py-2 text-xs font-semibold">
-										Mentions
-									</p>
-									{notifications?.notifications.length ? (
-										notifications.notifications.map((notification) => (
-											<button
-												key={notification.id}
-												type="button"
-												onClick={() => openNotification(notification)}
-												className="block w-full border-b px-3 py-2 text-left text-sm hover:bg-muted"
-											>
-												<span
-													className={
-														notification.readAt
-															? "text-muted-foreground"
-															: "font-semibold"
-													}
-												>
-													{notification.commentText}
-												</span>
-											</button>
-										))
-									) : (
-										<p className="px-3 py-4 text-sm text-muted-foreground">
-											No mentions yet.
-										</p>
-									)}
-								</div>
-							) : null}
-						</div>
-					</>
-				) : (
-					<h1 className="mx-auto text-sm font-black" title="MsgFlow">
-						M
-					</h1>
-				)}
-			</div>
 
 			{/* Sections */}
 			<nav className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
@@ -303,8 +235,12 @@ export function Sidebar({
 					userId={currentUserId}
 					selected={activeFilters.mailboxId}
 					compact={compact}
-					onSelect={(mailboxId) =>
-						onSelect({ mailboxId, channel: "email", status: "open" })
+					onSelect={(mailbox) =>
+						onSelect({
+							mailboxId: mailbox.id,
+							queueLabel: mailbox.label,
+							status: "open",
+						})
 					}
 				/>
 				{sidebar.sections.map((section) => (
@@ -330,15 +266,24 @@ export function Sidebar({
 			</nav>
 
 			{/* Footer: compact toggle */}
-			<button
-				type="button"
-				onClick={onToggleCompact}
-				className="flex items-center justify-center gap-2 border-t py-2 text-xs text-gray-500 hover:bg-accent"
-				title={compact ? "Expand sidebar" : "Collapse sidebar"}
-			>
-				{compact ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-				{!compact ? <span>Collapse</span> : null}
-			</button>
+			<Separator />
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<Button
+						type="button"
+						variant="ghost"
+						onClick={onToggleCompact}
+						className="flex w-full items-center justify-center gap-2 py-2 text-xs text-gray-500"
+						aria-label={compact ? "Expand sidebar" : "Collapse sidebar"}
+					>
+						{compact ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+						{!compact ? <span>Collapse</span> : null}
+					</Button>
+				</TooltipTrigger>
+				<TooltipContent>
+					{compact ? "Expand sidebar" : "Collapse sidebar"}
+				</TooltipContent>
+			</Tooltip>
 
 			{drawer ? (
 				<InboxSettingsDrawer
@@ -404,28 +349,36 @@ function SidebarSectionView(props: SectionProps) {
 
 	return (
 		<div className="mb-1">
-			<button
-				type="button"
-				onClick={props.onToggle}
-				className="group flex w-full items-center gap-1 rounded px-2 py-1 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500 hover:bg-accent"
-				title={collapsed ? "Expand section" : "Collapse section"}
-			>
-				{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-				<span className="flex-1">{section.label}</span>
+			<div className="flex items-center">
+				<Button
+					type="button"
+					variant="ghost"
+					size="sm"
+					onClick={props.onToggle}
+					className="h-7 flex-1 justify-start gap-1 px-2 text-[11px] font-bold uppercase tracking-wide text-gray-500"
+					aria-label={`${collapsed ? "Expand" : "Collapse"} ${section.label}`}
+				>
+					{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+					<span className="flex-1">{section.label}</span>
+				</Button>
 				{section.key === "inbox" && props.isAdmin ? (
-					<button
-						type="button"
-						onClick={(event) => {
-							event.stopPropagation();
-							props.onCreateInbox();
-						}}
-						className="rounded p-0.5 text-gray-400 hover:bg-accent hover:text-gray-600"
-						title="Create inbox"
-					>
-						<Plus size={14} />
-					</button>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon"
+								className="size-7"
+								onClick={props.onCreateInbox}
+								aria-label="Create inbox"
+							>
+								<Plus size={14} />
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>Create inbox</TooltipContent>
+					</Tooltip>
 				) : null}
-			</button>
+			</div>
 			{collapsed ? null : (
 				<div className="mt-0.5">
 					{section.items.map((item) => (
@@ -449,19 +402,6 @@ function SidebarSectionView(props: SectionProps) {
 
 function ItemRow(props: SectionProps & { item: SidebarItem }) {
 	const { item, compact, isAdmin, activeFilters } = props;
-	const [menuOpen, setMenuOpen] = useState(false);
-	const menuRef = useRef<HTMLDivElement>(null);
-
-	useEffect(() => {
-		if (!menuOpen) return;
-		const onDown = (event: MouseEvent) => {
-			if (!menuRef.current?.contains(event.target as Node)) {
-				setMenuOpen(false);
-			}
-		};
-		document.addEventListener("mousedown", onDown);
-		return () => document.removeEventListener("mousedown", onDown);
-	}, [menuOpen]);
 
 	const filters = itemFilters(item, props.currentUserId);
 	const active = filtersEqual(activeFilters, filters);
@@ -470,9 +410,11 @@ function ItemRow(props: SectionProps & { item: SidebarItem }) {
 	const count = item.kind === "view" ? null : item.count;
 
 	return (
-		<div ref={menuRef} className="group relative">
-			<button
+		<div className="group flex items-center">
+			<Button
 				type="button"
+				variant="ghost"
+				size="sm"
 				onClick={() => props.onSelect(filters)}
 				draggable={item.kind === "inbox"}
 				onDragStart={(event) => {
@@ -488,12 +430,12 @@ function ItemRow(props: SectionProps & { item: SidebarItem }) {
 					props.onDrop(item.id);
 				}}
 				className={cn(
-					"flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[13px] transition-colors",
+					"h-8 min-w-0 flex-1 justify-start gap-2 rounded px-2 text-left text-[13px] transition-colors",
 					active
 						? "bg-primary/10 font-semibold text-primary"
 						: "hover:bg-accent",
 				)}
-				title={compact ? item.label : undefined}
+				aria-label={compact ? item.label : undefined}
 			>
 				<span className="flex w-4 shrink-0 items-center justify-center text-gray-500">
 					{icon}
@@ -502,61 +444,52 @@ function ItemRow(props: SectionProps & { item: SidebarItem }) {
 					<>
 						<span className="min-w-0 flex-1 truncate">{item.label}</span>
 						{count !== null && count > 0 ? (
-							<span className="shrink-0 rounded-full bg-gray-200 px-1.5 text-[10px] font-semibold text-gray-600">
+							<Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">
 								{count}
-							</span>
+							</Badge>
 						) : null}
-						<button
-							type="button"
-							onClick={(event) => {
-								event.stopPropagation();
-								setMenuOpen((open) => !open);
-							}}
-							className="shrink-0 rounded p-0.5 text-gray-400 opacity-0 hover:bg-accent hover:text-gray-600 group-hover:opacity-100"
-							aria-label={`${item.label} menu`}
-						>
-							<MoreHorizontal size={14} />
-						</button>
 					</>
 				) : null}
-			</button>
-
-			{menuOpen && !compact ? (
-				<div className="absolute right-0 top-full z-50 w-48 rounded-md border bg-background p-1 shadow-lg">
-					<MenuButton
-						label={prefsPinned(props.prefs, item.id) ? "Unpin" : "Pin"}
-						onClick={() => {
-							props.onTogglePin(item.id);
-							setMenuOpen(false);
-						}}
-					/>
-					<MenuButton
-						label="Hide"
-						onClick={() => {
-							props.onHide(item.id);
-							setMenuOpen(false);
-						}}
-					/>
-					{item.kind === "inbox" && isAdmin ? (
-						<>
-							<div className="my-1 border-t" />
-							<MenuButton
-								label="Edit inbox"
-								onClick={() => {
-									props.onEditInbox(item.inboxId);
-									setMenuOpen(false);
-								}}
-							/>
-							<MenuButton
-								label="Create rule"
-								onClick={() => {
-									props.onCreateRule();
-									setMenuOpen(false);
-								}}
-							/>
-						</>
-					) : null}
-				</div>
+			</Button>
+			{!compact ? (
+				<DropdownMenu>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<DropdownMenuTrigger asChild>
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon"
+									className="size-7 shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+									aria-label={`${item.label} menu`}
+								>
+									<MoreHorizontal />
+								</Button>
+							</DropdownMenuTrigger>
+						</TooltipTrigger>
+						<TooltipContent>{item.label} menu</TooltipContent>
+					</Tooltip>
+					<DropdownMenuContent align="end">
+						<DropdownMenuLabel>{item.label}</DropdownMenuLabel>
+						<DropdownMenuItem onSelect={() => props.onTogglePin(item.id)}>
+							{prefsPinned(props.prefs, item.id) ? "Unpin" : "Pin"}
+						</DropdownMenuItem>
+						<DropdownMenuItem onSelect={() => props.onHide(item.id)}>
+							Hide
+						</DropdownMenuItem>
+						{item.kind === "inbox" && isAdmin ? (
+							<>
+								<DropdownMenuSeparator />
+								<DropdownMenuItem onSelect={() => props.onEditInbox(item.inboxId)}>
+									Edit inbox
+								</DropdownMenuItem>
+								<DropdownMenuItem onSelect={props.onCreateRule}>
+									Create rule
+								</DropdownMenuItem>
+							</>
+						) : null}
+					</DropdownMenuContent>
+				</DropdownMenu>
 			) : null}
 		</div>
 	);
@@ -566,23 +499,6 @@ function prefsPinned(prefs: SidebarPreferences, itemId: string): boolean {
 	return prefs.pinnedItemIds.includes(itemId);
 }
 
-function MenuButton({
-	label,
-	onClick,
-}: {
-	label: string;
-	onClick: () => void;
-}) {
-	return (
-		<button
-			type="button"
-			onClick={onClick}
-			className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
-		>
-			{label}
-		</button>
-	);
-}
 
 function itemIcon(item: SidebarItem) {
 	switch (item.kind) {
@@ -612,23 +528,27 @@ function itemIcon(item: SidebarItem) {
 function itemFilters(item: SidebarItem, currentUserId: string): ListFilters {
 	switch (item.id) {
 		case "system:all":
-			return { status: "all" };
+			return { status: "all", queueLabel: item.label };
 		case "system:assigned-to-me":
-			return { status: "open", assigneeId: currentUserId };
+			return { status: "open", assigneeId: currentUserId, queueLabel: item.label };
 		case "system:unassigned":
-			return { status: "open", unassigned: true };
+			return { status: "open", unassigned: true, queueLabel: item.label };
 		case "system:snoozed":
-			return { status: "open", snoozed: true };
+			return { status: "open", snoozed: true, queueLabel: item.label };
 		case "system:closed":
-			return { status: "archived" };
+			return { status: "archived", queueLabel: item.label };
 		default:
 			if (item.kind === "inbox") {
-				return { status: "open", inboxId: item.inboxId };
+				return { status: "open", inboxId: item.inboxId, queueLabel: item.label };
 			}
 			if (item.kind === "tag") {
-				return { status: "open", tagId: item.id.replace("tag:", "") };
+				return {
+					status: "open",
+					tagId: item.id.replace("tag:", ""),
+					queueLabel: item.label,
+				};
 			}
-			return { status: "open" };
+			return { status: "open", queueLabel: item.label };
 	}
 }
 

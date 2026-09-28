@@ -12,7 +12,7 @@ export function MailboxSidebar({
 	userId: string;
 	selected?: string;
 	compact: boolean;
-	onSelect: (id: string) => void;
+	onSelect: (mailbox: { id: string; label: string }) => void;
 }) {
 	const query = useQuery({
 		queryKey: ["assigned-mailboxes", workspaceId, userId],
@@ -44,7 +44,7 @@ export function MailboxSidebar({
 					type="button"
 					title={`${m.canonicalAddress} · ${m.type} · ${m.openCount} open / ${m.totalCount} conversations`}
 					aria-pressed={selected === m.id}
-					onClick={() => onSelect(m.id)}
+					onClick={() => onSelect({ id: m.id, label: m.canonicalAddress })}
 					className={cn(
 						"flex w-full items-center gap-2 rounded px-2 py-2 text-left text-xs hover:bg-accent",
 						selected === m.id && "bg-accent",

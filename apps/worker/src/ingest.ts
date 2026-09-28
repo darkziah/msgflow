@@ -240,6 +240,7 @@ export async function routeInbound(
 					providerMessageId: inbound.providerMessageId,
 					senderId: contact.id,
 					text: inbound.text,
+					html: inbound.html,
 					payload: inbound.payload,
 					attachments,
 					createdAt: inbound.createdAt,

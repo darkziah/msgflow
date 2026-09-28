@@ -18,6 +18,8 @@ export interface NormalizedInbound {
 	providerMessageId: string | null;
 	senderId: string;
 	text: string;
+	/** Server-sanitized formatted email body; absent for chat channels. */
+	html?: string;
 	createdAt: string;
 	payload: unknown;
 	/** Durable R2-backed images, populated before routeInbound appends the message. */

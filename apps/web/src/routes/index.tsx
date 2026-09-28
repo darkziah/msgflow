@@ -1,14 +1,19 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { ConversationList } from "@/components/inbox/ConversationList";
+import {
+	ConversationList,
+	ConversationListSkeleton,
+} from "@/components/inbox/ConversationList";
 import { ConversationThread } from "@/components/inbox/ConversationThread";
 import { SearchBar, type SearchFilters } from "@/components/inbox/SearchBar";
-import { Sidebar, type ListFilters } from "@/components/sidebar/Sidebar";
-import { Button } from "@/components/ui/button";
-import { authClient, useSession } from "@/lib/auth-client";
+import { AppShell } from "@/components/layout/AppShell";
+import { AppTopBar } from "@/components/layout/AppTopBar";
+import { type ListFilters, Sidebar } from "@/components/sidebar/Sidebar";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { useSession } from "@/lib/auth-client";
 
 export const Route = createFileRoute("/")({
 	validateSearch: (search: Record<string, unknown>): { c?: string } => ({
@@ -20,10 +25,40 @@ export const Route = createFileRoute("/")({
 const STATUS_TABS = ["open", "archived", "all"] as const;
 type StatusTab = (typeof STATUS_TABS)[number];
 
+export function resetFiltersForStatus(
+	filters: ListFilters,
+	status: StatusTab,
+): ListFilters {
+	return {
+		...filters,
+		queueLabel: undefined,
+		status,
+		mailboxId: undefined,
+		inboxId: undefined,
+		assigneeId: undefined,
+		unassigned: undefined,
+		snoozed: undefined,
+	};
+}
+
 const WORKSPACE_KEY = "msgflow.workspaceId";
 const COMPACT_KEY = "msgflow.sidebarCompact";
 
-function Inbox() {
+/** Human-readable identity for the active operational queue. */
+export function queueIdentity(filters: ListFilters, status: StatusTab): string {
+	if (filters.queueLabel) return filters.queueLabel;
+	if (filters.snoozed) return "Snoozed";
+	if (filters.unassigned) return "Unassigned";
+	if (filters.assigneeId) return "Assigned";
+	if (filters.tagId) return "Tagged";
+	if (filters.mailboxId) return "Email mailbox";
+	if (filters.inboxId) return "Inbox";
+	if (status === "archived") return "Archived";
+	if (status === "all") return "All conversations";
+	return "Inbox";
+}
+
+export function Inbox() {
 	const { c: conversationId } = Route.useSearch();
 	const navigate = useNavigate();
 	const { data: session } = useSession();
@@ -38,10 +73,9 @@ function Inbox() {
 		queryFn: () => api.listWorkspaces(),
 	});
 	const workspaces = workspacesData?.workspaces ?? [];
-	const [workspaceId, setWorkspaceId] = useState<string>(() => {
-		const saved = localStorage.getItem(WORKSPACE_KEY);
-		return saved ?? "";
-	});
+	const [workspaceId, setWorkspaceId] = useState<string>(
+		() => localStorage.getItem(WORKSPACE_KEY) ?? "",
+	);
 	const activeWorkspaceId =
 		workspaceId && workspaces.some((ws) => ws.id === workspaceId)
 			? workspaceId
@@ -88,124 +122,94 @@ function Inbox() {
 		dateFrom: filters.dateFrom,
 		dateTo: filters.dateTo,
 	};
-
-	return (
-		<div className="flex h-screen flex-col">
-			<header className="flex items-center justify-between border-b px-4 py-2">
-				<nav className="flex gap-1">
-					{STATUS_TABS.map((tab) => (
-						<button
-							key={tab}
-							type="button"
-							onClick={() => {
-								setStatus(tab);
-								setFilters((current) => ({
-									...current,
-									status: tab,
-									inboxId: undefined,
-									assigneeId: undefined,
-									unassigned: undefined,
-									snoozed: undefined,
-								}));
-							}}
-							className={cn(
-								"rounded-md px-3 py-1 text-sm capitalize transition-colors",
-								status === tab
-									? "bg-primary text-primary-foreground"
-									: "text-gray-500 hover:bg-accent",
-							)}
-						>
-							{tab}
-						</button>
-					))}
-				</nav>
-				<HeaderUser />
-			</header>
-			<div className="flex min-h-0 flex-1">
-				{activeWorkspaceId && session ? (
-					<Sidebar
-						workspaceId={activeWorkspaceId}
-						workspaces={workspaces}
-						currentUserId={session.user.id}
-						activeFilters={filters}
-						onSelect={(next) => {
-							setFilters(next);
-							if (next.status) {
-								setStatus(next.status);
-							}
+	const queueLabel = queueIdentity(filters, status);
+	const list = (
+		<div className="flex min-h-0 flex-1 flex-col">
+			<div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+				<div className="flex min-w-0 items-center gap-2">
+					<Tabs
+						value={status}
+						onValueChange={(value) => {
+							const next = value as StatusTab;
+							setStatus(next);
+							setFilters((current) => resetFiltersForStatus(current, next));
 						}}
-						onChangeWorkspace={changeWorkspace}
-						compact={compact}
-						onToggleCompact={toggleCompact}
-					/>
-				) : null}
-				<div className="flex min-w-0 flex-1 flex-col">
-					<SearchBar
-						filters={searchFilters}
-						onChange={(next) =>
-							setFilters((current) => ({ ...current, ...next }))
-						}
-					/>
-					<div className="flex min-h-0 flex-1">
-						<aside className="w-[360px] shrink-0 border-r">
-							{isPending ? (
-								<div className="p-4 text-sm text-gray-400">Loading…</div>
-							) : (
-								<ConversationList
-									conversations={data?.conversations ?? []}
-									selectedId={conversationId}
-									onSelect={(id) => navigate({ to: "/", search: { c: id } })}
-								/>
-							)}
-						</aside>
-						<main className="min-w-0 flex-1">
-							{conversationId ? (
-								<ConversationThread
-									key={conversationId}
-									conversationId={conversationId}
-								/>
-							) : (
-								<div className="flex h-full items-center justify-center text-sm text-gray-400">
-									Select a conversation to open it.
-								</div>
-							)}
-						</main>
+					>
+						<TabsList aria-label="Conversation status">
+							{STATUS_TABS.map((tab) => (
+								<TabsTrigger key={tab} value={tab} className="capitalize">
+									{tab}
+								</TabsTrigger>
+							))}
+						</TabsList>
+					</Tabs>
+					<div
+						className="flex min-w-0 items-center gap-1 text-xs whitespace-nowrap"
+						aria-live="polite"
+					>
+						<span>{queueLabel}</span>
+						<Badge variant="secondary">{data?.conversations.length ?? 0}</Badge>
 					</div>
 				</div>
 			</div>
+			<SearchBar
+				filters={searchFilters}
+				onChange={(next) =>
+					setFilters((current) =>
+						Object.keys(next).length === 0 ? next : { ...current, ...next },
+					)
+				}
+			/>
+			<div className="min-h-0 flex-1 overflow-y-auto">
+				{isPending ? (
+					<ConversationListSkeleton />
+				) : (
+					<ConversationList
+						conversations={data?.conversations ?? []}
+						selectedId={conversationId}
+						onSelect={(id) => navigate({ to: "/", search: { c: id } })}
+					/>
+				)}
+			</div>
 		</div>
 	);
-}
-
-function HeaderUser() {
-	const { data: session } = useSession();
-	const navigate = useNavigate();
-
-	async function signOut() {
-		await authClient.signOut();
-		navigate({ to: "/login" });
-	}
+	const detail = conversationId ? (
+		<ConversationThread key={conversationId} conversationId={conversationId} />
+	) : (
+		<div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+			Select a conversation to open it.
+		</div>
+	);
+	const renderSidebar = (compactMode: boolean) =>
+		activeWorkspaceId && session ? (
+			<Sidebar
+				workspaceId={activeWorkspaceId}
+				currentUserId={session.user.id}
+				activeFilters={filters}
+				onSelect={(next) => {
+					setFilters(next);
+					if (next.status) setStatus(next.status);
+				}}
+				compact={compactMode}
+				onToggleCompact={toggleCompact}
+			/>
+		) : null;
 
 	return (
-		<div className="flex items-center gap-2">
-			<span className="text-sm text-gray-500">{session?.user.email}</span>
-			<Button
-				variant="ghost"
-				size="sm"
-				onClick={() => navigate({ to: "/rules" })}
-			>
-				Rules
-			</Button>
-			<Button
-				variant="ghost"
-				size="sm"
-				onClick={() => navigate({ to: "/settings" })}
-			>
-				Settings
-			</Button>
-			<Button variant="outline" size="sm" onClick={signOut}>
-				Sign out
-			</Button>
-		</div>
+		<AppShell
+			header={
+				<AppTopBar
+					workspaceId={activeWorkspaceId}
+					workspaces={workspaces}
+					onChangeWorkspace={changeWorkspace}
+				/>
+			}
+			hasDetail={Boolean(conversationId)}
+			onBack={() => navigate({ to: "/", search: {} })}
+			list={list}
+			detail={detail}
+			sidebar={renderSidebar(compact)}
+			mobileSidebar={renderSidebar(false)}
+		/>
 	);
 }

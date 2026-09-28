@@ -4,8 +4,28 @@ import type {
 	UserSummary,
 } from "@msgflow/contracts";
 import { useQuery } from "@tanstack/react-query";
+import { Paperclip } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import {
+	Select,
+	SelectContent,
+	SelectGroup,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { emailApi } from "@/lib/email-api";
 
@@ -41,7 +61,9 @@ export function Composer({
 	const [saveStatus, setSaveStatus] = useState("");
 	const [hydrated, setHydrated] = useState(!showSubject);
 	const [accepted, setAccepted] = useState(false);
+	const [showEmailSubject, setShowEmailSubject] = useState(false);
 	const dirty = useRef(false);
+	const attachmentInputRef = useRef<HTMLInputElement>(null);
 	const busyRef = useRef(false);
 	const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
 	const revision = useRef(0);
@@ -334,153 +356,204 @@ export function Composer({
 					!context.isError &&
 					(!privateOverride || !!draft.confirmPrivateIdentity)));
 	return (
-		<form onSubmit={submit} className="space-y-2">
-			<fieldset
-				disabled={busy}
-				className="flex items-center gap-1"
-				aria-label="Composer mode"
-			>
-				<Button
-					type="button"
-					variant={isNote ? "ghost" : "secondary"}
-					size="sm"
-					disabled={noteOnly}
-					aria-pressed={!isNote}
-					onClick={() => setMode("reply")}
+		<form onSubmit={submit} className="flex flex-col gap-2">
+			<FieldGroup className="gap-2">
+				<ToggleGroup
+					type="single"
+					value={mode}
+					disabled={busy}
+					aria-label="Composer mode"
+					onValueChange={(value) => {
+						if (value === "reply" || value === "note") setMode(value);
+					}}
 				>
-					Reply
-				</Button>
-				<Button
-					type="button"
-					variant={isNote ? "secondary" : "ghost"}
-					size="sm"
-					aria-pressed={isNote}
-					onClick={() => setMode("note")}
-				>
-					Comment
-				</Button>
-			</fieldset>
-			{showSubject && !isNote ? (
-				<fieldset
-					disabled={busy || locked}
-					className="space-y-2 rounded-md border p-3 text-sm"
-				>
-					<label className="flex items-center gap-2">
-						From{" "}
-						<select
-							aria-label="Reply from mailbox"
-							value={mailboxId}
-							onChange={(e) =>
-								edit({
-									mailboxId: e.target.value,
-									confirmPrivateIdentity: false,
-								})
-							}
-							className="min-w-0 flex-1 rounded border p-1"
-						>
-							<option value="">Select authorized identity…</option>
-							{context.data?.mailboxes.map((m) => (
-								<option
-									key={m.id}
-									value={m.id}
-									disabled={!m.isEnabled || !m.isSendEnabled}
+					<ToggleGroupItem
+						value="reply"
+						variant="outline"
+						size="sm"
+						disabled={noteOnly}
+					>
+						Reply
+					</ToggleGroupItem>
+					<ToggleGroupItem value="note" variant="outline" size="sm">
+						Comment
+					</ToggleGroupItem>
+				</ToggleGroup>
+				{showSubject && !isNote ? (
+					<fieldset
+						disabled={busy || locked}
+						className="flex flex-col overflow-hidden rounded-lg border bg-card text-sm"
+					>
+						<div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
+							<label
+								htmlFor="reply-from-mailbox"
+								className="flex min-w-0 flex-1 items-center gap-2"
+							>
+								<span className="shrink-0 text-xs font-medium text-muted-foreground">
+									From
+								</span>
+								<Select
+									aria-label="Reply from mailbox"
+									value={mailboxId || undefined}
+									onValueChange={(value) =>
+										edit({ mailboxId: value, confirmPrivateIdentity: false })
+									}
 								>
-									{m.canonicalAddress} · {m.type}
-									{m.id === context.data.receivingMailboxId
-										? " · receiving mailbox"
-										: ""}
-									{!m.isSendEnabled ? " · sending disabled" : ""}
-								</option>
-							))}
-						</select>
-					</label>
-					<p>To: {context.data?.recipient || "Unavailable"}</p>
-					<label className="flex items-center gap-2">
-						Subject{" "}
-						<input
-							value={subject}
-							onChange={(e) => edit({ subject: e.target.value })}
-							className="min-w-0 flex-1 rounded border p-1"
-						/>
-					</label>
-					<p className="text-xs text-muted-foreground">
-						Reply only. No reply-all, forwarding, Cc or Bcc.
-					</p>
-					{privateOverride ? (
-						<label className="flex gap-2 text-amber-800">
-							<input
-								type="checkbox"
-								checked={!!draft.confirmPrivateIdentity}
-								onChange={(e) =>
-									edit({ confirmPrivateIdentity: e.target.checked })
-								}
-							/>
-							I confirm the reply to this shared conversation will use my
-							authorized private identity ({from?.canonicalAddress}).
-						</label>
-					) : null}
-				</fieldset>
-			) : null}
-			{showSubject && !isNote && (!hydrated || context.isError) ? (
-				<p role="status" className="text-sm">
-					{context.isError
-						? "Email context unavailable; sending disabled."
-						: !hydrated
-							? "Loading server draft…"
-							: ""}
-				</p>
-			) : null}
-			{!isNote ? (
-				<div className="flex flex-wrap gap-2">
-					{draft.attachments?.map((a) => (
-						<div
-							key={a.id}
-							className="flex items-center gap-1 rounded border p-1 text-xs"
-						>
-							<a
-								href={showSubject ? emailApi.attachmentUrl(a.id) : a.url}
-								target="_blank"
-								rel="noopener noreferrer"
-								className="underline"
-							>
-								{showSubject ? (
-									a.name
-								) : (
-									<img
-										src={a.url}
-										alt={a.name}
-										className="size-16 object-cover"
-									/>
-								)}
-							</a>
-							<button
+									<SelectTrigger
+										id="reply-from-mailbox"
+										className="h-8 min-w-0 flex-1 border-0 bg-transparent px-0 shadow-none"
+										aria-label="Reply from mailbox"
+									>
+										<SelectValue placeholder="Select authorized identity…" />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectGroup>
+											{context.data?.mailboxes.map((m) => (
+												<SelectItem
+													key={m.id}
+													value={m.id}
+													disabled={!m.isEnabled || !m.isSendEnabled}
+												>
+													{m.canonicalAddress} · {m.type}
+													{m.id === context.data.receivingMailboxId
+														? " · receiving mailbox"
+														: ""}
+													{!m.isSendEnabled ? " · sending disabled" : ""}
+												</SelectItem>
+											))}
+										</SelectGroup>
+									</SelectContent>
+								</Select>
+							</label>
+							<Button
 								type="button"
-								disabled={busy || locked}
-								aria-label={`Remove ${a.name}`}
-								onClick={() =>
-									edit({
-										attachments: draft.attachments?.filter(
-											(item) => item.id !== a.id,
-										),
-									})
-								}
+								variant="ghost"
+								size="sm"
+								className="h-7 px-2 text-xs"
+								aria-expanded={showEmailSubject}
+								onClick={() => setShowEmailSubject((shown) => !shown)}
 							>
-								×
-							</button>
+								Subject
+							</Button>
 						</div>
-					))}
-				</div>
-			) : null}
-			{error ? (
-				<p role="alert" className="text-sm text-red-600">
-					{error}
-				</p>
-			) : null}
-			<div className="flex items-end gap-2">
+						<div className="flex items-center gap-2 border-t px-3 py-2 text-xs">
+							<span className="font-medium text-muted-foreground">To</span>
+							<span className="truncate">
+								{context.data?.recipient || "Unavailable"}
+							</span>
+						</div>
+						{showEmailSubject ? (
+							<label
+								htmlFor="reply-subject"
+								className="flex items-center gap-2 border-t px-3 py-2"
+							>
+								<span className="text-xs font-medium text-muted-foreground">
+									Subject
+								</span>
+								<Input
+									id="reply-subject"
+									className="h-8 border-0 bg-transparent px-0 shadow-none"
+									value={subject}
+									onChange={(e) => edit({ subject: e.target.value })}
+								/>
+							</label>
+						) : null}
+						<p className="border-t px-3 py-2 text-xs text-muted-foreground">
+							Reply only. No reply-all, forwarding, Cc or Bcc.
+						</p>
+						{privateOverride ? (
+							<Field orientation="horizontal">
+								<Checkbox
+									id="confirm-private-identity"
+									checked={!!draft.confirmPrivateIdentity}
+									onCheckedChange={(checked) =>
+										edit({ confirmPrivateIdentity: checked === true })
+									}
+								/>
+								<FieldLabel htmlFor="confirm-private-identity">
+									I confirm the reply to this shared conversation will use my
+									authorized private identity ({from?.canonicalAddress}).
+								</FieldLabel>
+							</Field>
+						) : null}
+					</fieldset>
+				) : null}
+				{showSubject && !isNote && (!hydrated || context.isError) ? (
+					<p role="status" className="text-sm">
+						{context.isError
+							? "Email context unavailable; sending disabled."
+							: !hydrated
+								? "Loading server draft…"
+								: ""}
+					</p>
+				) : null}
 				{!isNote ? (
-					<label className="cursor-pointer text-sm">
-						📎<span className="sr-only">Add attachments</span>
+					<div className="flex flex-wrap gap-2">
+						{draft.attachments?.map((a) => (
+							<div
+								key={a.id}
+								className="flex items-center gap-1 rounded border p-1 text-xs"
+							>
+								<a
+									href={showSubject ? emailApi.attachmentUrl(a.id) : a.url}
+									target="_blank"
+									rel="noopener noreferrer"
+									className="underline"
+								>
+									{showSubject ? (
+										a.name
+									) : (
+										<img
+											src={a.url}
+											alt={a.name}
+											className="size-16 object-cover"
+										/>
+									)}
+								</a>
+								<button
+									type="button"
+									disabled={busy || locked}
+									aria-label={`Remove ${a.name}`}
+									onClick={() =>
+										edit({
+											attachments: draft.attachments?.filter(
+												(item) => item.id !== a.id,
+											),
+										})
+									}
+								>
+									×
+								</button>
+							</div>
+						))}
+					</div>
+				) : null}
+				{error ? (
+					<Alert variant="destructive">
+						<AlertTitle>Unable to send</AlertTitle>
+						<AlertDescription>{error}</AlertDescription>
+					</Alert>
+				) : null}
+				<div className="flex items-end gap-2">
+					{!isNote ? (
+						<>
+							<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="button"
+									variant="outline"
+									size="icon"
+									disabled={busy || locked}
+									aria-label="Add attachments"
+									onClick={() => attachmentInputRef.current?.click()}
+								>
+									<Paperclip />
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent>Add attachments</TooltipContent>
+						</Tooltip>
 						<input
+							ref={attachmentInputRef}
 							type="file"
 							accept={(showSubject ? EMAIL_TYPES : IMAGE_TYPES).join(",")}
 							multiple
@@ -491,89 +564,92 @@ export function Composer({
 								e.currentTarget.value = "";
 							}}
 						/>
-					</label>
-				) : null}
-				<div className="relative flex-1">
-					<textarea
-						aria-label={isNote ? "Comment text" : "Reply text"}
-						value={text}
-						disabled={busy || (!isNote && locked)}
-						onChange={(e) =>
-							isNote ? setNote(e.target.value) : edit({ text: e.target.value })
-						}
-						onKeyDown={(e) => {
-							if (
-								e.key === "Enter" &&
-								!e.shiftKey &&
-								!e.nativeEvent.isComposing
-							) {
-								e.preventDefault();
-								void submit(e);
-							}
-						}}
-						placeholder={
-							isNote
-								? "Write a comment… Type @ to mention a teammate"
-								: "Write a reply…"
-						}
-						rows={3}
-						className="w-full resize-none rounded-md border px-3 py-2 text-sm"
-					/>
-					{candidates.length ? (
-						<div className="absolute bottom-full mb-1 w-full rounded-md border bg-background p-1 shadow">
-							{candidates.map((user) => (
-								<button
-									key={user.id}
-									type="button"
-									disabled={busy}
-									onClick={() => selectMention(user)}
-									className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-muted"
-								>
-									@{user.name}
-								</button>
-							))}
-						</div>
+						</>
 					) : null}
+					<div className="relative flex-1">
+						<Textarea
+							aria-label={isNote ? "Comment text" : "Reply text"}
+							value={text}
+							disabled={busy || (!isNote && locked)}
+							onChange={(e) =>
+								isNote
+									? setNote(e.target.value)
+									: edit({ text: e.target.value })
+							}
+							onKeyDown={(e) => {
+								if (
+									e.key === "Enter" &&
+									!e.shiftKey &&
+									!e.nativeEvent.isComposing
+								) {
+									e.preventDefault();
+									void submit(e);
+								}
+							}}
+							placeholder={
+								isNote
+									? "Write a comment… Type @ to mention a teammate"
+									: "Write a reply…"
+							}
+							rows={3}
+							className="resize-none"
+						/>
+						{candidates.length ? (
+							<div className="absolute bottom-full mb-1 w-full rounded-md border bg-background p-1 shadow">
+								{candidates.map((user) => (
+									<button
+										key={user.id}
+										type="button"
+										disabled={busy}
+										onClick={() => selectMention(user)}
+										className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-muted"
+									>
+										@{user.name}
+									</button>
+								))}
+							</div>
+						) : null}
+					</div>
+					<Button type="submit" size="sm" disabled={busy || !canSend}>
+						{busy ? "Working…" : isNote ? "Comment" : "Send"}
+					</Button>
 				</div>
-				<Button type="submit" size="sm" disabled={busy || !canSend}>
-					{busy ? "Working…" : isNote ? "Comment" : "Send"}
-				</Button>
-			</div>
-			{showSubject && !isNote ? (
-				<>
-					<p role="status" className="text-xs text-muted-foreground">
-						{locked
-							? `Attempt ${draft.clientMessageId}: ${delivery?.state ?? "uncertain"}. No resend until reconciled.`
-							: saveStatus}{" "}
-						· Private PDF/images, 5 MiB combined. Drafts are stored on the
-						server, never in browser storage.
-					</p>
-					{locked ? (
-						<div className="flex gap-2">
-							<Button
-								type="button"
-								variant="outline"
-								size="sm"
-								disabled={busy}
-								onClick={() => void context.refetch()}
-							>
-								Refresh server status
-							</Button>
-							{accepted || delivery?.state === "accepted" ? (
+				{showSubject && !isNote ? (
+					<>
+						<p role="status" className="text-xs text-muted-foreground">
+							{locked
+								? `Attempt ${draft.clientMessageId}: ${delivery?.state ?? "uncertain"}. No resend until reconciled.`
+								: saveStatus}{" "}
+							· Private PDF/images, 5 MiB combined. Drafts are stored on the
+							server, never in browser storage.
+						</p>
+						{locked ? (
+							<div className="flex gap-2">
 								<Button
 									type="button"
 									variant="outline"
 									size="sm"
 									disabled={busy}
-									onClick={() => void clearAccepted()}
+									onClick={() => void context.refetch()}
 								>
-									Clear accepted draft
+									Refresh server status
 								</Button>
-							) : null}
-						</div>
-					) : null}
-				</>
-			) : null}
+								{accepted || delivery?.state === "accepted" ? (
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										disabled={busy}
+										onClick={() => void clearAccepted()}
+									>
+										Clear accepted draft
+									</Button>
+								) : null}
+							</div>
+						) : null}
+					</>
+				) : null}
+			</FieldGroup>
 		</form>
 	);
 }

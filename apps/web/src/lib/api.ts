@@ -15,6 +15,7 @@ import type {
 	InboxUpdateRequest,
 	MarkReadRequest,
 	MetaAppSummary,
+	MetaAppWebhookSetup,
 	OwnerSetupRequest,
 	RuleSummary,
 	RuleWriteRequest,
@@ -97,7 +98,7 @@ export const api = {
 		workspaceId: string,
 		body: {
 			pageId: string;
-			displayName: string;
+			displayName?: string;
 			accessToken: string;
 			inboxId: string;
 			metaAppId: string;
@@ -108,7 +109,10 @@ export const api = {
 			{ method: "POST", body: JSON.stringify(body) },
 		);
 	},
-	startMetaOAuth(workspaceId: string, body: { metaAppId: string; inboxId: string }) {
+	startMetaOAuth(
+		workspaceId: string,
+		body: { metaAppId: string; inboxId: string },
+	) {
 		return request<{ authorizationUrl: string }>(
 			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-oauth/start`,
 			{ method: "POST", body: JSON.stringify(body) },
@@ -218,6 +222,11 @@ export const api = {
 	disconnectChannel(id: string) {
 		return request<{ success: true }>(`/api/channels/${id}/disconnect`, {
 			method: "POST",
+		});
+	},
+	deleteFacebookChannel(id: string) {
+		return request<{ success: true }>(`/api/channels/${id}`, {
+			method: "DELETE",
 		});
 	},
 	listTags() {
@@ -355,10 +364,29 @@ export const api = {
 			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-apps`,
 		);
 	},
-	createMetaApp(workspaceId: string, body: { displayName: string; appId: string; appSecret: string }) {
-		return request<{ metaApp: MetaAppSummary }>(
+	createMetaApp(
+		workspaceId: string,
+		body: { displayName: string; appId: string; appSecret: string },
+	) {
+		return request<MetaAppWebhookSetup>(
 			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-apps`,
 			{ method: "POST", body: JSON.stringify(body) },
+		);
+	},
+	updateMetaApp(
+		workspaceId: string,
+		metaAppId: string,
+		body: { displayName?: string; appSecret?: string },
+	) {
+		return request<{ metaApp: MetaAppSummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-apps/${encodeURIComponent(metaAppId)}`,
+			{ method: "PATCH", body: JSON.stringify(body) },
+		);
+	},
+	deleteMetaApp(workspaceId: string, metaAppId: string) {
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-apps/${encodeURIComponent(metaAppId)}`,
+			{ method: "DELETE" },
 		);
 	},
 	listEmailDomains(workspaceId: string) {

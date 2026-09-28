@@ -288,6 +288,7 @@ emailApi.get("/email-attachments/:id", async (c) => {
 		throw new ManageError("not found", 404);
 	}
 	if (!attachment) throw new ManageError("not found", 404);
+	const inline = c.req.query("inline") === "1" && attachment.type.startsWith("image/");
 	await appendEmailAudit(
 		c.env,
 		workspaceId,
@@ -298,7 +299,7 @@ emailApi.get("/email-attachments/:id", async (c) => {
 	return new Response(attachment.bytes, {
 		headers: {
 			"content-type": attachment.type,
-			"content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(attachment.name)}`,
+			"content-disposition": `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(attachment.name)}`,
 			"cache-control": "private, no-store",
 			"x-content-type-options": "nosniff",
 			"content-security-policy": "sandbox",

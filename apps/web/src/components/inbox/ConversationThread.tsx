@@ -6,8 +6,25 @@ import type {
 	PresenceEntry,
 } from "@msgflow/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api, conversationSocketUrl } from "@/lib/api";
 import { emailApi } from "@/lib/email-api";
 import { contactName, timeAgo } from "@/lib/format";
@@ -30,6 +47,9 @@ export function ConversationThread({
 	const [liveActivities, setLiveActivities] = useState<Activity[]>([]);
 	const [activityOpen, setActivityOpen] = useState(false);
 	const [presence, setPresence] = useState<PresenceEntry[]>([]);
+	const [expandedEmailIds, setExpandedEmailIds] = useState<Set<string>>(
+		() => new Set(),
+	);
 
 	const { data: conversation, isPending: conversationPending } = useQuery({
 		queryKey: ["conversation", conversationId],
@@ -130,6 +150,13 @@ export function ConversationThread({
 		() => new Map((usersData?.users ?? []).map((user) => [user.id, user.name])),
 		[usersData],
 	);
+	const newestEmailId = useMemo(
+		() =>
+			[...timelineItems]
+				.reverse()
+				.find((item): item is Message => "kind" in item)?.id,
+		[timelineItems],
+	);
 
 	// Advance the read cursor to the latest message seq (ADR 0015); comments do
 	// not participate in unread counts.
@@ -151,46 +178,58 @@ export function ConversationThread({
 
 	if (conversationPending) {
 		return (
-			<div className="flex h-full items-center justify-center text-sm text-gray-400">
-				Loading…
+			<div
+				className="flex h-full flex-col gap-4 p-5"
+				role="status"
+				aria-label="Loading conversation"
+			>
+				<Skeleton className="h-14 w-full" />
+				<Skeleton className="h-24 w-3/4" />
+				<Skeleton className="h-20 w-2/3 self-end" />
 			</div>
 		);
 	}
 	if (!conversation) {
 		return (
-			<div className="flex h-full items-center justify-center text-sm text-gray-400">
-				Conversation not found.
-			</div>
+			<Alert className="m-4 w-auto" variant="destructive">
+				<AlertTitle>Conversation not found</AlertTitle>
+				<AlertDescription>
+					This conversation may have been removed or is no longer available.
+				</AlertDescription>
+			</Alert>
 		);
 	}
 
 	const ReplyComposer = Composer;
 	return (
-		<div className="flex h-full flex-col">
-			<header className="flex items-center justify-between gap-3 border-b px-4 py-3">
+		<div className="flex h-full min-h-0 flex-col">
+			<header className="flex flex-col gap-3 border-b bg-card px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
 				<div className="flex min-w-0 items-center gap-3">
 					<ContactAvatar
 						name={contactName(conversation.contact)}
 						avatarUrl={conversation.contact.avatarUrl}
-						className="size-9"
+						className="size-10"
 					/>
 					<div className="min-w-0">
-						<h2 className="truncate text-base font-bold">
+						<h2 className="truncate text-base font-semibold">
 							{contactName(conversation.contact)}
 						</h2>
-						<p className="truncate text-xs text-gray-500">
-							{conversation.channelDisplayName}
-							{conversation.subject ? ` · ${conversation.subject}` : ""}
-						</p>
+						<div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+							<Badge variant="secondary">
+								{conversation.channelDisplayName}
+							</Badge>
+							{conversation.subject ? (
+								<span className="truncate">{conversation.subject}</span>
+							) : null}
+							{presence.length > 0 ? (
+								<span>{presence.length} viewing</span>
+							) : null}
+						</div>
 					</div>
 				</div>
-				<div className="flex shrink-0 items-center gap-3">
+				<div className="flex min-w-0 items-center justify-between gap-1 sm:justify-end">
 					<TagPicker conversationId={conversationId} tags={conversation.tags} />
-					{presence.length > 0 ? (
-						<span className="text-xs text-gray-400">
-							{presence.length} viewing
-						</span>
-					) : null}
+					<Separator orientation="vertical" className="hidden h-6 sm:block" />
 					<Button
 						type="button"
 						variant="ghost"
@@ -203,14 +242,23 @@ export function ConversationThread({
 				</div>
 			</header>
 
-			<div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+			<div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
 				{messagesPending && timelineItems.length === 0 ? (
-					<p className="text-center text-sm text-gray-400">Loading messages…</p>
+					<div
+						className="flex flex-col gap-3"
+						role="status"
+						aria-label="Loading messages"
+					>
+						<Skeleton className="h-20 w-3/4" />
+						<Skeleton className="h-16 w-2/3 self-end" />
+					</div>
 				) : timelineItems.length === 0 ? (
-					<p className="text-center text-sm text-gray-400">
-						No messages yet — this conversation is waiting for its first
-						message.
-					</p>
+					<Alert>
+						<AlertTitle>No messages yet</AlertTitle>
+						<AlertDescription>
+							This conversation is waiting for its first message.
+						</AlertDescription>
+					</Alert>
 				) : (
 					timelineItems.map((item) =>
 						"kind" in item ? (
@@ -218,6 +266,19 @@ export function ConversationThread({
 								key={item.id}
 								message={item}
 								isEmail={conversation.channel === "email"}
+								collapsed={
+									conversation.channel === "email" &&
+									item.id !== newestEmailId &&
+									!expandedEmailIds.has(item.id)
+								}
+								onCollapsedChange={() =>
+									setExpandedEmailIds((current) => {
+										const next = new Set(current);
+										if (next.has(item.id)) next.delete(item.id);
+										else next.add(item.id);
+										return next;
+									})
+								}
 							/>
 						) : (
 							<CommentBubble key={item.id} comment={item} />
@@ -227,7 +288,7 @@ export function ConversationThread({
 				{conversation.channel === "email" ? (
 					<section
 						aria-label="Email delivery attempts"
-						className="rounded border p-3 text-xs text-muted-foreground"
+						className="shrink-0 rounded border p-3 text-xs text-muted-foreground"
 					>
 						<div className="flex items-center justify-between">
 							<h3 className="font-medium">Email delivery attempts</h3>
@@ -243,7 +304,7 @@ export function ConversationThread({
 						{emailContext.isError ? (
 							<p role="alert">Delivery status unavailable.</p>
 						) : null}
-						<ul className="space-y-2">
+						<ul className="flex flex-col gap-2">
 							{emailContext.data?.deliveryStates.map((d) => (
 								<li key={d.id}>
 									<span className="font-medium">
@@ -300,18 +361,35 @@ export function ConversationThread({
 function MessageBubble({
 	message,
 	isEmail,
+	collapsed = false,
+	onCollapsedChange,
 }: {
 	message: Message;
 	isEmail: boolean;
+	collapsed?: boolean;
+	onCollapsedChange?: () => void;
 }) {
 	const inbound = message.kind === "inbound";
+	if (isEmail) {
+		return (
+			<EmailMessageCard
+				message={message}
+				inbound={inbound}
+				collapsed={collapsed}
+				onCollapsedChange={onCollapsedChange}
+			/>
+		);
+	}
 	return (
-		<div className={cn("flex", inbound ? "justify-start" : "justify-end")}>
+		<div
+			className={cn("flex shrink-0", inbound ? "justify-start" : "justify-end")}
+			data-channel-presentation="messenger"
+		>
 			<div
 				className={cn(
 					"max-w-[75%] rounded-lg px-3 py-2 text-sm",
 					inbound
-						? "bg-gray-100 text-gray-900"
+						? "bg-muted text-foreground"
 						: "bg-primary text-primary-foreground",
 				)}
 			>
@@ -349,7 +427,7 @@ function MessageBubble({
 				<p
 					className={cn(
 						"mt-1 text-[10px]",
-						inbound ? "text-gray-400" : "text-primary-foreground/70",
+						inbound ? "text-muted-foreground" : "text-primary-foreground/70",
 					)}
 				>
 					{timeAgo(message.createdAt)}
@@ -359,10 +437,111 @@ function MessageBubble({
 	);
 }
 
+function EmailMessageCard({
+	message,
+	inbound,
+	collapsed,
+	onCollapsedChange,
+}: {
+	message: Message;
+	inbound: boolean;
+	collapsed: boolean;
+	onCollapsedChange?: () => void;
+}) {
+	return (
+		<article
+			className={cn(
+				"shrink-0 overflow-hidden rounded-lg border bg-card text-card-foreground shadow-xs",
+				inbound ? "mr-10" : "ml-10 border-primary/25",
+			)}
+			data-channel-presentation="email"
+			data-email-direction={inbound ? "received" : "sent"}
+		>
+			<div
+				className={cn(
+					"flex items-center justify-between gap-3 px-4 py-2.5",
+					inbound ? "bg-muted/40" : "bg-secondary/60",
+				)}
+			>
+				<div className="min-w-0">
+					<p className="text-sm font-medium">
+						{inbound ? "Incoming email" : "Sent email"}
+					</p>
+					<p className="truncate text-xs text-muted-foreground">
+						{inbound ? "From contact" : "From your team"}
+					</p>
+				</div>
+				<div className="flex shrink-0 items-center gap-2">
+					<time className="text-xs text-muted-foreground">
+						{timeAgo(message.createdAt)}
+					</time>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon"
+								className="size-7"
+								aria-expanded={!collapsed}
+								aria-label={collapsed ? "Show email" : "Hide email"}
+								onClick={onCollapsedChange}
+							>
+								{collapsed ? <ChevronDown /> : <ChevronUp />}
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>
+							{collapsed ? "Show email" : "Hide email"}
+						</TooltipContent>
+					</Tooltip>
+				</div>
+			</div>
+			<div
+				className={cn(
+					"flex flex-col gap-3 border-t px-4 py-4 text-sm",
+				)}
+				hidden={collapsed}
+			>
+				{message.html ? (
+					<div
+						className="email-html break-words leading-relaxed [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-4 [&_img]:max-h-96 [&_img]:max-w-full [&_img]:rounded"
+						// Sanitized and CID-rewritten on the Worker; raw MIME HTML never reaches the client.
+						// biome-ignore lint/security/noDangerouslySetInnerHtml: Worker sanitization removes executable content and remote resources before persistence.
+						dangerouslySetInnerHTML={{ __html: message.html }}
+					/>
+				) : message.text ? (
+					<p className="whitespace-pre-wrap break-words leading-relaxed">
+						{message.text}
+					</p>
+				) : null}
+				{message.attachments.some((attachment) => attachment.disposition !== "inline") ? (
+					<div className="flex flex-col gap-2 border-t pt-3">
+						<p className="text-xs font-medium text-muted-foreground">
+							Attachments
+						</p>
+						{message.attachments
+							.filter((attachment) => attachment.disposition !== "inline")
+							.map((attachment) => (
+							<a
+								key={attachment.id}
+								href={emailApi.attachmentUrl(attachment.id)}
+								target="_blank"
+								rel="noreferrer"
+								className="w-fit text-primary underline underline-offset-4"
+							>
+								Download {attachment.name}
+							</a>
+						))}
+					</div>
+				) : null}
+			</div>
+		</article>
+	);
+}
+
 function CommentBubble({ comment }: { comment: Comment }) {
 	return (
-		<div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
-			<div className="mb-1 flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+		<div className="shrink-0 rounded-lg border border-border bg-secondary px-3 py-2 text-sm text-secondary-foreground">
+			<div className="mb-1 flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
 				<span>Comment</span>
 				<span className="normal-case font-normal tracking-normal">
 					{timeAgo(comment.createdAt)}
@@ -382,42 +561,22 @@ function ActivityModal({
 	agentNames: Map<string, string>;
 	onClose: () => void;
 }) {
-	useEffect(() => {
-		const onKeyDown = (event: KeyboardEvent) => {
-			if (event.key === "Escape") onClose();
-		};
-		window.addEventListener("keydown", onKeyDown);
-		return () => window.removeEventListener("keydown", onKeyDown);
-	}, [onClose]);
-
 	return (
-		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-			<section
-				className="flex max-h-[min(42rem,calc(100vh-2rem))] w-full max-w-lg flex-col rounded-lg border bg-background shadow-xl"
-				role="dialog"
-				aria-modal="true"
-				aria-labelledby="activity-dialog-title"
-			>
-				<header className="flex items-center justify-between border-b px-5 py-4">
-					<div>
-						<h3 id="activity-dialog-title" className="text-base font-semibold">
-							Activity
-						</h3>
-						<p className="text-xs text-muted-foreground">
-							Latest {ACTIVITY_DISPLAY_LIMIT} changes
-						</p>
-					</div>
-					<Button type="button" variant="ghost" size="sm" onClick={onClose}>
-						Close
-					</Button>
-				</header>
-				<div className="overflow-y-auto px-5 py-4">
+		<Dialog open onOpenChange={(open) => !open && onClose()}>
+			<DialogContent className="flex max-h-[min(42rem,calc(100vh-2rem))] max-w-lg flex-col">
+				<DialogHeader>
+					<DialogTitle>Activity</DialogTitle>
+					<DialogDescription>
+						Latest {ACTIVITY_DISPLAY_LIMIT} changes
+					</DialogDescription>
+				</DialogHeader>
+				<div className="overflow-y-auto">
 					{activities.length === 0 ? (
 						<p className="text-sm text-muted-foreground">
 							No activity recorded yet.
 						</p>
 					) : (
-						<ol className="space-y-3 border-l pl-4">
+						<ol className="flex flex-col gap-3 border-l pl-4">
 							{activities.map((activity) => (
 								<li
 									key={activity.id}
@@ -430,8 +589,8 @@ function ActivityModal({
 						</ol>
 					)}
 				</div>
-			</section>
-		</div>
+			</DialogContent>
+		</Dialog>
 	);
 }
 
