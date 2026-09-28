@@ -466,10 +466,12 @@ test("privacy filters precede the list limit and provisioning collisions roll ba
 	).toEqual(["visible-old"]);
 	const sidebar = await getSidebar(ctx.env, workspaceId, "bob");
 	expect(JSON.stringify(sidebar)).not.toContain(hidden.canonicalAddress);
-	const allItem = sidebar.sections
-		.flatMap((s) => s.items)
-		.find((i) => i.id === "system:all");
-	expect(allItem?.kind === "system" ? allItem.count : null).toBe(1);
+	const flattenNodes = (nodes: typeof sidebar.sections): typeof sidebar.sections =>
+		nodes.flatMap((node) => [node, ...flattenNodes(node.children)]);
+	const allNode = flattenNodes(sidebar.sections).find(
+		(node) => node.id === "section:shared-inboxes",
+	);
+	expect(allNode?.type === "section" ? allNode.count : null).toBe(1);
 	await ctx.db
 		.insert(channels)
 		.values({

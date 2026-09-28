@@ -23,8 +23,10 @@ type Db = ReturnType<typeof drizzle>;
  * archived conversation, but cannot use it to expand a tree node.
  *
  * There is no persisted public/restricted column. Until one exists, the
- * accepted convention is: a shared inbox with any inbox_members grant is
- * restricted; one with no grants is workspace-shared.
+ * accepted convention is: a generic shared inbox with any inbox_members grant
+ * is restricted; one with no grants is workspace-shared. A shared mailbox is
+ * stricter: its backing inbox always requires an explicit inbox_members grant
+ * when the mailbox is not team-scoped.
  */
 export async function getReadableInboxIds(
 	db: Db,
@@ -195,9 +197,9 @@ export async function getReadableInboxIds(
 							inbox.teamId === mailbox.teamId &&
 							validTeamIds.has(mailbox.teamId) &&
 							teamIds.has(mailbox.teamId)
-						: // A no-team shared mailbox follows its linked inbox's
-							// public/restricted policy: no grants means workspace-public.
-							grantsForInbox.size === 0 || grantsForInbox.has(userId),
+						: // A no-team shared mailbox is never made public by the
+							// generic shared-inbox convention: it needs an explicit grant.
+							grantsForInbox.has(userId),
 			);
 		})
 		.map((inbox) => inbox.id);

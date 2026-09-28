@@ -145,7 +145,7 @@ export async function authorizeIncomingEmail(
 	return route.route;
 }
 
-/** Active mailbox permission: private owner/delegate, or shared team member. */
+/** Active mailbox permission: private owner/delegate, shared team member, or explicit shared-inbox grant. */
 export async function canAccessMailbox(
 	env: Env,
 	workspaceId: string,
@@ -166,7 +166,8 @@ export async function canAccessMailbox(
 
 /**
  * Resolve mailbox grants for a bounded address set. This is the batch form of
- * canAccessMailbox: private owner/delegate, or shared inbox/team member.
+ * canAccessMailbox: private owner/delegate, shared team member, or explicit
+ * inbox grant for a no-team shared mailbox.
  */
 export async function getMailboxAccessByAddress(
 	env: Env,
@@ -287,7 +288,7 @@ export async function getMailboxAccessByAddress(
 						grantedTeamIds.has(mailbox.teamId)
 					: mailbox.inboxId !== null &&
 						mailbox.inboxVisibilityType === "shared" &&
-						(inboxGrantUsers.size === 0 || inboxGrantUsers.has(userId));
+						inboxGrantUsers.has(userId);
 		access.set(mailbox.canonicalAddress, allowed);
 	}
 	return access;
@@ -366,7 +367,7 @@ export function mailboxReadPredicate(userId: string) {
 	 (mailboxes.type = 'private' AND (mailboxes.owner_user_id = ${userId} OR EXISTS (SELECT 1 FROM mailbox_delegates md WHERE md.mailbox_id = mailboxes.id AND md.user_id = ${userId}))) OR
 	 (mailboxes.type = 'shared' AND (
 		(mailboxes.team_id IS NOT NULL AND EXISTS (SELECT 1 FROM inboxes i WHERE i.id = mailboxes.inbox_id AND i.workspace_id = mailboxes.workspace_id AND i.visibility_type = 'team' AND i.team_id = mailboxes.team_id) AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = mailboxes.team_id AND tm.user_id = ${userId})) OR
-		(mailboxes.team_id IS NULL AND EXISTS (SELECT 1 FROM inboxes i WHERE i.id = mailboxes.inbox_id AND i.workspace_id = mailboxes.workspace_id AND i.visibility_type = 'shared') AND (NOT EXISTS (SELECT 1 FROM inbox_members any_im WHERE any_im.inbox_id = mailboxes.inbox_id) OR EXISTS (SELECT 1 FROM inbox_members im WHERE im.inbox_id = mailboxes.inbox_id AND im.user_id = ${userId})))
+		(mailboxes.team_id IS NULL AND EXISTS (SELECT 1 FROM inboxes i WHERE i.id = mailboxes.inbox_id AND i.workspace_id = mailboxes.workspace_id AND i.visibility_type = 'shared') AND EXISTS (SELECT 1 FROM inbox_members im WHERE im.inbox_id = mailboxes.inbox_id AND im.user_id = ${userId}))
 	 )))`;
 }
 

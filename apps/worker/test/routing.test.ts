@@ -2320,10 +2320,14 @@ describe("inbox tree authorization and moves", () => {
 		).not.toContain("mail-private");
 	});
 
-	test("allows workspace members into public shared mailboxes", async () => {
+	test("keeps generic shared inboxes public but requires grants for shared mailboxes", async () => {
 		const { workspaceId } = await setup();
 		await addMember(workspaceId, MEMBER);
 		await insertTreeInbox(workspaceId, "mail-shared-public");
+		// The generic inbox policy remains workspace-visible until grants exist.
+		expect(await getReadableInboxIds(ctx.db, workspaceId, MEMBER)).toContain(
+			"mail-shared-public",
+		);
 		const channelId = await insertChannel(workspaceId);
 		await ctx.db
 			.update(channels)
@@ -2360,32 +2364,24 @@ describe("inbox tree authorization and moves", () => {
 				updatedAt: now,
 			})
 			.run();
-		expect(await getReadableInboxIds(ctx.db, workspaceId, MEMBER)).toContain(
-			"mail-shared-public",
-		);
-		const sidebar = await getSidebar(ctx.env, workspaceId, MEMBER);
-		const email = sidebar.sections[2]?.children.find(
-			(node) => node.id === "channel-group:email",
-		);
-		expect(email?.children).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					id: `channel:${channelId}`,
-					label: "support@test.dev",
-				}),
-			]),
+		// A no-team mailbox changes its backing inbox to mailbox lifecycle policy.
+		expect(
+			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
+		).not.toContain("mail-shared-public");
+		expect(JSON.stringify(await getSidebar(ctx.env, workspaceId, MEMBER))).not.toContain(
+			"support@test.dev",
 		);
 		await ctx.db
 			.insert(inboxMembers)
 			.values({
 				id: crypto.randomUUID(),
 				inboxId: "mail-shared-public",
-				userId: ADMIN,
+				userId: MEMBER,
 			})
 			.run();
-		expect(
-			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
-		).not.toContain("mail-shared-public");
+		expect(await getReadableInboxIds(ctx.db, workspaceId, MEMBER)).toContain(
+			"mail-shared-public",
+		);
 	});
 
 	test("enforces direct shared-mailbox team policy without a legacy channel link", async () => {
