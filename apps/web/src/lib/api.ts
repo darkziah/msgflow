@@ -82,111 +82,6 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	return res.json() as Promise<T>;
 }
 
-type SidebarRenderKind = "system" | "inbox" | "tag" | "view";
-export type SidebarRenderItem = {
-	kind: SidebarRenderKind;
-	id: string;
-	parentId: string | null;
-	order: number;
-	label: string;
-	/** The server-authoritative selection facet for this stable node id. */
-	filter: import("@msgflow/contracts").SavedFilterFilters;
-	count?: number;
-	color?: string | null;
-	icon?: string | null;
-	inboxId?: string;
-	hasOpenAssigned?: boolean;
-};
-export type SidebarRenderSection = {
-	key: "inbox" | "assigned" | "teams" | "tags" | "views";
-	nodeId: string;
-	label: string;
-	filter: import("@msgflow/contracts").SavedFilterFilters;
-	items: SidebarRenderItem[];
-	groups: { id: string; label: string; items: SidebarRenderItem[] }[];
-};
-export type SidebarRenderData = {
-	workspace: SidebarTreeResponse["workspace"];
-	permissions: SidebarTreeResponse["permissions"];
-	preferences: SidebarPreferences;
-	sections: SidebarRenderSection[];
-	/** Includes every normalized node, including non-rendered section nodes. */
-	filtersByNodeId: Record<
-		string,
-		import("@msgflow/contracts").SavedFilterFilters
-	>;
-};
-
-/** The renderer has not yet adopted tree nodes, so this facade is the only
- * compatibility boundary; API data remains SidebarTreeResponse end-to-end. */
-export function adaptSidebarTree(tree: SidebarTreeResponse): SidebarRenderData {
-	const flatten = (
-		nodes: SidebarTreeResponse["sections"],
-	): SidebarTreeResponse["sections"] =>
-		nodes.flatMap((node) => [node, ...flatten(node.children)]);
-	const filtersByNodeId = Object.fromEntries(
-		flatten(tree.sections).map((node) => [node.id, node.filter]),
-	);
-	const toItem = (
-		node: SidebarTreeResponse["sections"][number],
-		order: number,
-	): SidebarRenderItem => ({
-		kind:
-			node.type === "inbox"
-				? "inbox"
-				: node.type === "tag"
-					? "tag"
-					: node.type === "saved-view"
-						? "view"
-						: "system",
-		id: node.id,
-		parentId: node.parentId,
-		order,
-		label: node.label,
-		filter: node.filter,
-		inboxId: node.filter.inboxId,
-		color: node.color,
-		icon: node.icon,
-		count: node.count ?? undefined,
-		hasOpenAssigned: false,
-	});
-	const section = (index: number, key: SidebarRenderSection["key"]) => {
-		const node = tree.sections[index];
-		return {
-			key,
-			nodeId: node?.id ?? `section:${key}`,
-			label: node?.label ?? key,
-			filter: node?.filter ?? {},
-		};
-	};
-	const flatItems = (index: number) =>
-		flatten(tree.sections[index]?.children ?? []).map(toItem);
-	const inboxes = flatItems(1).filter((item) => item.kind === "inbox");
-	return {
-		workspace: tree.workspace,
-		permissions: tree.permissions,
-		preferences: tree.preferences,
-		filtersByNodeId,
-		sections: [
-			{
-				...section(1, "inbox"),
-				items: [],
-				groups: [{ id: "legacy:inboxes", label: "Inboxes", items: inboxes }],
-			},
-			{ ...section(0, "assigned"), items: flatItems(0), groups: [] },
-			{ ...section(2, "teams"), items: flatItems(2), groups: [] },
-			{ ...section(3, "tags"), items: flatItems(3), groups: [] },
-			{ ...section(4, "views"), items: flatItems(4), groups: [] },
-		],
-	};
-}
-
-export function sidebarItemFilters(
-	item: SidebarRenderItem,
-): import("@msgflow/contracts").SavedFilterFilters {
-	return item.filter;
-}
-
 export const api = {
 	setupOwner(body: OwnerSetupRequest) {
 		return request<{
@@ -248,12 +143,14 @@ export const api = {
 		tagId?: string;
 		dateFrom?: string;
 		dateTo?: string;
+		inboxScope?: "exact" | "descendants";
 	}) {
 		const qs = new URLSearchParams();
 		if (params.mailboxId) qs.set("mailboxId", params.mailboxId);
 		qs.set("workspaceId", params.workspaceId);
 		if (params?.status) qs.set("status", params.status);
 		if (params?.inboxId) qs.set("inboxId", params.inboxId);
+		if (params?.inboxScope) qs.set("inboxScope", params.inboxScope);
 		if (params?.q) qs.set("q", params.q);
 		if (params?.assigneeId) qs.set("assigneeId", params.assigneeId);
 		if (params?.unassigned) qs.set("unassigned", "true");
@@ -562,7 +459,7 @@ export const api = {
 	getSidebar(workspaceId: string) {
 		return request<SidebarTreeResponse>(
 			`/api/workspaces/${workspaceId}/sidebar`,
-		).then(adaptSidebarTree);
+		);
 	},
 	updateSidebarPreferences(
 		workspaceId: string,

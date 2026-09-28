@@ -1,5 +1,9 @@
 import type { WorkspaceSummary } from "@msgflow/contracts";
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+	type QueryClient,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useLayoutEffect, useRef, useState } from "react";
 import {
@@ -17,9 +21,12 @@ import { api } from "@/lib/api";
 import { useSession } from "@/lib/auth-client";
 
 export const Route = createFileRoute("/")({
-	validateSearch: (search: Record<string, unknown>): { c?: string; workspace?: string } => ({
+	validateSearch: (
+		search: Record<string, unknown>,
+	): { c?: string; workspace?: string } => ({
 		c: typeof search.c === "string" ? search.c : undefined,
-		workspace: typeof search.workspace === "string" ? search.workspace : undefined,
+		workspace:
+			typeof search.workspace === "string" ? search.workspace : undefined,
 	}),
 	component: Inbox,
 });
@@ -33,10 +40,10 @@ export function resetFiltersForStatus(
 ): ListFilters {
 	return {
 		...filters,
-		queueLabel: undefined,
 		status,
 		mailboxId: undefined,
 		inboxId: undefined,
+		inboxScope: undefined,
 		assigneeId: undefined,
 		unassigned: undefined,
 		snoozed: undefined,
@@ -73,7 +80,8 @@ const WORKSPACE_QUERY_ROOT_SET = new Set<string>(WORKSPACE_QUERY_ROOTS);
 
 export function clearWorkspaceSensitiveQueries(queryClient: QueryClient): void {
 	queryClient.removeQueries({
-		predicate: (query) => WORKSPACE_QUERY_ROOT_SET.has(String(query.queryKey[0])),
+		predicate: (query) =>
+			WORKSPACE_QUERY_ROOT_SET.has(String(query.queryKey[0])),
 	});
 }
 
@@ -81,7 +89,10 @@ export function resolveAuthorizedWorkspaceId(
 	requestedWorkspaceId: string | undefined,
 	workspaces: WorkspaceSummary[],
 ): string | undefined {
-	if (requestedWorkspaceId && workspaces.some((workspace) => workspace.id === requestedWorkspaceId)) {
+	if (
+		requestedWorkspaceId &&
+		workspaces.some((workspace) => workspace.id === requestedWorkspaceId)
+	) {
 		return requestedWorkspaceId;
 	}
 	return workspaces[0]?.id;
@@ -104,24 +115,28 @@ export function reconcileWorkspaceSelection({
 }): { clearWorkspaceState: boolean; canonicalSearch?: { workspace: string } } {
 	const changedWorkspace = Boolean(
 		previousWorkspaceId &&
-		activeWorkspaceId &&
-		previousWorkspaceId !== activeWorkspaceId,
+			activeWorkspaceId &&
+			previousWorkspaceId !== activeWorkspaceId,
 	);
 	if (changedWorkspace) {
 		return {
 			clearWorkspaceState: true,
-			canonicalSearch: conversationId ? workspaceSearch(activeWorkspaceId) : undefined,
+			canonicalSearch: conversationId
+				? workspaceSearch(activeWorkspaceId)
+				: undefined,
 		};
 	}
 	if (activeWorkspaceId && activeWorkspaceId !== requestedWorkspaceId) {
-		return { clearWorkspaceState: false, canonicalSearch: workspaceSearch(activeWorkspaceId) };
+		return {
+			clearWorkspaceState: false,
+			canonicalSearch: workspaceSearch(activeWorkspaceId),
+		};
 	}
 	return { clearWorkspaceState: false };
 }
 
 /** Human-readable identity for the active operational queue. */
 export function queueIdentity(filters: ListFilters, status: StatusTab): string {
-	if (filters.queueLabel) return filters.queueLabel;
 	if (filters.snoozed) return "Snoozed";
 	if (filters.unassigned) return "Unassigned";
 	if (filters.assigneeId) return "Assigned";
@@ -134,7 +149,8 @@ export function queueIdentity(filters: ListFilters, status: StatusTab): string {
 }
 
 export function Inbox() {
-	const { c: conversationId, workspace: requestedWorkspaceId } = Route.useSearch();
+	const { c: conversationId, workspace: requestedWorkspaceId } =
+		Route.useSearch();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 	const { data: session } = useSession();
@@ -149,7 +165,8 @@ export function Inbox() {
 		queryFn: () => api.listWorkspaces(),
 	});
 	const workspaces = workspacesData?.workspaces ?? [];
-	const activeWorkspaceId = resolveAuthorizedWorkspaceId(requestedWorkspaceId, workspaces) ?? "";
+	const activeWorkspaceId =
+		resolveAuthorizedWorkspaceId(requestedWorkspaceId, workspaces) ?? "";
 	const previousWorkspaceId = useRef(activeWorkspaceId);
 
 	useLayoutEffect(() => {
@@ -166,9 +183,19 @@ export function Inbox() {
 			setFilters({});
 		}
 		if (reconciliation.canonicalSearch) {
-			navigate({ to: "/", search: reconciliation.canonicalSearch, replace: true });
+			navigate({
+				to: "/",
+				search: reconciliation.canonicalSearch,
+				replace: true,
+			});
 		}
-	}, [activeWorkspaceId, conversationId, navigate, queryClient, requestedWorkspaceId]);
+	}, [
+		activeWorkspaceId,
+		conversationId,
+		navigate,
+		queryClient,
+		requestedWorkspaceId,
+	]);
 
 	function changeWorkspace(next: string) {
 		if (next === activeWorkspaceId) return;
@@ -190,6 +217,7 @@ export function Inbox() {
 				mailboxId: filters.mailboxId,
 				status,
 				inboxId: filters.inboxId,
+				inboxScope: filters.inboxScope,
 				q: filters.q,
 				assigneeId: filters.assigneeId,
 				unassigned: filters.unassigned,
@@ -257,7 +285,12 @@ export function Inbox() {
 					<ConversationList
 						conversations={data?.conversations ?? []}
 						selectedId={conversationId}
-						onSelect={(id) => navigate({ to: "/", search: { workspace: activeWorkspaceId, c: id } })}
+						onSelect={(id) =>
+							navigate({
+								to: "/",
+								search: { workspace: activeWorkspaceId, c: id },
+							})
+						}
 					/>
 				)}
 			</div>
@@ -283,6 +316,13 @@ export function Inbox() {
 				onSelect={(next) => {
 					setFilters(next);
 					if (next.status) setStatus(next.status);
+					if (conversationId) {
+						navigate({
+							to: "/",
+							search: workspaceSearch(activeWorkspaceId),
+							replace: true,
+						});
+					}
 				}}
 				compact={compactMode}
 				onToggleCompact={toggleCompact}
@@ -299,7 +339,9 @@ export function Inbox() {
 				/>
 			}
 			hasDetail={Boolean(conversationId)}
-			onBack={() => navigate({ to: "/", search: workspaceSearch(activeWorkspaceId) })}
+			onBack={() =>
+				navigate({ to: "/", search: workspaceSearch(activeWorkspaceId) })
+			}
 			list={list}
 			detail={detail}
 			sidebar={renderSidebar(compact)}

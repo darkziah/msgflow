@@ -577,7 +577,6 @@ describe("inbox UI contracts", () => {
 		).toEqual({
 			q: "invoice",
 			channel: "email",
-			queueLabel: undefined,
 			status: "archived",
 			inboxId: undefined,
 			assigneeId: undefined,
@@ -586,20 +585,18 @@ describe("inbox UI contracts", () => {
 		});
 	});
 
-	it("clears a selected mailbox and its label when switching status tabs", () => {
+	it("clears a selected mailbox when switching status tabs", () => {
 		expect(
 			resetFiltersForStatus(
 				{
 					q: "invoice",
 					mailboxId: "mailbox_support",
-					queueLabel: "Support mailbox",
 				},
 				"archived",
 			),
 		).toEqual({
 			q: "invoice",
 			mailboxId: undefined,
-			queueLabel: undefined,
 			status: "archived",
 			inboxId: undefined,
 			assigneeId: undefined,
@@ -611,7 +608,6 @@ describe("inbox UI contracts", () => {
 			resetFiltersForStatus(
 				{
 					mailboxId: "mailbox_support",
-					queueLabel: "Support mailbox",
 					channel: "email",
 				},
 				"all",
@@ -619,13 +615,11 @@ describe("inbox UI contracts", () => {
 		).toMatchObject({
 			status: "all",
 			mailboxId: undefined,
-			queueLabel: undefined,
 			channel: "email",
 		});
 	});
 
 	it("shows a queue identity for selected Sidebar filters", () => {
-		expect(queueIdentity({ queueLabel: "Support" }, "open")).toBe("Support");
 		expect(queueIdentity({ unassigned: true }, "open")).toBe("Unassigned");
 		expect(queueIdentity({}, "open")).toBe("Inbox");
 	});
