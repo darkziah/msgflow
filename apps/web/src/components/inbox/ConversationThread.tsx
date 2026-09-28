@@ -28,6 +28,7 @@ import {
 import { api, conversationSocketUrl } from "@/lib/api";
 import { emailApi } from "@/lib/email-api";
 import { contactName, timeAgo } from "@/lib/format";
+import { invalidateWorkspaceConversationViews } from "@/lib/sidebar-live-update";
 import { cn } from "@/lib/utils";
 import { Composer } from "./Composer";
 import { ContactAvatar } from "./ContactAvatar";
@@ -104,7 +105,7 @@ export function ConversationThread({
 					);
 					break;
 				case "conversation-updated":
-					queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
+					invalidateWorkspaceConversationViews(queryClient, workspaceId);
 					queryClient.invalidateQueries({
 						queryKey: ["conversation", workspaceId, conversationId],
 					});
@@ -167,8 +168,12 @@ export function ConversationThread({
 			.reverse()
 			.find((item): item is Message => "kind" in item);
 		if (!lastMessage || typeof lastMessage.seq !== "number") return;
-		api.markRead(conversationId, workspaceId, lastMessage.seq).catch(() => {});
-		queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
+		api
+			.markRead(conversationId, workspaceId, lastMessage.seq)
+			.then(() =>
+				invalidateWorkspaceConversationViews(queryClient, workspaceId),
+			)
+			.catch(() => {});
 	}, [conversationId, timelineItems, queryClient, workspaceId]);
 
 	// Keep the newest timeline item in view whenever the timeline grows.
@@ -230,7 +235,7 @@ export function ConversationThread({
 					</div>
 				</div>
 				<div className="flex min-w-0 items-center justify-between gap-1 sm:justify-end">
-					<TagPicker conversationId={conversationId} workspaceId={workspaceId} tags={conversation.tags} />
+						<TagPicker conversationId={conversationId} workspaceId={workspaceId} tags={conversation.tags} />
 					<Separator orientation="vertical" className="hidden h-6 sm:block" />
 					<Button
 						type="button"

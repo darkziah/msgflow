@@ -26,6 +26,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
+import { invalidateWorkspaceConversationViews } from "@/lib/sidebar-live-update";
 
 const SNOOZE_OPTIONS = [
 	{ label: "1 hour", value: "1h" },
@@ -75,8 +76,7 @@ export function ConversationActions({
 				["conversation", workspaceId, conversation.id],
 				result.conversation,
 			);
-			queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
-			queryClient.invalidateQueries({ queryKey: ["sidebar", workspaceId] });
+			invalidateWorkspaceConversationViews(queryClient, workspaceId);
 		},
 	});
 	const assigneeName = usersData?.users.find(

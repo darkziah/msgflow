@@ -8,6 +8,7 @@ import {
 	PopoverTrigger,
 } from "@/components/ui/popover";
 import { api } from "@/lib/api";
+import { invalidateWorkspaceConversationViews } from "@/lib/sidebar-live-update";
 import { TagChip } from "./TagChip";
 
 /**
@@ -37,7 +38,7 @@ export function TagPicker({
 			queryClient.invalidateQueries({
 				queryKey: ["conversation", workspaceId, conversationId],
 			});
-			queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
+			invalidateWorkspaceConversationViews(queryClient, workspaceId);
 		},
 	});
 	const { mutate: removeTag } = useMutation({
@@ -47,7 +48,7 @@ export function TagPicker({
 			queryClient.invalidateQueries({
 				queryKey: ["conversation", workspaceId, conversationId],
 			});
-			queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
+			invalidateWorkspaceConversationViews(queryClient, workspaceId);
 		},
 	});
 
