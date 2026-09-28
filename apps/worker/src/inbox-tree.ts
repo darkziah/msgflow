@@ -265,7 +265,7 @@ export async function assertValidInboxParent(
 	if (!byId.has(inboxId)) throw new ManageError("inbox not found", 404);
 	if (parentInboxId === null) return;
 	if (parentInboxId === inboxId)
-		throw new ManageError("an inbox cannot be its own parent");
+		throw new ManageError("an inbox cannot be its own parent", 409);
 	if (!byId.has(parentInboxId))
 		throw new ManageError("parent inbox not found", 404);
 	const children = new Map<string, string[]>();
@@ -290,7 +290,7 @@ export async function assertValidInboxParent(
 	};
 	walkDown(inboxId, 0);
 	if (descendants.has(parentInboxId))
-		throw new ManageError("inbox parent would create a cycle");
+		throw new ManageError("inbox parent would create a cycle", 409);
 	let parentDepth = 0;
 	const ancestors = new Set<string>();
 	let current: string | null = parentInboxId;

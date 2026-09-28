@@ -12,6 +12,7 @@ import type {
 	InboxCreateRequest,
 	InboxReorderRequest,
 	InboxSummary,
+	InboxTreeMoveRequest,
 	InboxUpdateRequest,
 	MarkReadRequest,
 	MetaAppSummary,
@@ -594,6 +595,16 @@ export const api = {
 		return request<{ inbox: InboxSummary }>(
 			`/api/workspaces/${workspaceId}/inboxes/${inboxId}`,
 			{ method: "PATCH", body: JSON.stringify(body) },
+		);
+	},
+	moveInboxInTree(
+		workspaceId: string,
+		inboxId: string,
+		body: InboxTreeMoveRequest,
+	) {
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/inboxes/${encodeURIComponent(inboxId)}/move`,
+			{ method: "POST", body: JSON.stringify(body) },
 		);
 	},
 	archiveInbox(workspaceId: string, inboxId: string) {

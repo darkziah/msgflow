@@ -358,6 +358,12 @@ export type { ChannelConnectRequest } from "../channel-schema";
 
 export interface InboxSummary {
 	id: string;
+	/** Navigation parent; changing it never reroutes conversations. */
+	parentInboxId?: string | null;
+	/** System inboxes are not valid move sources or destinations. */
+	visibilityType?: "shared" | "private" | "team" | "system";
+	/** Optimistic version required by the navigation move endpoint. */
+	treeVersion?: number;
 	name: string;
 	description: string | null;
 	/** Validated hex color (#RRGGBB); sidebar dot when no icon is set. */
@@ -419,6 +425,12 @@ export interface SetDefaultInboxRequest {
 export interface InboxReorderRequest {
 	/** Complete ordered list of workspace inbox ids; sort_order is rewritten 0..n. */
 	inboxIds: string[];
+}
+
+export interface InboxTreeMoveRequest {
+	parentInboxId: string | null;
+	beforeInboxId?: string;
+	expectedTreeVersion: number;
 }
 
 // POST /api/inboxes/:id/channels — link a channel to an inbox.

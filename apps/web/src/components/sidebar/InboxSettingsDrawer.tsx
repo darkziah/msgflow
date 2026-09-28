@@ -1,5 +1,11 @@
+import {
+	INBOX_ASSIGNMENT_STRATEGIES,
+	INBOX_COLOR_PRESETS,
+	INBOX_ICON_KEYS,
+	type InboxCreateRequest,
+	type InboxIconKey,
+} from "@msgflow/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
 import {
 	BadgeDollarSign,
 	Briefcase,
@@ -8,15 +14,9 @@ import {
 	ReceiptText,
 	X,
 } from "lucide-react";
-import {
-	INBOX_ASSIGNMENT_STRATEGIES,
-	INBOX_COLOR_PRESETS,
-	INBOX_ICON_KEYS,
-	type InboxCreateRequest,
-	type InboxIconKey,
-} from "@msgflow/contracts";
-import { api } from "@/lib/api";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const HEX_COLOR = /^#[0-9A-Fa-f]{6}$/;
@@ -51,6 +51,10 @@ export function InboxSettingsDrawer({
 		queryKey: ["workspace-inboxes", workspaceId],
 		queryFn: () => api.workspaceListInboxes(workspaceId),
 	});
+	const { data: sidebarData } = useQuery({
+		queryKey: ["sidebar", workspaceId],
+		queryFn: () => api.getSidebar(workspaceId),
+	});
 	// The drawer works off the workspace-scoped list; fall back to legacy list.
 	const inbox = useMemo(
 		() => inboxesData?.inboxes.find((row) => row.id === inboxId) ?? null,
@@ -82,6 +86,8 @@ export function InboxSettingsDrawer({
 	const [strategy, setStrategy] = useState<string>("manual");
 
 	const [channelToLink, setChannelToLink] = useState("");
+	const [parentInboxId, setParentInboxId] = useState("");
+	const [moveConflict, setMoveConflict] = useState(false);
 
 	useEffect(() => {
 		if (!inbox) return;
@@ -92,6 +98,7 @@ export function InboxSettingsDrawer({
 		setIcon(inbox.icon as InboxIconKey | null);
 		setTeamId(inbox.teamId ?? "");
 		setStrategy(inbox.assignmentStrategy);
+		setParentInboxId(inbox.parentInboxId ?? "");
 	}, [inbox]);
 
 	useEffect(() => {
@@ -149,6 +156,39 @@ export function InboxSettingsDrawer({
 		}
 	}
 
+	async function moveTreeLocation() {
+		if (!inbox) return;
+		setError(null);
+		setMoveConflict(false);
+		try {
+			await api.moveInboxInTree(workspaceId, inbox.id, {
+				parentInboxId: parentInboxId || null,
+				expectedTreeVersion: inbox.treeVersion ?? 0,
+			});
+			await Promise.all([
+				queryClient.invalidateQueries({ queryKey: ["sidebar", workspaceId] }),
+				queryClient.invalidateQueries({
+					queryKey: ["workspace-inboxes", workspaceId],
+				}),
+			]);
+			onChanged();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : "Move failed.";
+			setError(message);
+			setMoveConflict(/stale|tree version|before inbox/i.test(message));
+		}
+	}
+
+	function reloadTree() {
+		setMoveConflict(false);
+		setError(null);
+		void Promise.all([
+			queryClient.invalidateQueries({ queryKey: ["sidebar", workspaceId] }),
+			queryClient.invalidateQueries({
+				queryKey: ["workspace-inboxes", workspaceId],
+			}),
+		]);
+	}
 
 	async function linkChannel(channelId: string) {
 		if (!inbox || !channelId) return;
@@ -207,6 +247,23 @@ export function InboxSettingsDrawer({
 	);
 	const affectingRules =
 		rulesData?.rules.filter((rule) => rule.inboxId === inbox?.id) ?? [];
+	const isAdmin = sidebarData?.permissions.isAdmin === true;
+	const permittedParents = (inboxesData?.inboxes ?? []).filter((candidate) => {
+		if (
+			!inbox ||
+			candidate.id === inbox.id ||
+			candidate.visibilityType === "system"
+		)
+			return false;
+		let current = candidate.parentInboxId;
+		while (current) {
+			if (current === inbox.id) return false;
+			current =
+				inboxesData?.inboxes.find((row) => row.id === current)?.parentInboxId ??
+				null;
+		}
+		return true;
+	});
 
 	return (
 		<div className="fixed inset-0 z-50">
@@ -238,6 +295,15 @@ export function InboxSettingsDrawer({
 				{error ? (
 					<p className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
 						{error}
+						{moveConflict ? (
+							<button
+								type="button"
+								onClick={reloadTree}
+								className="ml-2 underline"
+							>
+								Reload
+							</button>
+						) : null}
 					</p>
 				) : null}
 
@@ -406,6 +472,45 @@ export function InboxSettingsDrawer({
 						</div>
 					</section>
 
+					{inbox && isAdmin ? (
+						<section className="border-t pt-5">
+							<p className="text-xs font-bold uppercase tracking-wide text-gray-500">
+								Tree location
+							</p>
+							<label
+								htmlFor="inbox-parent"
+								className="mt-2 block text-sm font-medium"
+							>
+								Parent
+							</label>
+							<select
+								id="inbox-parent"
+								value={parentInboxId}
+								onChange={(event) => setParentInboxId(event.target.value)}
+								className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm"
+							>
+								<option value="">Root</option>
+								{permittedParents.map((candidate) => (
+									<option key={candidate.id} value={candidate.id}>
+										{candidate.name}
+									</option>
+								))}
+							</select>
+							<p className="mt-2 text-[11px] text-gray-500">
+								Tree location changes navigation only; routing and conversation
+								ownership stay unchanged.
+							</p>
+							<Button
+								className="mt-2"
+								size="sm"
+								variant="outline"
+								disabled={parentInboxId === (inbox.parentInboxId ?? "")}
+								onClick={moveTreeLocation}
+							>
+								Move location
+							</Button>
+						</section>
+					) : null}
 
 					{/* Channels */}
 					{inbox ? (

@@ -179,26 +179,13 @@ export function Sidebar({
 		if (from === -1 || to === -1) return;
 		[ordered[from], ordered[to]] = [ordered[to], ordered[from]];
 
-		if (sidebar?.permissions.isAdmin) {
-			// Shared ordering (inboxes.sort_order).
-			api
-				.reorderInboxes(workspaceId, ordered)
-				.then(() =>
-					queryClient.invalidateQueries({
-						queryKey: ["sidebar", workspaceId],
-					}),
-				)
-				.catch(() => {
-					queryClient.invalidateQueries({ queryKey: ["sidebar", workspaceId] });
-				});
-		} else {
-			// Personal ordering only — never touches shared state.
-			const itemOrder: Record<string, number> = {};
-			ordered.forEach((id, index) => {
-				itemOrder[id] = index;
-			});
-			patchPrefs({ itemOrder });
-		}
+		// Personal ordering only — never touches shared state. Shared tree moves
+		// use the explicit versioned drawer control instead of HTML drag-and-drop.
+		const itemOrder: Record<string, number> = {};
+		ordered.forEach((id, index) => {
+			itemOrder[id] = index;
+		});
+		patchPrefs({ itemOrder });
 	};
 
 	if (!sidebar) {
@@ -415,16 +402,20 @@ function ItemRow(props: SectionProps & { item: SidebarRenderItem }) {
 				variant="ghost"
 				size="sm"
 				onClick={() => props.onSelect(filters)}
-				draggable={item.kind === "inbox"}
+				draggable={item.kind === "inbox" && !isAdmin}
 				onDragStart={(event) => {
+					if (isAdmin || item.kind !== "inbox") return;
 					event.dataTransfer.effectAllowed = "move";
 					props.onDragStart(item.id);
 				}}
-				onDragEnd={() => props.onDragStart(null)}
+				onDragEnd={() => {
+					if (!isAdmin) props.onDragStart(null);
+				}}
 				onDragOver={(event) => {
-					if (item.kind === "inbox") event.preventDefault();
+					if (item.kind === "inbox" && !isAdmin) event.preventDefault();
 				}}
 				onDrop={(event) => {
+					if (isAdmin || item.kind !== "inbox") return;
 					event.preventDefault();
 					props.onDrop(item.id);
 				}}

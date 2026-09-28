@@ -37,6 +37,7 @@ import {
 	getInboxDescendantIds,
 	getReadableInboxIds,
 } from "../src/inbox-tree";
+import { handleInboxTreeMove } from "../src/inbox-tree-route";
 import {
 	archiveInbox,
 	connectChannelToken,
@@ -551,6 +552,12 @@ describe("workspace-scoped management route boundaries", () => {
 				"patch",
 				"/api/workspaces/:workspaceId/inboxes/:inboxId",
 				"updateInbox(",
+			],
+			[
+				"inbox move",
+				"post",
+				"/api/workspaces/:workspaceId/inboxes/:inboxId/move",
+				"handleInboxTreeMove(",
 			],
 			[
 				"inbox delete",
@@ -2434,14 +2441,14 @@ describe("inbox tree authorization and moves", () => {
 			.from(inboxes)
 			.where(eq(inboxes.id, "leaf"))
 			.get();
-		await moveInboxInTree(
+		await handleInboxTreeMove(
 			ctx.env,
 			workspaceId,
+			"leaf",
 			{
-				inboxId: "leaf",
 				parentInboxId: "root",
+				beforeInboxId: "child",
 				expectedTreeVersion: leafBeforeMove?.treeVersion ?? 0,
-				sortOrder: 0,
 			},
 			ADMIN,
 		);
@@ -2483,6 +2490,94 @@ describe("inbox tree authorization and moves", () => {
 				ADMIN,
 			),
 		).rejects.toMatchObject({ status: 409 });
+	});
+
+	test("POST move handler seam rejects members, foreign IDs, cycles, stale versions, and foreign anchors", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "root");
+		await insertTreeInbox(workspaceId, "child", { parentInboxId: "root" });
+		await insertTreeInbox(workspaceId, "other-root");
+		await insertTreeInbox(workspaceId, "other-child", {
+			parentInboxId: "other-root",
+		});
+		const foreignWorkspaceId = crypto.randomUUID();
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(workspaces)
+			.values({
+				id: foreignWorkspaceId,
+				name: "Foreign move workspace",
+				slug: "foreign-move-workspace",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await insertTreeInbox(foreignWorkspaceId, "foreign");
+
+		const expectStatus = async (operation: Promise<void>, status: number) => {
+			try {
+				await operation;
+				throw new Error(`expected HTTP ${status}`);
+			} catch (err) {
+				expect(err).toBeInstanceOf(ManageError);
+				expect((err as ManageError).status).toBe(status);
+			}
+		};
+		const request = { parentInboxId: null, expectedTreeVersion: 0 };
+		await expectStatus(
+			handleInboxTreeMove(ctx.env, workspaceId, "root", request, MEMBER),
+			403,
+		);
+		await expectStatus(
+			handleInboxTreeMove(ctx.env, workspaceId, "missing", request, ADMIN),
+			404,
+		);
+		await expectStatus(
+			handleInboxTreeMove(ctx.env, workspaceId, "foreign", request, ADMIN),
+			404,
+		);
+		await expectStatus(
+			handleInboxTreeMove(
+				ctx.env,
+				workspaceId,
+				"root",
+				{ parentInboxId: "child", expectedTreeVersion: 0 },
+				ADMIN,
+			),
+			409,
+		);
+		await expectStatus(
+			handleInboxTreeMove(
+				ctx.env,
+				workspaceId,
+				"child",
+				{
+					parentInboxId: "root",
+					beforeInboxId: "other-child",
+					expectedTreeVersion: 0,
+				},
+				ADMIN,
+			),
+			409,
+		);
+		await handleInboxTreeMove(
+			ctx.env,
+			workspaceId,
+			"child",
+			{ parentInboxId: null, expectedTreeVersion: 0 },
+			ADMIN,
+		);
+		await expectStatus(
+			handleInboxTreeMove(
+				ctx.env,
+				workspaceId,
+				"child",
+				{ parentInboxId: null, expectedTreeVersion: 0 },
+				ADMIN,
+			),
+			409,
+		);
 	});
 
 	test("permits wide trees while enforcing depth and leaves siblings intact on stale moves", async () => {

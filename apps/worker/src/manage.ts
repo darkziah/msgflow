@@ -1150,6 +1150,9 @@ export async function listInboxes(
 
 	return rows.map((row) => ({
 		id: row.id,
+		parentInboxId: row.parentInboxId,
+		visibilityType: row.visibilityType,
+		treeVersion: row.treeVersion,
 		name: row.name,
 		description: row.description,
 		color: row.color,

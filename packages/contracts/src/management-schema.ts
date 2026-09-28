@@ -43,6 +43,13 @@ export const InboxReorderRequestSchema = Schema.Struct({
 	inboxIds: Schema.Array(Identifier).pipe(Schema.minItems(1)),
 });
 
+/** Navigation-only placement. Routing and conversation ownership never change. */
+export const InboxTreeMoveRequestSchema = Schema.Struct({
+	parentInboxId: Schema.NullOr(Identifier),
+	beforeInboxId: Schema.optionalWith(Identifier, { exact: true }),
+	expectedTreeVersion: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+});
+
 export const SidebarStringListSchema = Schema.Array(Schema.String);
 export const SidebarItemOrderSchema = Schema.Record({
 	key: Schema.String,

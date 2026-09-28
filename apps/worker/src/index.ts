@@ -39,6 +39,7 @@ import {
 	InboxChannelRequestSchema,
 	InboxMemberRequestSchema,
 	InboxReorderRequestSchema,
+	InboxTreeMoveRequestSchema,
 	InboxUpdateRequestSchema,
 	MarkReadRequestSchema,
 	MessengerWebhookEnvelopeSchema,
@@ -137,6 +138,7 @@ import {
 import { scheduleOutbound, sendOutbound } from "./outbound";
 import { getConversation, listConversations } from "./queries";
 import { getReadableInboxIds } from "./inbox-tree";
+import { handleInboxTreeMove } from "./inbox-tree-route";
 import { handleScheduled } from "./scheduled";
 import { verifyFacebookSignatureForSecrets } from "./webhook";
 import { decryptChannelToken } from "./channel-token-crypto";
@@ -1569,6 +1571,31 @@ app.patch("/api/workspaces/:workspaceId/inboxes/:inboxId", async (c) => {
 	}
 });
 
+// POST /api/workspaces/:workspaceId/inboxes/:inboxId/move — navigation-only
+// tree placement. It deliberately does not update conversations, rules, or
+// channel defaults.
+app.post("/api/workspaces/:workspaceId/inboxes/:inboxId/move", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		const decoded = await decodeJsonBody(c.req.raw, InboxTreeMoveRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		await handleInboxTreeMove(
+			c.env,
+			workspaceId,
+			c.req.param("inboxId"),
+			decoded.value,
+			session.user.id,
+		);
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
 app.delete("/api/workspaces/:workspaceId/inboxes/:inboxId", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
@@ -2315,7 +2342,7 @@ function manageError(c: Context<{ Bindings: Env }>, err: unknown) {
 	if (err instanceof ManageError) {
 		return c.json(
 			{ success: false, error: err.message },
-			err.status as 400 | 404,
+			err.status as 400 | 403 | 404 | 409,
 		);
 	}
 	if (err instanceof SyntaxError) {
