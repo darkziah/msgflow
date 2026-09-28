@@ -578,7 +578,11 @@ export interface SavedFilterFilters {
 	unassigned?: boolean;
 	snoozed?: boolean;
 	channel?: "facebook" | "email";
+	/** Exact authorized channel selection from a sidebar leaf. */
+	channelId?: string;
 	tagId?: string;
+	/** Saved view identity; the Worker resolves its stored filters per request. */
+	savedViewId?: string;
 	dateFrom?: string;
 	dateTo?: string;
 }

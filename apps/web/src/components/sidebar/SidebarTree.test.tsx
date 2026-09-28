@@ -227,4 +227,56 @@ describe("SidebarTree", () => {
 			screen.queryByRole("button", { name: "Create inbox" }),
 		).not.toBeInTheDocument();
 	});
+
+	test("normalizes channel groups, exact channel leaves, and saved-view identities", () => {
+		const response = tree();
+		const channels = node("section:channels", "Channels", [
+			node("channel-group:facebook", "Facebook", [
+				node("channel:page-1", "Support page"),
+			]),
+		]);
+		channels.children[0].type = "channel-group";
+		channels.children[0].filter = { status: "open", channel: "facebook" };
+		channels.children[0].children[0].type = "channel";
+		channels.children[0].children[0].filter = {
+			status: "open",
+			channel: "facebook",
+			channelId: "page-1",
+		};
+		const views = node("section:saved-views", "Saved Views", [
+			node("view:urgent", "Urgent"),
+		]);
+		views.children[0].type = "saved-view";
+		views.children[0].filter = { savedViewId: "urgent" };
+		response.sections.push(channels, views);
+
+		expect(nodeFilter(channels.children[0])).toEqual({
+			status: "open",
+			channel: "facebook",
+		});
+		expect(nodeFilter(channels.children[0].children[0])).toEqual({
+			status: "open",
+			channel: "facebook",
+			channelId: "page-1",
+		});
+		expect(nodeFilter(views.children[0])).toEqual({ savedViewId: "urgent" });
+	});
+
+	test("does not render hidden optional Tags and Saved Views sections", () => {
+		const response = tree();
+		const tags = node("section:tags", "Tags", [node("tag:vip", "VIP")]);
+		const views = node("section:saved-views", "Saved Views", [
+			node("view:urgent", "Urgent"),
+		]);
+		tags.isHidden = true;
+		views.isHidden = true;
+		response.sections.push(tags, views);
+		renderTree(response);
+		expect(
+			screen.queryByRole("region", { name: "Tags" }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("region", { name: "Saved Views" }),
+		).not.toBeInTheDocument();
+	});
 });

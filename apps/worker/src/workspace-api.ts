@@ -71,6 +71,7 @@ const FILTER_KEYS = new Set([
 	"unassigned",
 	"snoozed",
 	"channel",
+	"channelId",
 	"tagId",
 	"dateFrom",
 	"dateTo",
@@ -348,6 +349,7 @@ export async function getSidebar(
 					filter: {
 						status: "open",
 						channel: type === "facebook_page" ? "facebook" : "email",
+						channelId: link.channelId,
 					},
 				}),
 			);
@@ -439,7 +441,7 @@ export async function getSidebar(
 						isCollapsible: false,
 						isEditable: false,
 						permissionState: "allowed",
-						filter,
+						filter: { savedViewId: row.id },
 					}),
 				];
 	});
@@ -900,6 +902,36 @@ export async function deleteSavedFilter(
 		.run();
 }
 
+/** Resolves a saved view at selection time so stale access cannot leak into lists. */
+export async function resolveSavedViewFilters(
+	env: Env,
+	workspaceId: string,
+	userId: string,
+	id: string,
+): Promise<SavedFilterFilters> {
+	const db = drizzle(env.DB);
+	await requireWorkspaceAccess(db, workspaceId, userId);
+	const row = await db
+		.select({ filtersJson: savedFilters.filtersJson })
+		.from(savedFilters)
+		.where(
+			and(
+				eq(savedFilters.id, id),
+				eq(savedFilters.workspaceId, workspaceId),
+				eq(savedFilters.createdBy, userId),
+			),
+		)
+		.get();
+	if (!row) throw new ManageError("saved filter not found", 404);
+	const filters = decodeStoredJson(
+		row.filtersJson,
+		Schema.NullOr(SavedFilterFiltersSchema),
+		null,
+	);
+	if (!filters) throw new ManageError("saved filter is invalid", 404);
+	return validateFilters(db, workspaceId, userId, filters);
+}
+
 async function validateFilters(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
@@ -937,6 +969,7 @@ async function validateFilters(
 				break;
 			case "inboxId":
 			case "tagId":
+			case "channelId":
 			case "assigneeId":
 			case "q":
 			case "dateFrom":

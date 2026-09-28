@@ -83,6 +83,7 @@ export const SavedFilterFiltersSchema = Schema.Struct({
 	channel: Schema.optionalWith(Schema.Literal("facebook", "email"), {
 		exact: true,
 	}),
+	channelId: Schema.optionalWith(Identifier, { exact: true }),
 	tagId: Schema.optionalWith(Identifier, { exact: true }),
 	dateFrom: Schema.optionalWith(Schema.String, { exact: true }),
 	dateTo: Schema.optionalWith(Schema.String, { exact: true }),

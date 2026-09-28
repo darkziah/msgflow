@@ -78,6 +78,7 @@ export function SidebarTree({
 	const visibleSections = useMemo(
 		() =>
 			orderSections(tree.sections)
+				.filter((section) => !section.isHidden)
 				.map((section) => filterNode(section, search))
 				.filter(Boolean) as SidebarNode[],
 		[tree.sections, search],
@@ -102,10 +103,10 @@ export function SidebarTree({
 	useEffect(() => {
 		if (
 			hasNavigationSelection(activeFilters) &&
-			!findSelected(tree.sections, activeFilters)
+			!findSelected(visibleSections, activeFilters)
 		)
 			onSelect({ status: "open", assigneeId: currentUserId });
-	}, [activeFilters, currentUserId, onSelect, tree.sections]);
+	}, [activeFilters, currentUserId, onSelect, visibleSections]);
 
 	function toggleNode(node: SidebarNode) {
 		const collapsed = isNodeCollapsed(node, tree.preferences);
@@ -418,6 +419,7 @@ function orderSections(sections: SidebarNode[]): SidebarNode[] {
 }
 function filterNode(node: SidebarNode, search: string): SidebarNode | null {
 	const children = node.children
+		.filter((child) => !child.isHidden)
 		.map((child) => filterNode(child, search))
 		.filter(Boolean) as SidebarNode[];
 	return !search ||

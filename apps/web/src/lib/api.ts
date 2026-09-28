@@ -140,7 +140,9 @@ export const api = {
 		unassigned?: boolean;
 		snoozed?: boolean;
 		channel?: "facebook" | "email";
+		channelId?: string;
 		tagId?: string;
+		savedViewId?: string;
 		dateFrom?: string;
 		dateTo?: string;
 		inboxScope?: "exact" | "descendants";
@@ -156,7 +158,9 @@ export const api = {
 		if (params?.unassigned) qs.set("unassigned", "true");
 		if (params?.snoozed) qs.set("snoozed", "true");
 		if (params?.channel) qs.set("channel", params.channel);
+		if (params?.channelId) qs.set("channelId", params.channelId);
 		if (params?.tagId) qs.set("tagId", params.tagId);
+		if (params?.savedViewId) qs.set("savedViewId", params.savedViewId);
 		if (params?.dateFrom) qs.set("dateFrom", params.dateFrom);
 		if (params?.dateTo) qs.set("dateTo", params.dateTo);
 		const query = qs.toString();

@@ -120,7 +120,9 @@ export interface ConversationListOptions {
 	/** Open conversations snoozed until the future (sidebar "Snoozed" queue). */
 	snoozed?: boolean;
 	channel?: "facebook" | "email";
+	channelId?: string;
 	tagId?: string;
+	savedViewId?: string;
 	/** ISO date range bound on lastMessageAt (inclusive). */
 	dateFrom?: string;
 	dateTo?: string;
@@ -189,6 +191,12 @@ export async function listConversations(
 			? eq(
 					channels.type,
 					opts.channel === "facebook" ? "facebook_page" : "email",
+				)
+			: undefined,
+		opts.channelId
+			? and(
+					eq(conversations.channelId, opts.channelId),
+					eq(channels.workspaceId, workspaceId),
 				)
 			: undefined,
 		opts.tagId

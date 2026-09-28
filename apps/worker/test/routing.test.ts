@@ -70,6 +70,7 @@ import {
 	createSavedFilter,
 	deleteSavedFilter,
 	getSidebar,
+	resolveSavedViewFilters,
 	updateSidebarPreferences,
 } from "../src/workspace-api";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
@@ -2001,6 +2002,52 @@ describe("sidebar + preferences", () => {
 		expect(views?.children.some((item) => item.id === `view:${view.id}`)).toBe(
 			true,
 		);
+	});
+
+	test("resolves saved views on every selection and filters exact channel leaves", async () => {
+		const { workspaceId } = await setup();
+		const inbox = (
+			await createInbox(ctx.env, workspaceId, { name: "Work" }, ADMIN)
+		).id;
+		const channelA = await insertChannel(workspaceId, "facebook_page", "A");
+		const channelB = await insertChannel(workspaceId, "facebook_page", "B");
+		await insertConversation(
+			workspaceId,
+			channelA,
+			inbox,
+			await insertContact(workspaceId),
+			"a",
+		);
+		await insertConversation(
+			workspaceId,
+			channelB,
+			inbox,
+			await insertContact(workspaceId),
+			"b",
+		);
+		expect(
+			(
+				await listConversations(
+					ctx.env,
+					ADMIN,
+					{ channelId: channelA },
+					workspaceId,
+				)
+			).map((conversation) => conversation.id),
+		).toEqual(["a"]);
+		const view = await createSavedFilter(ctx.env, workspaceId, ADMIN, {
+			name: "Only A",
+			filters: { channelId: channelA },
+		});
+		expect(
+			await resolveSavedViewFilters(ctx.env, workspaceId, ADMIN, view.id),
+		).toEqual({
+			channelId: channelA,
+		});
+		await deleteSavedFilter(ctx.env, workspaceId, view.id, ADMIN);
+		await expect(
+			resolveSavedViewFilters(ctx.env, workspaceId, ADMIN, view.id),
+		).rejects.toMatchObject({ status: 404 });
 	});
 
 	test("a member cannot delete another member's saved filter", async () => {

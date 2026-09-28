@@ -108,6 +108,7 @@ import {
 	createSavedFilter,
 	deleteSavedFilter,
 	getSidebar,
+	resolveSavedViewFilters,
 	updateSidebarPreferences,
 } from "./workspace-api";
 import {
@@ -411,32 +412,46 @@ app.get("/api/conversations", async (c) => {
 		);
 		const statusParam = c.req.query("status") ?? "open";
 		const inboxId = c.req.query("inboxId") ?? undefined;
+		const savedViewId = c.req.query("savedViewId") ?? undefined;
+		const savedViewFilters = savedViewId
+			? await resolveSavedViewFilters(
+					c.env,
+					workspaceId,
+					session.user.id,
+					savedViewId,
+				)
+			: undefined;
 		const conversations = await listConversations(
 			c.env,
 			session.user.id,
 			{
-				status:
-					statusParam === "archived" || statusParam === "all"
+				status: savedViewFilters?.status ??
+					(statusParam === "archived" || statusParam === "all"
 						? statusParam
-						: "open",
-				inboxId,
+						: "open"),
+				inboxId: savedViewFilters?.inboxId ?? inboxId,
 				inboxScope:
+					savedViewFilters?.inboxId
+						? "exact"
+						:
 					c.req.query("inboxScope") === "descendants"
 						? "descendants"
 						: "exact",
-				q: c.req.query("q") ?? undefined,
+				q: savedViewFilters?.q ?? c.req.query("q") ?? undefined,
 				mailboxId: c.req.query("mailboxId") ?? undefined,
-				assigneeId: c.req.query("assigneeId") ?? undefined,
-				unassigned: c.req.query("unassigned") === "true" || undefined,
-				snoozed: c.req.query("snoozed") === "true" || undefined,
+				assigneeId: savedViewFilters?.assigneeId ?? c.req.query("assigneeId") ?? undefined,
+				unassigned: savedViewFilters?.unassigned ?? (c.req.query("unassigned") === "true" || undefined),
+				snoozed: savedViewFilters?.snoozed ?? (c.req.query("snoozed") === "true" || undefined),
 				channel:
-					c.req.query("channel") === "facebook" ||
-					c.req.query("channel") === "email"
+					savedViewFilters?.channel ??
+					((c.req.query("channel") === "facebook" ||
+						c.req.query("channel") === "email")
 						? (c.req.query("channel") as "facebook" | "email")
-						: undefined,
-				tagId: c.req.query("tagId") ?? undefined,
-				dateFrom: c.req.query("dateFrom") ?? undefined,
-				dateTo: c.req.query("dateTo") ?? undefined,
+						: undefined),
+				channelId: savedViewFilters?.channelId ?? c.req.query("channelId") ?? undefined,
+				tagId: savedViewFilters?.tagId ?? c.req.query("tagId") ?? undefined,
+				dateFrom: savedViewFilters?.dateFrom ?? c.req.query("dateFrom") ?? undefined,
+				dateTo: savedViewFilters?.dateTo ?? c.req.query("dateTo") ?? undefined,
 			},
 			workspaceId,
 		);
