@@ -32,19 +32,22 @@ import { emailApi } from "@/lib/email-api";
 interface Props {
 	noteOnly?: boolean;
 	conversationId: string;
+	workspaceId: string;
 	showSubject?: boolean;
 	onSent?: () => void;
 	onCommentCreated?: (comment: Comment) => void;
 }
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 const EMAIL_TYPES = [...IMAGE_TYPES, "application/pdf"];
-const empty = (): SendMessageRequest => ({
+type Draft = Omit<SendMessageRequest, "workspaceId">;
+const empty = (): Draft => ({
 	text: "",
 	attachments: [],
 	confirmPrivateIdentity: false,
 });
 export function Composer({
 	conversationId,
+	workspaceId,
 	showSubject = false,
 	onSent,
 	onCommentCreated,
@@ -53,7 +56,7 @@ export function Composer({
 	const [mode, setMode] = useState<"reply" | "note">(
 		noteOnly ? "note" : "reply",
 	);
-	const [draft, setDraft] = useState<SendMessageRequest>(empty);
+	const [draft, setDraft] = useState<Draft>(empty);
 	const [note, setNote] = useState("");
 	const [mentionIds, setMentionIds] = useState<string[]>([]);
 	const [busy, setBusy] = useState(false);
@@ -71,14 +74,14 @@ export function Composer({
 	const isNote = mode === "note";
 	const locked = showSubject && !!draft.clientMessageId;
 	const context = useQuery({
-		queryKey: ["email-context", conversationId],
-		queryFn: () => emailApi.context(conversationId),
+		queryKey: ["email-context", workspaceId, conversationId],
+		queryFn: () => emailApi.context(conversationId, workspaceId),
 		enabled: showSubject,
 		refetchInterval: 5000,
 	});
 	const { data: usersData } = useQuery({
-		queryKey: ["users"],
-		queryFn: () => api.listUsers(),
+		queryKey: ["users", workspaceId],
+		queryFn: () => api.listUsers(workspaceId),
 	});
 	const mailboxId = draft.mailboxId || context.data?.receivingMailboxId || "";
 	const from = context.data?.mailboxes.find((m) => m.id === mailboxId);
@@ -108,7 +111,7 @@ export function Composer({
 		if (!showSubject) return;
 		let active = true;
 		void emailApi
-			.getDraft(conversationId)
+			.getDraft(conversationId, workspaceId)
 			.then(({ draft: saved }) => {
 				if (!active) return;
 				// Never silently overwrite keystrokes made while hydration was in flight.
@@ -129,10 +132,10 @@ export function Composer({
 		return () => {
 			active = false;
 		};
-	}, [conversationId, showSubject]);
+	}, [conversationId, showSubject, workspaceId]);
 
 	const persist = useCallback(
-		(payload: SendMessageRequest) => {
+		(payload: Draft) => {
 			// Serialize writes so an older autosave cannot arrive after submission/deletion.
 			const next = saveQueue.current
 				.catch(() => {})
@@ -140,11 +143,11 @@ export function Composer({
 					const request = { ...payload, draftRevision: serverRevision.current };
 					let result: Awaited<ReturnType<typeof emailApi.saveDraft>>;
 					try {
-						result = await emailApi.saveDraft(conversationId, request);
+						result = await emailApi.saveDraft(conversationId, workspaceId, request);
 					} catch (error) {
 						if (!request.clientMessageId) throw error;
 						// Retry only the identical persisted submission, never a fresh ID.
-						result = await emailApi.saveDraft(conversationId, request);
+						result = await emailApi.saveDraft(conversationId, workspaceId, request);
 					}
 					serverRevision.current = result.draft.draftRevision ?? 0;
 					return result;
@@ -152,7 +155,7 @@ export function Composer({
 			saveQueue.current = next;
 			return next;
 		},
-		[conversationId],
+		[conversationId, workspaceId],
 	);
 	useEffect(() => {
 		if (!showSubject || !hydrated || !dirty.current || locked || busy) return;
@@ -184,9 +187,9 @@ export function Composer({
 		setBusy(true);
 		try {
 			await saveQueue.current.catch(() => {});
-			await emailApi.deleteDraft(conversationId, expectedId);
+			await emailApi.deleteDraft(conversationId, workspaceId, expectedId);
 			// Read back the exact target before claiming the durable draft was cleared.
-			const saved = (await emailApi.getDraft(conversationId)).draft;
+			const saved = (await emailApi.getDraft(conversationId, workspaceId)).draft;
 			if (saved?.clientMessageId || saved?.text || saved?.attachments?.length)
 				throw new Error(
 					"Server draft was not cleared. Refresh before continuing.",
@@ -241,8 +244,8 @@ export function Composer({
 		setError(null);
 		try {
 			const result = showSubject
-				? await emailApi.upload(conversationId, list)
-				: await api.uploadAttachments(list);
+				? await emailApi.upload(conversationId, workspaceId, list)
+				: await api.uploadAttachments(workspaceId, list);
 			dirty.current = true;
 			revision.current += 1;
 			setDraft((current) => ({
@@ -294,6 +297,7 @@ export function Composer({
 		try {
 			if (isNote) {
 				const { comment } = await api.createComment(conversationId, {
+					workspaceId,
 					text: note.trim(),
 					mentions: mentionIds,
 				});
@@ -302,7 +306,7 @@ export function Composer({
 				onCommentCreated?.(comment);
 				return;
 			}
-			const payload: SendMessageRequest = {
+			const payload: Draft = {
 				...draft,
 				text: draft.text.trim(),
 				clientMessageId: draft.clientMessageId ?? crypto.randomUUID(),
@@ -320,7 +324,7 @@ export function Composer({
 				await persist(payload);
 			}
 			submitted = true;
-			const result = await api.sendMessage(conversationId, payload);
+			const result = await api.sendMessage(conversationId, workspaceId, payload);
 			if (!result.success || !result.sent)
 				throw new Error(
 					!result.success
@@ -495,7 +499,7 @@ export function Composer({
 								className="flex items-center gap-1 rounded border p-1 text-xs"
 							>
 								<a
-									href={showSubject ? emailApi.attachmentUrl(a.id) : a.url}
+									href={showSubject ? emailApi.attachmentUrl(a.id, workspaceId) : a.url}
 									target="_blank"
 									rel="noopener noreferrer"
 									className="underline"

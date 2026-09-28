@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
 	type AnySQLiteColumn,
 	index,
@@ -64,6 +65,33 @@ export const workspaceMembers = sqliteTable(
 	],
 );
 
+/** Immutable record of a workspace-only member offboarding. */
+export const workspaceMemberOffboardings = sqliteTable(
+	"workspace_member_offboardings",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "restrict" }),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "restrict" }),
+		actorUserId: text("actor_user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "restrict" }),
+		priorRole: text("prior_role", { enum: ["owner", "admin", "member"] }).notNull(),
+		confirmationIdentifier: text("confirmation_identifier").notNull(),
+		privateMailboxesDisabled: integer("private_mailboxes_disabled").notNull().default(0),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [
+		index("idx_workspace_member_offboardings_workspace_time").on(
+			table.workspaceId,
+			table.createdAt,
+		),
+	],
+);
+
 export const teams = sqliteTable("teams", {
 	id: text("id").primaryKey(),
 	workspaceId: text("workspace_id")
@@ -117,7 +145,9 @@ export const channels = sqliteTable(
 		// Reserved for a future self-hosted mailbox; unused with Cloudflare Email
 		// Service (ADR 0014) — outbound goes through the send_email binding.
 		imapSmtpConfig: text("imap_smtp_config"),
-		status: text("status", { enum: ["active", "disconnected", "error"] })
+		status: text("status", {
+			enum: ["active", "disconnected", "error", "deleted"],
+		})
 			.notNull()
 			.default("active"),
 		createdAt: text("created_at").notNull(),
@@ -128,6 +158,14 @@ export const channels = sqliteTable(
 			table.workspaceId,
 			table.externalId,
 		),
+		// Meta identifies Messenger deliveries only by Page ID. Retained deleted
+		// channels may share a Page identity, but no configured Page may belong to
+		// more than one workspace or ingress would be ambiguous.
+		uniqueIndex("idx_channels_facebook_page_identity")
+			.on(table.externalId)
+			.where(
+				sql`${table.type} = 'facebook_page' AND ${table.status} <> 'deleted'`,
+			),
 	],
 );
 
@@ -142,15 +180,12 @@ export const metaApps = sqliteTable(
 		displayName: text("display_name").notNull(),
 		appId: text("app_id").notNull(),
 		appSecret: text("app_secret").notNull(),
+		/** SHA-256 of the per-App Meta webhook verification token. */
+		webhookVerifyTokenHash: text("webhook_verify_token_hash"),
 		createdAt: text("created_at").notNull(),
 		updatedAt: text("updated_at").notNull(),
 	},
-	(table) => [
-		uniqueIndex("idx_meta_apps_workspace_app_id").on(
-			table.workspaceId,
-			table.appId,
-		),
-	],
+	(table) => [uniqueIndex("idx_meta_apps_app_id").on(table.appId)],
 );
 
 // ---------------------------------------------------------------------------

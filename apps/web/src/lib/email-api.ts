@@ -75,7 +75,7 @@ export const emailApi = {
 			mailboxes: (MailboxSummary & { openCount: number; totalCount: number })[];
 		}>(`${ws(workspaceId)}/mailboxes/assigned`);
 	},
-	async context(id: string) {
+	async context(id: string, workspaceId: string) {
 		const data = await request<
 			Omit<EmailContext, "deliveryStates"> & {
 				receivingMailboxType: "shared" | "private";
@@ -88,7 +88,7 @@ export const emailApi = {
 					updatedAt: string;
 				}[];
 			}
-		>(`/api/conversations/${encodeURIComponent(id)}/email-context`);
+		>(`/api/conversations/${encodeURIComponent(id)}/email-context?workspaceId=${encodeURIComponent(workspaceId)}`);
 		return {
 			...data,
 			deliveryStates: data.deliveryStates.map((d) => ({
@@ -100,26 +100,31 @@ export const emailApi = {
 			})),
 		};
 	},
-	getDraft(id: string) {
-		return request<{ draft: SendMessageRequest | null }>(
-			`/api/conversations/${encodeURIComponent(id)}/draft`,
+	getDraft(id: string, workspaceId: string) {
+		return request<{ draft: Omit<SendMessageRequest, "workspaceId"> | null }>(
+			`/api/conversations/${encodeURIComponent(id)}/draft?workspaceId=${encodeURIComponent(workspaceId)}`,
 		);
 	},
-	saveDraft(id: string, body: SendMessageRequest) {
-		return request<{ draft: SendMessageRequest }>(
-			`/api/conversations/${encodeURIComponent(id)}/draft`,
+	saveDraft(
+		id: string,
+		workspaceId: string,
+		body: Omit<SendMessageRequest, "workspaceId">,
+	) {
+		return request<{ draft: Omit<SendMessageRequest, "workspaceId"> }>(
+			`/api/conversations/${encodeURIComponent(id)}/draft?workspaceId=${encodeURIComponent(workspaceId)}`,
 			{ method: "PUT", body: JSON.stringify(body) },
 		);
 	},
-	deleteDraft(id: string, clientMessageId: string) {
+	deleteDraft(id: string, workspaceId: string, clientMessageId: string) {
 		return request<{ success: boolean }>(
-			`/api/conversations/${encodeURIComponent(id)}/draft?clientMessageId=${encodeURIComponent(clientMessageId)}`,
+			`/api/conversations/${encodeURIComponent(id)}/draft?workspaceId=${encodeURIComponent(workspaceId)}&clientMessageId=${encodeURIComponent(clientMessageId)}`,
 			{ method: "DELETE" },
 		);
 	},
 	send(
 		id: string,
-		body: SendMessageRequest & {
+		workspaceId: string,
+		body: Omit<SendMessageRequest, "workspaceId"> & {
 			mailboxId: string;
 			confirmPrivateIdentity: boolean;
 		},
@@ -128,19 +133,23 @@ export const emailApi = {
 			state?: DeliveryState;
 			deliveryState?: DeliveryState;
 			success?: boolean;
-		}>(`/api/conversations/${encodeURIComponent(id)}/messages`, post(body));
+		}>(
+			`/api/conversations/${encodeURIComponent(id)}/messages`,
+			post({ ...body, workspaceId }),
+		);
 	},
-	upload(conversationId: string, files: File[]) {
+	upload(conversationId: string, workspaceId: string, files: File[]) {
 		const form = new FormData();
 		form.append("conversationId", conversationId);
+		form.append("workspaceId", workspaceId);
 		for (const file of files) form.append("files", file);
 		return request<{ attachments: Attachment[] }>("/api/email-attachments", {
 			method: "POST",
 			body: form,
 		});
 	},
-	attachmentUrl(id: string) {
-		return `${import.meta.env.VITE_SERVER_URL ?? ""}/api/email-attachments/${encodeURIComponent(id)}`;
+	attachmentUrl(id: string, workspaceId: string) {
+		return `${import.meta.env.VITE_SERVER_URL ?? ""}/api/email-attachments/${encodeURIComponent(id)}?workspaceId=${encodeURIComponent(workspaceId)}`;
 	},
 	verify(
 		workspaceId: string,

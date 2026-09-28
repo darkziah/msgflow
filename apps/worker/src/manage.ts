@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import {
@@ -704,7 +704,12 @@ export async function listChannels(
 			updatedAt: channels.updatedAt,
 		})
 		.from(channels)
-		.where(eq(channels.workspaceId, workspaceId))
+		.where(
+			and(
+				eq(channels.workspaceId, workspaceId),
+				ne(channels.status, "deleted"),
+			),
+		)
 		.all();
 	return rows.map((row) => ({
 		id: row.id,
@@ -751,14 +756,20 @@ export async function createFacebookChannel(
 		)
 		.get();
 	if (!metaApp) throw new ManageError("Meta App not found", 404);
+	let pageValidation: { displayName: string | null };
 	try {
-		await validateAndSubscribeFacebookPage(input.pageId, input.accessToken);
+		pageValidation = await validateAndSubscribeFacebookPage(
+			input.pageId,
+			input.accessToken,
+		);
 	} catch {
 		throw new ManageError(
 			"Facebook Page validation or subscription failed",
 			400,
 		);
 	}
+	const displayName =
+		input.displayName ?? pageValidation.displayName ?? input.pageId;
 	let accessToken: string;
 	try {
 		accessToken = await encryptChannelToken(
@@ -770,26 +781,61 @@ export async function createFacebookChannel(
 	}
 	const id = crypto.randomUUID();
 	const now = new Date().toISOString();
-	try {
-		await env.DB.batch([
-			env.DB.prepare(
-				`INSERT INTO channels (id,workspace_id,type,display_name,external_id,access_token,meta_app_id,status,created_at,updated_at)
- VALUES (?,?,?,?,?,?,?,'active',?,?)`,
-			).bind(
-				id,
-				workspaceId,
-				"facebook_page",
-				input.displayName,
-				input.pageId,
-				accessToken,
-				metaApp.id,
-				now,
-				now,
+	// Deleted Page channels retain their provider identity for historical
+	// conversations. Reconnect that exact workspace-local identity instead of
+	// inserting a second row that the workspace identity key would reject.
+	const deletedChannel = await db
+		.select({ id: channels.id, createdAt: channels.createdAt })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "facebook_page"),
+				eq(channels.externalId, input.pageId),
+				eq(channels.status, "deleted"),
 			),
-			env.DB.prepare(
-				"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
-			).bind(crypto.randomUUID(), inbox.id, id),
-		]);
+		)
+		.get();
+	try {
+		if (deletedChannel) {
+			await env.DB.batch([
+				env.DB.prepare(
+					`UPDATE channels SET display_name=?, access_token=?, refresh_token=NULL, token_expires_at=NULL, meta_app_id=?, status='active', updated_at=?
+					 WHERE id=? AND workspace_id=? AND type='facebook_page' AND external_id=? AND status='deleted'`,
+				).bind(
+					displayName,
+					accessToken,
+					metaApp.id,
+					now,
+					deletedChannel.id,
+					workspaceId,
+					input.pageId,
+				),
+				env.DB.prepare(
+					"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+				).bind(crypto.randomUUID(), inbox.id, deletedChannel.id),
+			]);
+		} else {
+			await env.DB.batch([
+				env.DB.prepare(
+					`INSERT INTO channels (id,workspace_id,type,display_name,external_id,access_token,meta_app_id,status,created_at,updated_at)
+ VALUES (?,?,?,?,?,?,?,'active',?,?)`,
+				).bind(
+					id,
+					workspaceId,
+					"facebook_page",
+					displayName,
+					input.pageId,
+					accessToken,
+					metaApp.id,
+					now,
+					now,
+				),
+				env.DB.prepare(
+					"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+				).bind(crypto.randomUUID(), inbox.id, id),
+			]);
+		}
 	} catch {
 		throw new ManageError(
 			"a channel for this Facebook Page already exists",
@@ -797,14 +843,14 @@ export async function createFacebookChannel(
 		);
 	}
 	return {
-		id,
+		id: deletedChannel?.id ?? id,
 		type: "facebook_page",
-		displayName: input.displayName,
+		displayName,
 		externalId: input.pageId,
 		status: "active",
 		hasToken: true,
 		tokenExpiresAt: null,
-		createdAt: now,
+		createdAt: deletedChannel?.createdAt ?? now,
 		updatedAt: now,
 	};
 }
@@ -897,6 +943,47 @@ export async function disconnectChannel(
 		})
 		.where(and(eq(channels.id, id), eq(channels.workspaceId, workspaceId)))
 		.run();
+}
+
+/**
+ * Removes a Page from active configuration while retaining its historical
+ * conversations and timeline. A future re-connection can revive the identity.
+ */
+export async function deleteFacebookChannel(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const channel = await db
+		.select({ id: channels.id })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.id, id),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "facebook_page"),
+				ne(channels.status, "deleted"),
+			),
+		)
+		.get();
+	if (!channel) throw new ManageError("Facebook Page channel not found", 404);
+	await db.batch([
+		db.delete(inboxChannels).where(eq(inboxChannels.channelId, id)),
+		db
+			.update(channels)
+			.set({
+				accessToken: null,
+				refreshToken: null,
+				tokenExpiresAt: null,
+				metaAppId: null,
+				status: "deleted",
+				updatedAt: new Date().toISOString(),
+			})
+			.where(eq(channels.id, id)),
+	]);
 }
 
 // ---------------------------------------------------------------------------

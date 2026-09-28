@@ -8,13 +8,13 @@ const GRAPH_API_VERSION = "v26.0";
 export async function validateAndSubscribeFacebookPage(
 	pageId: string,
 	accessToken: string,
-): Promise<void> {
+): Promise<{ displayName: string | null }> {
 	const page = await fetch(
-		`https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(pageId)}?fields=id&access_token=${encodeURIComponent(accessToken)}`,
+		`https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(pageId)}?fields=id,name&access_token=${encodeURIComponent(accessToken)}`,
 		{ signal: AbortSignal.timeout(10_000) },
 	);
 	if (!page.ok) throw new Error("Facebook Page validation failed");
-	const identity = (await page.json()) as { id?: string };
+	const identity = (await page.json()) as { id?: string; name?: string };
 	if (identity.id !== pageId)
 		throw new Error("Facebook Page validation failed");
 
@@ -33,4 +33,5 @@ export async function validateAndSubscribeFacebookPage(
 	if (!subscription.ok) throw new Error("Facebook Page subscription failed");
 	const result = (await subscription.json()) as { success?: boolean };
 	if (!result.success) throw new Error("Facebook Page subscription failed");
+	return { displayName: identity.name?.trim() || null };
 }

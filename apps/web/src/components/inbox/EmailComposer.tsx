@@ -3,6 +3,7 @@ import { Composer } from "./Composer";
 
 interface Props {
 	conversationId: string;
+	workspaceId: string;
 	onSent?: () => void;
 	onCommentCreated?: (comment: Comment) => void;
 }

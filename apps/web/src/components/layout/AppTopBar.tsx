@@ -29,10 +29,20 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { CreateWorkspaceDialog } from "@/components/workspace/CreateWorkspaceDialog";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 
 type Theme = "light" | "dark";
+
+export async function refreshWorkspacesThenSelect(
+	refetchWorkspaces: () => Promise<unknown>,
+	workspaceId: string,
+	onChangeWorkspace: (workspaceId: string) => void,
+): Promise<void> {
+	await refetchWorkspaces();
+	onChangeWorkspace(workspaceId);
+}
 
 function readTheme(): Theme {
 	return localStorage.getItem("msgflow.theme") === "dark" ? "dark" : "light";
@@ -53,8 +63,9 @@ export function AppTopBar({
 	const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
 	const activeWorkspace = workspaces.find((workspace) => workspace.id === workspaceId);
 	const { data: notifications } = useQuery({
-		queryKey: ["comment-notifications"],
-		queryFn: () => api.listCommentNotifications(),
+		queryKey: ["comment-notifications", workspaceId],
+		queryFn: () => api.listCommentNotifications(workspaceId),
+		enabled: Boolean(workspaceId),
 		refetchInterval: 15000,
 	});
 
@@ -65,14 +76,23 @@ export function AppTopBar({
 
 	function openNotification(notification: NonNullable<typeof notifications>["notifications"][number]) {
 		api
-			.markCommentNotificationRead(notification.id)
-			.finally(() => queryClient.invalidateQueries({ queryKey: ["comment-notifications"] }));
-		navigate({ to: "/", search: { c: notification.conversationId } });
+			.markCommentNotificationRead(notification.id, workspaceId)
+			.finally(() => queryClient.invalidateQueries({ queryKey: ["comment-notifications", workspaceId] }));
+		navigate({ to: "/", search: { workspace: workspaceId, c: notification.conversationId } });
 	}
 
 	async function signOut() {
 		await authClient.signOut();
 		navigate({ to: "/login" });
+	}
+
+	async function workspaceCreated(workspace: WorkspaceSummary) {
+		await refreshWorkspacesThenSelect(
+			() => queryClient.refetchQueries({ queryKey: ["workspaces"] }),
+			workspace.id,
+			onChangeWorkspace,
+		);
+		setWorkspacePickerOpen(false);
 	}
 
 	return (
@@ -108,7 +128,14 @@ export function AppTopBar({
 							);
 						})}
 					</div>
-					{activeWorkspace?.role === "owner" ? <p className="text-sm text-muted-foreground">Workspace creation is controlled by the installation’s first-use setup flow.</p> : null}
+					{activeWorkspace?.role === "owner" ? (
+						<div className="flex justify-end border-t pt-3">
+							<CreateWorkspaceDialog
+								sourceWorkspaceId={activeWorkspace.id}
+								onCreated={workspaceCreated}
+							/>
+						</div>
+					) : null}
 				</DialogContent>
 			</Dialog>
 			<div className="ml-auto flex items-center gap-1">
@@ -146,7 +173,7 @@ export function AppTopBar({
 				</Tooltip>
 				<Tooltip>
 					<TooltipTrigger asChild>
-						<Button type="button" variant="ghost" size="icon" onClick={() => navigate({ to: "/settings" })} aria-label="Settings"><Settings /></Button>
+						<Button type="button" variant="ghost" size="icon" onClick={() => navigate({ to: "/settings", search: { workspace: workspaceId } })} aria-label="Settings"><Settings /></Button>
 					</TooltipTrigger>
 					<TooltipContent>Settings</TooltipContent>
 				</Tooltip>

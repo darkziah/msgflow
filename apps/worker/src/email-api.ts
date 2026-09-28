@@ -8,10 +8,7 @@ import {
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
 import type { Env } from "./env";
-import {
-	requireDefaultWorkspaceAccess,
-	requireWorkspaceAccess,
-} from "./access";
+import { requireWorkspaceAccess } from "./access";
 import { canReadConversation } from "./conversation-permissions";
 import { canAccessMailbox } from "./email-transport";
 import {
@@ -165,10 +162,9 @@ export async function receivingMailbox(
 
 emailApi.get("/conversations/:id/email-context", async (c) => {
 	const userId = c.get("userId");
-	const { workspaceId } = await requireDefaultWorkspaceAccess(
-		drizzle(c.env.DB),
-		userId,
-	);
+	const workspaceId = c.req.query("workspaceId");
+	if (!workspaceId) throw new ManageError("missing workspaceId", 400);
+	await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, userId);
 	const conversationId = c.req.param("id");
 	if (!(await canReadConversation(c.env, userId, conversationId, workspaceId)))
 		throw new ManageError("not found", 404);
@@ -209,10 +205,6 @@ emailApi.get("/conversations/:id/email-context", async (c) => {
 
 emailApi.post("/email-attachments", async (c) => {
 	const userId = c.get("userId");
-	const { workspaceId } = await requireDefaultWorkspaceAccess(
-		drizzle(c.env.DB),
-		userId,
-	);
 	let form: FormData;
 	try {
 		if (!c.req.raw.body) throw new Error("missing body");
@@ -227,6 +219,10 @@ emailApi.post("/email-attachments", async (c) => {
 		throw new ManageError("invalid or oversized attachment upload", 400);
 	}
 	const conversationId = form.get("conversationId");
+	const workspaceId = form.get("workspaceId");
+	if (typeof workspaceId !== "string" || !workspaceId)
+		throw new ManageError("missing workspaceId", 400);
+	await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, userId);
 	if (
 		typeof conversationId !== "string" ||
 		!(await canReadConversation(c.env, userId, conversationId, workspaceId))
@@ -272,10 +268,9 @@ emailApi.post("/email-attachments", async (c) => {
 });
 emailApi.get("/email-attachments/:id", async (c) => {
 	const userId = c.get("userId");
-	const { workspaceId } = await requireDefaultWorkspaceAccess(
-		drizzle(c.env.DB),
-		userId,
-	);
+	const workspaceId = c.req.query("workspaceId");
+	if (!workspaceId) throw new ManageError("missing workspaceId", 400);
+	await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, userId);
 	let attachment: Awaited<ReturnType<typeof readPrivateEmailAttachment>>;
 	try {
 		attachment = await readPrivateEmailAttachment(
@@ -340,7 +335,7 @@ export async function validatePrivateEmailAttachments(
 			name: row.name,
 			type: row.type,
 			size: row.size,
-			url: `/api/email-attachments/${encodeURIComponent(row.id)}`,
+			url: `/api/email-attachments/${encodeURIComponent(row.id)}?workspaceId=${encodeURIComponent(workspaceId)}`,
 		});
 	}
 	if (attachments.reduce((size, item) => size + item.size, 0) > MAX_EMAIL_BYTES)

@@ -30,7 +30,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 
-export const Route = createFileRoute("/rules")({ component: RulesPage });
+export const Route = createFileRoute("/rules")({
+	validateSearch: (search: Record<string, unknown>): { workspace?: string } => ({
+		workspace: typeof search.workspace === "string" ? search.workspace : undefined,
+	}),
+	component: RulesPage,
+});
 
 type RulesTab = "rules" | "canned-replies";
 
@@ -39,6 +44,7 @@ function getActiveTab(hash: string): RulesTab {
 }
 
 function RulesPage() {
+	const { workspace: workspaceId } = Route.useSearch();
 	const [activeTab, setActiveTab] = useState<RulesTab>(() =>
 		getActiveTab(window.location.hash),
 	);
@@ -55,7 +61,7 @@ function RulesPage() {
 				<div className="flex items-center justify-between gap-4">
 					<h1 className="text-2xl font-semibold tracking-tight">Rules</h1>
 					<Button variant="link" size="sm" asChild>
-						<Link to="/">Back to inbox</Link>
+						<Link to="/" search={workspaceId ? { workspace: workspaceId } : {}}>Back to inbox</Link>
 					</Button>
 				</div>
 				<Alert>
@@ -79,27 +85,27 @@ function RulesPage() {
 					<TabsTrigger value="canned-replies">Canned replies</TabsTrigger>
 				</TabsList>
 				<TabsContent value="rules" className="pt-4">
-					<RulesSection />
+					{workspaceId ? <RulesSection workspaceId={workspaceId} /> : null}
 				</TabsContent>
 				<TabsContent value="canned-replies" className="pt-4">
-					<CannedRepliesSection />
+					{workspaceId ? <CannedRepliesSection workspaceId={workspaceId} /> : null}
 				</TabsContent>
 			</Tabs>
 		</main>
 	);
 }
 
-function RulesSection() {
+function RulesSection({ workspaceId }: { workspaceId: string }) {
 	const queryClient = useQueryClient();
 	const [creating, setCreating] = useState(false);
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const { data, error, isPending } = useQuery({
-		queryKey: ["rules"],
-		queryFn: () => api.listRules(),
+		queryKey: ["rules", workspaceId],
+		queryFn: () => api.listRules(workspaceId),
 	});
 	const { mutate: remove, isPending: removing } = useMutation({
-		mutationFn: (id: string) => api.deleteRule(id),
-		onSuccess: () => queryClient.invalidateQueries({ queryKey: ["rules"] }),
+		mutationFn: (id: string) => api.deleteRule(workspaceId, id),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ["rules", workspaceId] }),
 	});
 
 	return (
@@ -120,7 +126,7 @@ function RulesSection() {
 			</div>
 
 			{creating ? (
-				<RuleForm onDone={() => setCreating(false)} onCancel={() => setCreating(false)} />
+				<RuleForm workspaceId={workspaceId} onDone={() => setCreating(false)} onCancel={() => setCreating(false)} />
 			) : null}
 			{error ? <QueryError message="Rules could not be loaded." /> : null}
 			{isPending ? <LoadingCards /> : null}
@@ -139,6 +145,7 @@ function RulesSection() {
 				editingId === rule.id ? (
 					<RuleForm
 						key={rule.id}
+						workspaceId={workspaceId}
 						initial={rule}
 						onDone={() => setEditingId(null)}
 						onCancel={() => setEditingId(null)}
@@ -198,17 +205,17 @@ function RuleCard({ rule, onEdit, onDelete, deleting }: {
 	);
 }
 
-function CannedRepliesSection() {
+function CannedRepliesSection({ workspaceId }: { workspaceId: string }) {
 	const queryClient = useQueryClient();
 	const { data, error, isPending } = useQuery({
-		queryKey: ["canned-replies"],
-		queryFn: () => api.listCannedReplies(),
+		queryKey: ["canned-replies", workspaceId],
+		queryFn: () => api.listCannedReplies(workspaceId),
 	});
 	const [creating, setCreating] = useState(false);
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const { mutate: remove } = useMutation({
-		mutationFn: (id: string) => api.deleteCannedReply(id),
-		onSuccess: () => queryClient.invalidateQueries({ queryKey: ["canned-replies"] }),
+		mutationFn: (id: string) => api.deleteCannedReply(workspaceId, id),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ["canned-replies", workspaceId] }),
 	});
 
 	return (
@@ -228,7 +235,7 @@ function CannedRepliesSection() {
 				)}
 			</div>
 
-			{creating ? <CannedReplyForm onDone={() => setCreating(false)} onCancel={() => setCreating(false)} /> : null}
+			{creating ? <CannedReplyForm workspaceId={workspaceId} onDone={() => setCreating(false)} onCancel={() => setCreating(false)} /> : null}
 			{error ? <QueryError message="Canned replies could not be loaded." /> : null}
 			{isPending ? <LoadingCards /> : null}
 			{data && data.cannedReplies.length === 0 ? (
@@ -242,7 +249,7 @@ function CannedRepliesSection() {
 			) : null}
 			{data?.cannedReplies.map((reply) =>
 				editingId === reply.id ? (
-					<CannedReplyForm key={reply.id} initial={reply} onDone={() => setEditingId(null)} onCancel={() => setEditingId(null)} />
+					<CannedReplyForm key={reply.id} workspaceId={workspaceId} initial={reply} onDone={() => setEditingId(null)} onCancel={() => setEditingId(null)} />
 				) : (
 					<CannedReplyCard
 						key={reply.id}
@@ -279,7 +286,8 @@ function CannedReplyCard({ reply, onEdit, onDelete }: {
 	);
 }
 
-function CannedReplyForm({ initial, onDone, onCancel }: {
+function CannedReplyForm({ workspaceId, initial, onDone, onCancel }: {
+	workspaceId: string;
 	initial?: CannedReplySummary;
 	onDone: () => void;
 	onCancel: () => void;
@@ -291,10 +299,10 @@ function CannedReplyForm({ initial, onDone, onCancel }: {
 	const { mutate: save, isPending } = useMutation({
 		mutationFn: () => {
 			const payload = { name: name.trim(), body: body.trim() };
-			return initial ? api.updateCannedReply(initial.id, payload) : api.createCannedReply(payload);
+			return initial ? api.updateCannedReply(workspaceId, initial.id, payload) : api.createCannedReply(workspaceId, payload);
 		},
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["canned-replies"] });
+			queryClient.invalidateQueries({ queryKey: ["canned-replies", workspaceId] });
 			onDone();
 		},
 		onError: (err) => setError(err instanceof Error ? err.message : "Failed to save canned reply."),

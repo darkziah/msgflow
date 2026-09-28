@@ -85,9 +85,14 @@ export async function completeMetaOAuth(
 	env: Env,
 	state: string,
 	code: string,
-): Promise<{ callbackOrigin: string; sessionId: string }> {
+): Promise<{
+	callbackOrigin: string;
+	sessionId: string;
+	workspaceId: string;
+	inboxId: string;
+}> {
 	const session = await env.DB.prepare(
-		`SELECT s.id, s.workspace_id AS workspaceId, s.meta_app_id AS metaAppId, s.callback_origin AS callbackOrigin,
+		`SELECT s.id, s.workspace_id AS workspaceId, s.inbox_id AS inboxId, s.meta_app_id AS metaAppId, s.callback_origin AS callbackOrigin,
 		m.app_id AS appId, m.app_secret AS appSecret
 		FROM meta_oauth_sessions s JOIN meta_apps m ON m.id = s.meta_app_id
 		WHERE s.state_nonce=? AND s.consumed_at IS NULL AND s.expires_at > ?`,
@@ -96,6 +101,7 @@ export async function completeMetaOAuth(
 		.first<{
 			id: string;
 			workspaceId: string;
+			inboxId: string;
 			metaAppId: string;
 			callbackOrigin: string;
 			appId: string;
@@ -151,7 +157,12 @@ export async function completeMetaOAuth(
 	)
 		.bind(encryptedPages, new Date().toISOString(), session.id)
 		.run();
-	return { callbackOrigin: session.callbackOrigin, sessionId: session.id };
+	return {
+		callbackOrigin: session.callbackOrigin,
+		sessionId: session.id,
+		workspaceId: session.workspaceId,
+		inboxId: session.inboxId,
+	};
 }
 
 export async function listAuthorizedPages(

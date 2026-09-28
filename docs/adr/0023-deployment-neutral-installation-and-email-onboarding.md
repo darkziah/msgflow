@@ -7,7 +7,9 @@
 MsgFlow must deploy as an independent installation into a technical operator's
 Cloudflare account. It must not depend on Yehey-specific Cloudflare account
 IDs, resource names, application hosts, or email domains. Each installation
-initially serves one Workspace created by an explicit first-use owner claim.
+initially serves one Workspace created by an explicit first-use owner claim. ADR
+0024 later permits authenticated additional Workspace creation without changing
+this initial installation claim.
 
 The installation needs a safe path for username-based Agent invitations,
 private mailbox activation, and reusable Cloudflare Email Domain onboarding.
@@ -51,8 +53,10 @@ internal workspace scope used for authorization.
   gated. A durable singleton claim permits exactly one initial Owner setup.
 - A partial claim is repaired only by an authenticated local operator recovery
   procedure that preserves the original claim; there is no public reset route.
-- Each installation initially has one Workspace and no second-workspace
-  creation flow.
+- Each installation initially has one Workspace. ADR 0024 supersedes this
+  ADR's former no-second-Workspace-flow decision with an authenticated,
+  Owner-led creation flow; this does not change the durable singleton first-use
+  claim, operator recovery, or deployment-neutral rules.
 - A Workspace may have multiple Owners and multiple Administrators.
 - Owners alone may promote/demote Owners and every mutation preserves at least
   one Owner. Administrators may offboard members; Owners may offboard

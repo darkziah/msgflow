@@ -1,6 +1,11 @@
-import type { MetaAppCreateRequest, MetaAppSummary } from "@msgflow/contracts";
-import { metaApps } from "@msgflow/db";
-import { eq } from "drizzle-orm";
+import type {
+	MetaAppCreateRequest,
+	MetaAppSummary,
+	MetaAppUpdateRequest,
+	MetaAppWebhookSetup,
+} from "@msgflow/contracts";
+import { channels, metaApps } from "@msgflow/db";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { requireOwnerAccess } from "./access";
 import { encryptChannelToken } from "./channel-token-crypto";
@@ -41,7 +46,7 @@ export async function createMetaApp(
 	workspaceId: string,
 	input: MetaAppCreateRequest,
 	actorUserId: string,
-): Promise<MetaAppSummary> {
+): Promise<MetaAppWebhookSetup> {
 	const db = drizzle(env.DB);
 	await requireOwnerAccess(db, workspaceId, actorUserId);
 	let appSecret: string;
@@ -55,6 +60,8 @@ export async function createMetaApp(
 	}
 	const now = new Date().toISOString();
 	const id = crypto.randomUUID();
+	const webhookVerifyToken = generateWebhookVerifyToken();
+	const webhookVerifyTokenHash = await sha256Hex(webhookVerifyToken);
 	try {
 		await db
 			.insert(metaApps)
@@ -64,6 +71,7 @@ export async function createMetaApp(
 				displayName: input.displayName,
 				appId: input.appId,
 				appSecret,
+				webhookVerifyTokenHash,
 				createdAt: now,
 				updatedAt: now,
 			})
@@ -72,11 +80,107 @@ export async function createMetaApp(
 		throw new ManageError("a Meta App with this App ID already exists", 409);
 	}
 	return {
-		id,
-		displayName: input.displayName,
-		appId: input.appId,
-		hasSecret: true,
-		createdAt: now,
-		updatedAt: now,
+		metaApp: {
+			id,
+			displayName: input.displayName,
+			appId: input.appId,
+			hasSecret: true,
+			createdAt: now,
+			updatedAt: now,
+		},
+		webhookVerifyToken,
 	};
+}
+
+/** Hashes the dashboard-supplied token; plaintext never reaches D1. */
+export async function hashWebhookVerifyToken(value: string): Promise<string> {
+	return sha256Hex(value);
+}
+
+export async function updateMetaApp(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	input: MetaAppUpdateRequest,
+	actorUserId: string,
+): Promise<MetaAppSummary> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const existing = await db
+		.select()
+		.from(metaApps)
+		.where(and(eq(metaApps.id, id), eq(metaApps.workspaceId, workspaceId)))
+		.get();
+	if (!existing) throw new ManageError("Meta App not found", 404);
+	const set: Partial<typeof metaApps.$inferInsert> = {
+		updatedAt: new Date().toISOString(),
+	};
+	if (input.displayName !== undefined) set.displayName = input.displayName;
+	if (input.appSecret !== undefined) {
+		try {
+			set.appSecret = await encryptChannelToken(
+				input.appSecret,
+				env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+			);
+		} catch {
+			throw new ManageError("Meta App secret encryption is unavailable", 503);
+		}
+	}
+	await db
+		.update(metaApps)
+		.set(set)
+		.where(and(eq(metaApps.id, id), eq(metaApps.workspaceId, workspaceId)))
+		.run();
+	return {
+		id: existing.id,
+		displayName: set.displayName ?? existing.displayName,
+		appId: existing.appId,
+		hasSecret: true,
+		createdAt: existing.createdAt,
+		updatedAt: set.updatedAt ?? existing.updatedAt,
+	};
+}
+
+/** Page history is retained: disconnect/remove Page Channels before deleting. */
+export async function deleteMetaApp(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const existing = await db
+		.select({ id: metaApps.id })
+		.from(metaApps)
+		.where(and(eq(metaApps.id, id), eq(metaApps.workspaceId, workspaceId)))
+		.get();
+	if (!existing) throw new ManageError("Meta App not found", 404);
+	const pageChannel = await db
+		.select({ id: channels.id })
+		.from(channels)
+		.where(eq(channels.metaAppId, id))
+		.get();
+	if (pageChannel) {
+		throw new ManageError(
+			"disconnect or remove all Page Channels before deleting this Meta App",
+			409,
+		);
+	}
+	await db.delete(metaApps).where(eq(metaApps.id, id)).run();
+}
+
+function generateWebhookVerifyToken(): string {
+	const bytes = crypto.getRandomValues(new Uint8Array(32));
+	return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(value: string): Promise<string> {
+	const digest = await crypto.subtle.digest(
+		"SHA-256",
+		new TextEncoder().encode(value),
+	);
+	return [...new Uint8Array(digest)]
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
 }

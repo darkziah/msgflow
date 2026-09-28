@@ -129,9 +129,9 @@ export const api = {
 			{ method: "POST" },
 		);
 	},
-	listConversations(params?: {
+	listConversations(params: {
 		mailboxId?: string;
-		workspaceId?: string;
+		workspaceId: string;
 		status?: string;
 		inboxId?: string;
 		q?: string;
@@ -144,8 +144,8 @@ export const api = {
 		dateTo?: string;
 	}) {
 		const qs = new URLSearchParams();
-		if (params?.mailboxId) qs.set("mailboxId", params.mailboxId);
-		if (params?.workspaceId) qs.set("workspaceId", params.workspaceId);
+		if (params.mailboxId) qs.set("mailboxId", params.mailboxId);
+		qs.set("workspaceId", params.workspaceId);
 		if (params?.status) qs.set("status", params.status);
 		if (params?.inboxId) qs.set("inboxId", params.inboxId);
 		if (params?.q) qs.set("q", params.q);
@@ -161,11 +161,15 @@ export const api = {
 			`/api/conversations${query ? `?${query}` : ""}`,
 		);
 	},
-	getConversation(id: string) {
-		return request<ConversationSummary>(`/api/conversations/${id}`);
+	getConversation(id: string, workspaceId: string) {
+		return request<ConversationSummary>(
+			`/api/conversations/${id}?workspaceId=${encodeURIComponent(workspaceId)}`,
+		);
 	},
-	getMessages(id: string) {
-		return request<TimelineResponse>(`/api/conversations/${id}/messages`);
+	getMessages(id: string, workspaceId: string) {
+		return request<TimelineResponse>(
+			`/api/conversations/${id}/messages?workspaceId=${encodeURIComponent(workspaceId)}`,
+		);
 	},
 	createComment(id: string, body: CreateCommentRequest) {
 		return request<CreateCommentResponse>(`/api/conversations/${id}/comments`, {
@@ -173,32 +177,39 @@ export const api = {
 			body: JSON.stringify(body),
 		});
 	},
-	listCommentNotifications() {
-		return request<CommentNotificationsResponse>("/api/comment-notifications");
+	listCommentNotifications(workspaceId: string) {
+		return request<CommentNotificationsResponse>(
+			`/api/comment-notifications?workspaceId=${encodeURIComponent(workspaceId)}`,
+		);
 	},
-	markCommentNotificationRead(id: string) {
-		return request<{ success: true }>(`/api/comment-notifications/${id}/read`, {
+	markCommentNotificationRead(id: string, workspaceId: string) {
+		return request<{ success: true }>(`/api/comment-notifications/${id}/read?workspaceId=${encodeURIComponent(workspaceId)}`, {
 			method: "POST",
 		});
 	},
-	sendMessage(id: string, body: SendMessageRequest) {
+	sendMessage(
+		id: string,
+		workspaceId: string,
+		body: Omit<SendMessageRequest, "workspaceId">,
+	) {
 		return request<SendMessageResult>(`/api/conversations/${id}/messages`, {
 			method: "POST",
-			body: JSON.stringify(body),
+			body: JSON.stringify({ ...body, workspaceId }),
 		});
 	},
-	uploadAttachments(files: File[]) {
+	uploadAttachments(workspaceId: string, files: File[]) {
 		const form = new FormData();
+		form.append("workspaceId", workspaceId);
 		for (const file of files) form.append("files", file);
 		return request<{ attachments: Attachment[] }>("/api/attachments", {
 			method: "POST",
 			body: form,
 		});
 	},
-	markRead(id: string, lastReadSeq: number) {
+	markRead(id: string, workspaceId: string, lastReadSeq: number) {
 		return request<{ success: true }>(`/api/conversations/${id}/read`, {
 			method: "POST",
-			body: JSON.stringify({ lastReadSeq } satisfies MarkReadRequest),
+			body: JSON.stringify({ workspaceId, lastReadSeq } satisfies MarkReadRequest),
 		});
 	},
 	updateConversation(id: string, patch: ConversationUpdateRequest) {
@@ -207,157 +218,134 @@ export const api = {
 			body: JSON.stringify(patch),
 		});
 	},
-	listUsers() {
-		return request<{ users: UserSummary[] }>("/api/users");
+	listUsers(workspaceId: string) {
+		return request<{ users: UserSummary[] }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/users`,
+		);
 	},
-	listChannels() {
-		return request<{ channels: ChannelSummary[] }>("/api/channels");
+	listChannels(workspaceId: string) {
+		return request<{ channels: ChannelSummary[] }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/channels`,
+		);
 	},
-	connectChannel(id: string, accessToken: string) {
-		return request<{ success: true }>(`/api/channels/${id}/token`, {
-			method: "POST",
-			body: JSON.stringify({ accessToken }),
-		});
+
+	connectChannel(
+		workspaceId: string,
+		id: string,
+		accessToken: string,
+	) {
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(id)}/token`,
+			{ method: "POST", body: JSON.stringify({ accessToken }) },
+		);
 	},
-	disconnectChannel(id: string) {
-		return request<{ success: true }>(`/api/channels/${id}/disconnect`, {
-			method: "POST",
-		});
+
+	disconnectChannel(workspaceId: string, id: string) {
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(id)}/disconnect`,
+			{ method: "POST" },
+		);
 	},
-	deleteFacebookChannel(id: string) {
-		return request<{ success: true }>(`/api/channels/${id}`, {
-			method: "DELETE",
-		});
+
+	deleteFacebookChannel(workspaceId: string, id: string) {
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(id)}`,
+			{ method: "DELETE" },
+		);
 	},
-	listTags() {
-		return request<{ tags: TagSummary[] }>("/api/tags");
+	listTags(workspaceId: string) {
+		return request<{ tags: TagSummary[] }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/tags`,
+		);
 	},
-	createTag(body: TagCreateRequest) {
-		return request<{ tag: TagSummary }>("/api/tags", {
+	createTag(workspaceId: string, body: TagCreateRequest) {
+		return request<{ tag: TagSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/tags`, {
 			method: "POST",
 			body: JSON.stringify(body),
 		});
 	},
-	updateTag(id: string, body: TagUpdateRequest) {
-		return request<{ tag: TagSummary }>(`/api/tags/${id}`, {
+	updateTag(workspaceId: string, id: string, body: TagUpdateRequest) {
+		return request<{ tag: TagSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/tags/${encodeURIComponent(id)}`, {
 			method: "PATCH",
 			body: JSON.stringify(body),
 		});
 	},
-	deleteTag(id: string) {
-		return request<{ success: true }>(`/api/tags/${id}`, { method: "DELETE" });
+	deleteTag(workspaceId: string, id: string) {
+		return request<{ success: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/tags/${encodeURIComponent(id)}`, { method: "DELETE" });
 	},
-	addConversationTag(id: string, tagId: string) {
-		return request<{ success: true }>(`/api/conversations/${id}/tags`, {
+	addConversationTag(workspaceId: string, id: string, tagId: string) {
+		return request<{ success: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/conversations/${encodeURIComponent(id)}/tags`, {
 			method: "POST",
 			body: JSON.stringify({ tagId }),
 		});
 	},
-	removeConversationTag(id: string, tagId: string) {
+	removeConversationTag(workspaceId: string, id: string, tagId: string) {
 		return request<{ success: true }>(
-			`/api/conversations/${id}/tags/${tagId}`,
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/conversations/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`,
 			{ method: "DELETE" },
 		);
 	},
-	listRules() {
-		return request<{ rules: RuleSummary[] }>("/api/rules");
+	listRules(workspaceId: string) {
+		return request<{ rules: RuleSummary[] }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/rules`,
+		);
 	},
-	createRule(body: RuleWriteRequest) {
-		return request<{ rule: RuleSummary }>("/api/rules", {
+	createRule(workspaceId: string, body: RuleWriteRequest) {
+		return request<{ rule: RuleSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/rules`, {
 			method: "POST",
 			body: JSON.stringify(body),
 		});
 	},
-	updateRule(id: string, body: RuleWriteRequest) {
-		return request<{ rule: RuleSummary }>(`/api/rules/${id}`, {
+	updateRule(workspaceId: string, id: string, body: RuleWriteRequest) {
+		return request<{ rule: RuleSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/rules/${encodeURIComponent(id)}`, {
 			method: "PATCH",
 			body: JSON.stringify(body),
 		});
 	},
-	deleteRule(id: string) {
-		return request<{ success: true }>(`/api/rules/${id}`, { method: "DELETE" });
+	deleteRule(workspaceId: string, id: string) {
+		return request<{ success: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/rules/${encodeURIComponent(id)}`, { method: "DELETE" });
 	},
-	listCannedReplies() {
+	listCannedReplies(workspaceId: string) {
 		return request<{ cannedReplies: CannedReplySummary[] }>(
-			"/api/canned-replies",
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies`,
 		);
 	},
-	createCannedReply(body: CannedReplyWriteRequest) {
-		return request<{ cannedReply: CannedReplySummary }>("/api/canned-replies", {
+	createCannedReply(workspaceId: string, body: CannedReplyWriteRequest) {
+		return request<{ cannedReply: CannedReplySummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies`, {
 			method: "POST",
 			body: JSON.stringify(body),
 		});
 	},
-	updateCannedReply(id: string, body: CannedReplyWriteRequest) {
+	updateCannedReply(workspaceId: string, id: string, body: CannedReplyWriteRequest) {
 		return request<{ cannedReply: CannedReplySummary }>(
-			`/api/canned-replies/${id}`,
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies/${encodeURIComponent(id)}`,
 			{ method: "PATCH", body: JSON.stringify(body) },
 		);
 	},
-	deleteCannedReply(id: string) {
-		return request<{ success: true }>(`/api/canned-replies/${id}`, {
+	deleteCannedReply(workspaceId: string, id: string) {
+		return request<{ success: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/canned-replies/${encodeURIComponent(id)}`, {
 			method: "DELETE",
 		});
 	},
-	listInboxes() {
-		return request<{ inboxes: InboxSummary[] }>("/api/inboxes");
-	},
-	createInbox(body: InboxCreateRequest) {
-		return request<{ inbox: InboxSummary }>("/api/inboxes", {
-			method: "POST",
-			body: JSON.stringify(body),
-		});
-	},
-	updateInbox(id: string, body: InboxUpdateRequest) {
-		return request<{ inbox: InboxSummary }>(`/api/inboxes/${id}`, {
-			method: "PATCH",
-			body: JSON.stringify(body),
-		});
-	},
-	deleteInbox(id: string) {
-		return request<{ success: true }>(`/api/inboxes/${id}`, {
-			method: "DELETE",
-		});
-	},
-	linkChannelToInbox(
-		inboxId: string,
-		body: { channelId: string; isDefault?: boolean },
-	) {
-		return request<{ success: true }>(`/api/inboxes/${inboxId}/channels`, {
-			method: "POST",
-			body: JSON.stringify(body),
-		});
-	},
-	unlinkChannelFromInbox(inboxId: string, channelId: string) {
-		return request<{ success: true }>(
-			`/api/inboxes/${inboxId}/channels/${channelId}`,
-			{ method: "DELETE" },
-		);
-	},
-	joinInbox(inboxId: string) {
-		return request<{ success: true }>(`/api/inboxes/${inboxId}/members`, {
-			method: "POST",
-		});
-	},
-	leaveInbox(inboxId: string) {
-		return request<{ success: true }>(`/api/inboxes/${inboxId}/members`, {
-			method: "DELETE",
-		});
-	},
-	addInboxMember(inboxId: string, userId: string) {
-		return request<{ success: true }>(`/api/inboxes/${inboxId}/members`, {
-			method: "POST",
-			body: JSON.stringify({ userId }),
-		});
-	},
-	removeInboxMember(inboxId: string, userId: string) {
-		return request<{ success: true }>(`/api/inboxes/${inboxId}/members`, {
-			method: "DELETE",
-			body: JSON.stringify({ userId }),
-		});
-	},
+
 	listWorkspaces() {
 		return request<{ workspaces: WorkspaceSummary[] }>("/api/workspaces");
+	},
+	createWorkspace(
+		sourceWorkspaceId: string,
+		body: {
+			workspaceName: string;
+			workspaceSlug: string;
+			initialTeamName: string;
+			initialInboxName: string;
+		},
+	) {
+		return request<{
+			workspace: WorkspaceSummary & { teamId: string; inboxId: string };
+		}>(`/api/workspaces?sourceWorkspaceId=${encodeURIComponent(sourceWorkspaceId)}`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
 	},
 	listMetaApps(workspaceId: string) {
 		return request<{ metaApps: MetaAppSummary[] }>(
@@ -524,13 +512,13 @@ export const api = {
 };
 
 /** WebSocket URL for the conversation's realtime channel (authenticated via session cookie). */
-export function conversationSocketUrl(conversationId: string): string {
+export function conversationSocketUrl(conversationId: string, workspaceId: string): string {
 	const base = import.meta.env.VITE_SERVER_URL;
 	if (base) {
 		const url = new URL(base);
 		const proto = url.protocol === "https:" ? "wss" : "ws";
-		return `${proto}://${url.host}/ws?conversationId=${encodeURIComponent(conversationId)}`;
+		return `${proto}://${url.host}/ws?conversationId=${encodeURIComponent(conversationId)}&workspaceId=${encodeURIComponent(workspaceId)}`;
 	}
 	const proto = window.location.protocol === "https:" ? "wss" : "ws";
-	return `${proto}://${window.location.host}/ws?conversationId=${encodeURIComponent(conversationId)}`;
+	return `${proto}://${window.location.host}/ws?conversationId=${encodeURIComponent(conversationId)}&workspaceId=${encodeURIComponent(workspaceId)}`;
 }

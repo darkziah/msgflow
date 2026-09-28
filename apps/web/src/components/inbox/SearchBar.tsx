@@ -37,18 +37,22 @@ export interface SearchFilters {
 export function SearchBar({
 	filters,
 	onChange,
+	workspaceId,
 }: {
 	filters: SearchFilters;
 	onChange: (filters: SearchFilters) => void;
+	workspaceId: string;
 }) {
 	const [text, setText] = useState(filters.q ?? "");
 	const { data: usersData } = useQuery({
-		queryKey: ["users"],
-		queryFn: () => api.listUsers(),
+		queryKey: ["users", workspaceId],
+		queryFn: () => api.listUsers(workspaceId),
+		enabled: Boolean(workspaceId),
 	});
 	const { data: tagsData } = useQuery({
-		queryKey: ["tags"],
-		queryFn: () => api.listTags(),
+		queryKey: ["tags", workspaceId],
+		queryFn: () => api.listTags(workspaceId),
+		enabled: Boolean(workspaceId),
 	});
 	const activeCount = activeFilterCount(filters);
 

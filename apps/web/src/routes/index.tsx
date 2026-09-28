@@ -1,6 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import type { WorkspaceSummary } from "@msgflow/contracts";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
 	ConversationList,
 	ConversationListSkeleton,
@@ -16,8 +17,9 @@ import { api } from "@/lib/api";
 import { useSession } from "@/lib/auth-client";
 
 export const Route = createFileRoute("/")({
-	validateSearch: (search: Record<string, unknown>): { c?: string } => ({
+	validateSearch: (search: Record<string, unknown>): { c?: string; workspace?: string } => ({
 		c: typeof search.c === "string" ? search.c : undefined,
+		workspace: typeof search.workspace === "string" ? search.workspace : undefined,
 	}),
 	component: Inbox,
 });
@@ -41,8 +43,81 @@ export function resetFiltersForStatus(
 	};
 }
 
-const WORKSPACE_KEY = "msgflow.workspaceId";
 const COMPACT_KEY = "msgflow.sidebarCompact";
+export const WORKSPACE_QUERY_ROOTS = [
+	"assigned-mailboxes",
+	"canned-replies",
+	"channels",
+	"comment-notifications",
+	"conversation",
+	"conversations",
+	"email-domains",
+	"email-members",
+	"email-operations",
+	"email-context",
+	"inboxes",
+	"mailbox-delegates",
+	"mailboxes",
+	"messages",
+	"meta-apps",
+	"rules",
+	"sidebar",
+	"tags",
+	"teams",
+	"users",
+	"workspace-inboxes",
+	"drafts",
+] as const;
+
+const WORKSPACE_QUERY_ROOT_SET = new Set<string>(WORKSPACE_QUERY_ROOTS);
+
+export function clearWorkspaceSensitiveQueries(queryClient: QueryClient): void {
+	queryClient.removeQueries({
+		predicate: (query) => WORKSPACE_QUERY_ROOT_SET.has(String(query.queryKey[0])),
+	});
+}
+
+export function resolveAuthorizedWorkspaceId(
+	requestedWorkspaceId: string | undefined,
+	workspaces: WorkspaceSummary[],
+): string | undefined {
+	if (requestedWorkspaceId && workspaces.some((workspace) => workspace.id === requestedWorkspaceId)) {
+		return requestedWorkspaceId;
+	}
+	return workspaces[0]?.id;
+}
+
+export function workspaceSearch(workspace: string): { workspace: string } {
+	return { workspace };
+}
+
+export function reconcileWorkspaceSelection({
+	previousWorkspaceId,
+	activeWorkspaceId,
+	requestedWorkspaceId,
+	conversationId,
+}: {
+	previousWorkspaceId: string;
+	activeWorkspaceId: string;
+	requestedWorkspaceId: string | undefined;
+	conversationId: string | undefined;
+}): { clearWorkspaceState: boolean; canonicalSearch?: { workspace: string } } {
+	const changedWorkspace = Boolean(
+		previousWorkspaceId &&
+		activeWorkspaceId &&
+		previousWorkspaceId !== activeWorkspaceId,
+	);
+	if (changedWorkspace) {
+		return {
+			clearWorkspaceState: true,
+			canonicalSearch: conversationId ? workspaceSearch(activeWorkspaceId) : undefined,
+		};
+	}
+	if (activeWorkspaceId && activeWorkspaceId !== requestedWorkspaceId) {
+		return { clearWorkspaceState: false, canonicalSearch: workspaceSearch(activeWorkspaceId) };
+	}
+	return { clearWorkspaceState: false };
+}
 
 /** Human-readable identity for the active operational queue. */
 export function queueIdentity(filters: ListFilters, status: StatusTab): string {
@@ -59,8 +134,9 @@ export function queueIdentity(filters: ListFilters, status: StatusTab): string {
 }
 
 export function Inbox() {
-	const { c: conversationId } = Route.useSearch();
+	const { c: conversationId, workspace: requestedWorkspaceId } = Route.useSearch();
 	const navigate = useNavigate();
+	const queryClient = useQueryClient();
 	const { data: session } = useSession();
 	const [status, setStatus] = useState<StatusTab>("open");
 	const [filters, setFilters] = useState<ListFilters>({});
@@ -73,18 +149,30 @@ export function Inbox() {
 		queryFn: () => api.listWorkspaces(),
 	});
 	const workspaces = workspacesData?.workspaces ?? [];
-	const [workspaceId, setWorkspaceId] = useState<string>(
-		() => localStorage.getItem(WORKSPACE_KEY) ?? "",
-	);
-	const activeWorkspaceId =
-		workspaceId && workspaces.some((ws) => ws.id === workspaceId)
-			? workspaceId
-			: (workspaces[0]?.id ?? "");
+	const activeWorkspaceId = resolveAuthorizedWorkspaceId(requestedWorkspaceId, workspaces) ?? "";
+	const previousWorkspaceId = useRef(activeWorkspaceId);
+
+	useLayoutEffect(() => {
+		const reconciliation = reconcileWorkspaceSelection({
+			previousWorkspaceId: previousWorkspaceId.current,
+			activeWorkspaceId,
+			requestedWorkspaceId,
+			conversationId,
+		});
+		previousWorkspaceId.current = activeWorkspaceId;
+
+		if (reconciliation.clearWorkspaceState) {
+			clearWorkspaceSensitiveQueries(queryClient);
+			setFilters({});
+		}
+		if (reconciliation.canonicalSearch) {
+			navigate({ to: "/", search: reconciliation.canonicalSearch, replace: true });
+		}
+	}, [activeWorkspaceId, conversationId, navigate, queryClient, requestedWorkspaceId]);
 
 	function changeWorkspace(next: string) {
-		setWorkspaceId(next);
-		localStorage.setItem(WORKSPACE_KEY, next);
-		setFilters({});
+		if (next === activeWorkspaceId) return;
+		navigate({ to: "/", search: workspaceSearch(next) });
 	}
 
 	function toggleCompact() {
@@ -111,6 +199,7 @@ export function Inbox() {
 				dateFrom: filters.dateFrom,
 				dateTo: filters.dateTo,
 			}),
+		enabled: Boolean(activeWorkspaceId),
 		refetchInterval: 5000,
 	});
 
@@ -154,6 +243,7 @@ export function Inbox() {
 			</div>
 			<SearchBar
 				filters={searchFilters}
+				workspaceId={activeWorkspaceId}
 				onChange={(next) =>
 					setFilters((current) =>
 						Object.keys(next).length === 0 ? next : { ...current, ...next },
@@ -167,14 +257,18 @@ export function Inbox() {
 					<ConversationList
 						conversations={data?.conversations ?? []}
 						selectedId={conversationId}
-						onSelect={(id) => navigate({ to: "/", search: { c: id } })}
+						onSelect={(id) => navigate({ to: "/", search: { workspace: activeWorkspaceId, c: id } })}
 					/>
 				)}
 			</div>
 		</div>
 	);
 	const detail = conversationId ? (
-		<ConversationThread key={conversationId} conversationId={conversationId} />
+		<ConversationThread
+			key={`${activeWorkspaceId}:${conversationId}`}
+			conversationId={conversationId}
+			workspaceId={activeWorkspaceId}
+		/>
 	) : (
 		<div className="flex h-full items-center justify-center text-sm text-muted-foreground">
 			Select a conversation to open it.
@@ -205,7 +299,7 @@ export function Inbox() {
 				/>
 			}
 			hasDetail={Boolean(conversationId)}
-			onBack={() => navigate({ to: "/", search: {} })}
+			onBack={() => navigate({ to: "/", search: workspaceSearch(activeWorkspaceId) })}
 			list={list}
 			detail={detail}
 			sidebar={renderSidebar(compact)}

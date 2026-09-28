@@ -1,9 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import {
-	readEmailDraft,
-	saveEmailDraft,
-	deleteEmailDraft,
-} from "../src/email-drafts";
+import { readFileSync } from "node:fs";
 import {
 	channels,
 	contacts,
@@ -15,11 +11,16 @@ import {
 	workspaceMembers,
 } from "@msgflow/db";
 import { eq } from "drizzle-orm";
+import { requireWorkspaceAccess } from "../src/access";
 import {
 	canReadConversation,
 	filterReadableNotifications,
 } from "../src/conversation-permissions";
-import { requireDefaultWorkspaceAccess } from "../src/access";
+import {
+	deleteEmailDraft,
+	readEmailDraft,
+	saveEmailDraft,
+} from "../src/email-drafts";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
 
 let ctx: TestCtx;
@@ -248,7 +249,7 @@ test("draft revisions fence stale tabs, retained tombstones and immutable retrie
 	).toEqual(newer);
 });
 
-test("legacy access resolves configured workspace slug without creating a default workspace", async () => {
+test("explicit access requires the requested workspace without creating a default workspace", async () => {
 	ctx = await createTestDb();
 	const now = new Date().toISOString();
 	await seedUser(ctx, "owner", "owner@test.dev");
@@ -267,7 +268,7 @@ test("legacy access resolves configured workspace slug without creating a defaul
 			createdAt: now,
 		})
 		.run();
-	expect(await requireDefaultWorkspaceAccess(ctx.db, "owner")).toMatchObject({
+	expect(await requireWorkspaceAccess(ctx.db, "custom", "owner")).toMatchObject({
 		workspaceId: "custom",
 		role: "owner",
 	});
@@ -275,6 +276,99 @@ test("legacy access resolves configured workspace slug without creating a defaul
 		await ctx.env.DB.prepare("SELECT count(*) AS n FROM workspaces").first("n"),
 	).toBe(1);
 	await expect(
-		requireDefaultWorkspaceAccess(ctx.db, "outsider"),
+		requireWorkspaceAccess(ctx.db, "custom", "outsider"),
 	).rejects.toThrow();
+});
+
+test("explicit workspace membership prevents cross-workspace conversation access", async () => {
+	const { workspaceId: workspaceA, conversationId } = await fixture();
+	const now = new Date().toISOString();
+	const workspaceB = "workspace-b";
+	await ctx.env.DB.prepare(
+		"INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES (?,?,?,?,?)",
+	)
+		.bind(workspaceB, "Workspace B", "workspace-b", now, now)
+		.run();
+
+	await expect(
+		requireWorkspaceAccess(ctx.db, workspaceA, "owner"),
+	).resolves.toMatchObject({ workspaceId: workspaceA });
+	await expect(
+		requireWorkspaceAccess(ctx.db, workspaceB, "owner"),
+	).rejects.toThrow("you are not a member of this workspace");
+	expect(
+		await canReadConversation(ctx.env, "owner", conversationId, workspaceA),
+	).toBe(true);
+	expect(
+		await canReadConversation(ctx.env, "owner", conversationId, workspaceB),
+	).toBe(false);
+});
+
+test("explicit workspace scope covers draft, attachment, send, and private email routes", () => {
+	const worker = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	const emailApi = readFileSync(new URL("../src/email-api.ts", import.meta.url), "utf8");
+	const route = (source: string, start: string, end: string) =>
+		source.slice(source.indexOf(start), source.indexOf(end));
+	const guarded = [
+		route(worker, 'app.on(["GET", "PUT", "DELETE"], "/api/conversations/:id/draft",', "// Send a reply"),
+		route(worker, 'app.post("/api/attachments",', 'app.post("/api/conversations/:id/messages",'),
+		route(worker, 'app.post("/api/conversations/:id/messages",', "// GET /api/conversations"),
+		route(emailApi, 'emailApi.get("/conversations/:id/email-context",', 'emailApi.post("/email-attachments",'),
+		route(emailApi, 'emailApi.post("/email-attachments",', 'emailApi.get("/email-attachments/:id",'),
+		route(emailApi, 'emailApi.get("/email-attachments/:id",', "export async function validatePrivateEmailAttachments"),
+	];
+	for (const handler of guarded) {
+		expect(handler).toContain("requireWorkspaceAccess");
+		expect(handler).not.toContain("requireDefaultWorkspaceAccess");
+	}
+	expect(guarded[0]).toContain('c.req.query("workspaceId")');
+	expect(guarded[1]).toContain('form.get("workspaceId")');
+	expect(guarded[2]).toContain("const { workspaceId } = body");
+	expect(guarded[3]).toContain('c.req.query("workspaceId")');
+	expect(guarded[4]).toContain('form.get("workspaceId")');
+	expect(guarded[5]).toContain('c.req.query("workspaceId")');
+});
+
+test("workspace-specific authorization precedes conversation Durable Object lookup", async () => {
+	const source = readFileSync(
+		new URL("../src/index.ts", import.meta.url),
+		"utf8",
+	);
+	const route = (start: string, end: string) =>
+		source.slice(source.indexOf(start), source.indexOf(end));
+	const guarded = [
+		route('app.get("/api/conversations",', "// GET /api/conversations/:id"),
+		route(
+			'app.get("/api/conversations/:id",',
+			"// GET /api/conversations/:id/messages",
+		),
+		route(
+			'app.get("/api/conversations/:id/messages",',
+			"// POST /api/conversations/:id/comments",
+		),
+		route(
+			'app.post("/api/conversations/:id/comments",',
+			"// GET /api/comment-notifications",
+		),
+		route(
+			'app.get("/api/comment-notifications",',
+			'app.post("/api/comment-notifications/:id/read",',
+		),
+		route(
+			'app.post("/api/comment-notifications/:id/read",',
+			"// POST /api/conversations/:id/read",
+		),
+		route('app.post("/api/conversations/:id/read",', "// GET /api/users"),
+		route(
+			'app.patch("/api/conversations/:id",',
+			"// ---------------------------------------------------------------------------\n// TAGS",
+		),
+		route("async function handleWebSocket", "async function getSession"),
+	];
+	for (const handler of guarded) {
+		expect(handler).toContain("requireWorkspaceAccess");
+		const guard = handler.indexOf("requireWorkspaceAccess");
+		const lookup = handler.indexOf("CONVERSATION_DO.get");
+		if (lookup >= 0) expect(guard).toBeLessThan(lookup);
+	}
 });

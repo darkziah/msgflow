@@ -25,6 +25,7 @@ import {
 	MailboxDelegateRequestSchema,
 	MailboxStateUpdateRequestSchema,
 	MetaAppCreateRequestSchema,
+	MetaAppUpdateRequestSchema,
 	MetaOAuthStartRequestSchema,
 	PrivateMailboxCreateRequestSchema,
 	SharedMailboxCreateRequestSchema,
@@ -32,6 +33,7 @@ import {
 	ConversationTagRequestSchema,
 	ConversationUpdateRequestSchema,
 	CreateCommentRequestSchema,
+	EmailDraftRequestSchema,
 	CannedReplyWriteRequestSchema,
 	InboxCreateRequestSchema,
 	InboxChannelRequestSchema,
@@ -78,6 +80,7 @@ import {
 	createRule,
 	createTag,
 	disconnectChannel,
+	deleteFacebookChannel,
 	deleteCannedReply,
 	deleteInbox,
 	deleteRule,
@@ -104,7 +107,6 @@ import {
 	createSavedFilter,
 	deleteSavedFilter,
 	getSidebar,
-	listWorkspacesForUser,
 	updateSidebarPreferences,
 } from "./workspace-api";
 import {
@@ -119,8 +121,13 @@ import {
 	updateEmailDomainState,
 	updateMailboxState,
 } from "./mailboxes";
-import { getConfiguredWorkspace } from "./workspace";
-import { createMetaApp, listMetaApps } from "./meta-apps";
+import {
+	hashWebhookVerifyToken,
+	createMetaApp,
+	deleteMetaApp,
+	listMetaApps,
+	updateMetaApp,
+} from "./meta-apps";
 import {
 	completeMetaOAuth,
 	connectAuthorizedPage,
@@ -132,7 +139,7 @@ import { getConversation, listConversations } from "./queries";
 import { handleScheduled } from "./scheduled";
 import { verifyFacebookSignatureForSecrets } from "./webhook";
 import { decryptChannelToken } from "./channel-token-crypto";
-import { requireDefaultWorkspaceAccess } from "./access";
+import { requireWorkspaceAccess } from "./access";
 import { appendActivity } from "./activity";
 import {
 	AttachmentError,
@@ -155,6 +162,8 @@ import {
 import { handleInboundEmail } from "./email-ingress";
 import { emailApi, validatePrivateEmailAttachments } from "./email-api";
 import { onboardingApi } from "./onboarding-api";
+import { workspaceApi } from "./workspace-api-route";
+import { teamApi } from "./team-api";
 
 export { ConversationDO };
 
@@ -183,6 +192,8 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => {
 	return createAuth(c.env).handler(c.req.raw);
 });
 app.route("/api", onboardingApi);
+app.route("/api", workspaceApi);
+app.route("/api", teamApi);
 
 // The sole first-use account-creation path. Better Auth's generic public sign-up
 // remains disabled; this route wins a durable D1 claim before using its server API.
@@ -205,10 +216,10 @@ app.on(["GET", "PUT", "DELETE"], "/api/conversations/:id/draft", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.query("workspaceId");
+		if (!workspaceId)
+			return c.json({ success: false, error: "missing workspaceId" }, 400);
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const id = c.req.param("id");
 		if (c.req.method === "GET")
 			return c.json({
@@ -224,7 +235,7 @@ app.on(["GET", "PUT", "DELETE"], "/api/conversations/:id/draft", async (c) => {
 			await deleteEmailDraft(c.env, workspaceId, id, session.user.id, expected);
 			return c.json({ success: true });
 		}
-		const decoded = await decodeJsonBody(c.req.raw, SendMessageRequestSchema);
+		const decoded = await decodeJsonBody(c.req.raw, EmailDraftRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
 		return c.json({
@@ -247,8 +258,11 @@ app.post("/api/attachments", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		// This is intentionally Worker-mediated: browsers never receive R2 keys.
-		await requireDefaultWorkspaceAccess(drizzle(c.env.DB), session.user.id);
 		const form = await c.req.formData();
+		const workspaceId = form.get("workspaceId");
+		if (typeof workspaceId !== "string" || !workspaceId)
+			return c.json({ success: false, error: "missing workspaceId" }, 400);
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const files = form.getAll("files");
 		if (
 			files.length === 0 ||
@@ -292,10 +306,8 @@ app.post("/api/conversations/:id/messages", async (c) => {
 	let isEmail = false;
 	const conversationId = c.req.param("id");
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const { workspaceId } = body;
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const conversation = await getConversation(
 			c.env,
 			session.user.id,
@@ -386,8 +398,12 @@ app.get("/api/conversations", async (c) => {
 	if (!session) return unauthorized(c);
 
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
+		const workspaceId = c.req.query("workspaceId");
+		if (!workspaceId)
+			return c.json({ success: false, error: "missing workspaceId" }, 400);
+		await requireWorkspaceAccess(
 			drizzle(c.env.DB),
+			workspaceId,
 			session.user.id,
 		);
 		const statusParam = c.req.query("status") ?? "open";
@@ -429,8 +445,12 @@ app.get("/api/conversations/:id", async (c) => {
 	if (!session) return unauthorized(c);
 
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
+		const workspaceId = c.req.query("workspaceId");
+		if (!workspaceId)
+			return c.json({ success: false, error: "missing workspaceId" }, 400);
+		await requireWorkspaceAccess(
 			drizzle(c.env.DB),
+			workspaceId,
 			session.user.id,
 		);
 		const conversation = await getConversation(
@@ -456,8 +476,12 @@ app.get("/api/conversations/:id/messages", async (c) => {
 	if (!session) return unauthorized(c);
 
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
+		const workspaceId = c.req.query("workspaceId");
+		if (!workspaceId)
+			return c.json({ success: false, error: "missing workspaceId" }, 400);
+		await requireWorkspaceAccess(
 			drizzle(c.env.DB),
+			workspaceId,
 			session.user.id,
 		);
 		const conversationId = c.req.param("id");
@@ -505,10 +529,12 @@ app.post("/api/conversations/:id/comments", async (c) => {
 
 	try {
 		const db = drizzle(c.env.DB);
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			db,
-			session.user.id,
-		);
+		const decoded = await decodeJsonBody(c.req.raw, CreateCommentRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
+		const { workspaceId } = body;
+		await requireWorkspaceAccess(db, workspaceId, session.user.id);
 		const conversationId = c.req.param("id");
 		const conversation = await getConversation(
 			c.env,
@@ -519,10 +545,6 @@ app.post("/api/conversations/:id/comments", async (c) => {
 		if (!conversation)
 			return c.json({ success: false, error: "not found" }, 404);
 
-		const decoded = await decodeJsonBody(c.req.raw, CreateCommentRequestSchema);
-		if (!decoded.ok)
-			return c.json({ success: false, error: decoded.error }, 400);
-		const body = decoded.value;
 		const mentions = [...new Set(body.mentions ?? [])].filter(
 			(mention) => mention !== session.user.id,
 		);
@@ -613,10 +635,10 @@ app.get("/api/comment-notifications", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const db = drizzle(c.env.DB);
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			db,
-			session.user.id,
-		);
+		const workspaceId = c.req.query("workspaceId");
+		if (!workspaceId)
+			return c.json({ success: false, error: "missing workspaceId" }, 400);
+		await requireWorkspaceAccess(db, workspaceId, session.user.id);
 		const rows = await db
 			.select()
 			.from(commentNotifications)
@@ -651,10 +673,10 @@ app.post("/api/comment-notifications/:id/read", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const db = drizzle(c.env.DB);
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			db,
-			session.user.id,
-		);
+		const workspaceId = c.req.query("workspaceId");
+		if (!workspaceId)
+			return c.json({ success: false, error: "missing workspaceId" }, 400);
+		await requireWorkspaceAccess(db, workspaceId, session.user.id);
 		const notification = await db
 			.select()
 			.from(commentNotifications)
@@ -700,8 +722,14 @@ app.post("/api/conversations/:id/read", async (c) => {
 	if (!session) return unauthorized(c);
 
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
+		const decoded = await decodeJsonBody(c.req.raw, MarkReadRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
+		const { workspaceId } = body;
+		await requireWorkspaceAccess(
 			drizzle(c.env.DB),
+			workspaceId,
 			session.user.id,
 		);
 		const conversationId = c.req.param("id");
@@ -713,11 +741,6 @@ app.post("/api/conversations/:id/read", async (c) => {
 		);
 		if (!conversation)
 			return c.json({ success: false, error: "not found" }, 404);
-
-		const decoded = await decodeJsonBody(c.req.raw, MarkReadRequestSchema);
-		if (!decoded.ok)
-			return c.json({ success: false, error: decoded.error }, 400);
-		const body = decoded.value;
 
 		await drizzle(c.env.DB)
 			.insert(conversationReads)
@@ -737,16 +760,14 @@ app.post("/api/conversations/:id/read", async (c) => {
 	}
 });
 
-// GET /api/users — workspace agents for assignee pickers.
-app.get("/api/users", async (c) => {
+// GET /api/workspaces/:workspaceId/users — workspace agents for assignee pickers.
+app.get("/api/workspaces/:workspaceId/users", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
 		const db = drizzle(c.env.DB);
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			db,
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(db, workspaceId, session.user.id);
 		const users = await db
 			.select({ id: user.id, name: user.name, email: user.email })
 			.from(workspaceMembers)
@@ -767,8 +788,17 @@ app.patch("/api/conversations/:id", async (c) => {
 	if (!session) return unauthorized(c);
 
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			ConversationUpdateRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const body = decoded.value;
+		const { workspaceId } = body;
+		await requireWorkspaceAccess(
 			drizzle(c.env.DB),
+			workspaceId,
 			session.user.id,
 		);
 		const id = c.req.param("id");
@@ -781,14 +811,6 @@ app.patch("/api/conversations/:id", async (c) => {
 		if (!current) {
 			return c.json({ success: false, error: "not found" }, 404);
 		}
-
-		const decoded = await decodeJsonBody(
-			c.req.raw,
-			ConversationUpdateRequestSchema,
-		);
-		if (!decoded.ok)
-			return c.json({ success: false, error: decoded.error }, 400);
-		const body = decoded.value;
 
 		const patch: Record<string, unknown> = {};
 		if (body.status !== undefined) {
@@ -901,16 +923,14 @@ app.patch("/api/conversations/:id", async (c) => {
 	}
 });
 
-// GET /api/channels — channel instances with connection state. Access tokens
-// never leave the Worker; clients only see hasToken.
-app.get("/api/channels", async (c) => {
+// GET /api/workspaces/:workspaceId/channels — channel instances with connection
+// state. Access tokens never leave the Worker; clients only see hasToken.
+app.get("/api/workspaces/:workspaceId/channels", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		return c.json({
 			channels: await listChannels(c.env, workspaceId, session.user.id),
 		});
@@ -982,6 +1002,42 @@ app.post("/api/workspaces/:workspaceId/meta-apps", async (c) => {
 	}
 });
 
+app.patch("/api/workspaces/:workspaceId/meta-apps/:metaAppId", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, MetaAppUpdateRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		return c.json({
+			metaApp: await updateMetaApp(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("metaAppId"),
+				decoded.value,
+				session.user.id,
+			),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.delete("/api/workspaces/:workspaceId/meta-apps/:metaAppId", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		await deleteMetaApp(
+			c.env,
+			c.req.param("workspaceId"),
+			c.req.param("metaAppId"),
+			session.user.id,
+		);
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
 app.post("/api/workspaces/:workspaceId/meta-oauth/start", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
@@ -1045,30 +1101,25 @@ app.get("/api/meta-oauth/callback", async (c) => {
 	const code = c.req.query("code");
 	if (!state || !code) return c.text("Facebook authorization failed", 400);
 	try {
-		const { callbackOrigin, sessionId } = await completeMetaOAuth(
-			c.env,
-			state,
-			code,
-		);
+		const { callbackOrigin, sessionId, workspaceId, inboxId } =
+			await completeMetaOAuth(c.env, state, code);
 		return c.redirect(
-			`${callbackOrigin}/setup/channel?metaOauthSession=${encodeURIComponent(sessionId)}`,
+			`${callbackOrigin}/setup/channel?metaOauthSession=${encodeURIComponent(sessionId)}&workspaceId=${encodeURIComponent(workspaceId)}&inboxId=${encodeURIComponent(inboxId)}`,
 		);
 	} catch {
 		return c.text("Facebook authorization failed", 400);
 	}
 });
 
-// POST /api/channels/:id/token — store a Page access token (dev-mode connect;
-// the production flow will be a Meta OAuth callback that lands here).
-app.post("/api/channels/:id/token", async (c) => {
+// POST /api/workspaces/:workspaceId/channels/:id/token — store a Page access
+// token (dev-mode connect; the production flow will be a Meta OAuth callback).
+app.post("/api/workspaces/:workspaceId/channels/:id/token", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const decoded = await decodeJsonBody(
 			c.req.raw,
 			ChannelConnectRequestSchema,
@@ -1088,17 +1139,34 @@ app.post("/api/channels/:id/token", async (c) => {
 	}
 });
 
-// POST /api/channels/:id/disconnect — clear credentials; outbound stops.
-app.post("/api/channels/:id/disconnect", async (c) => {
+// POST /api/workspaces/:workspaceId/channels/:id/disconnect — clear credentials; outbound stops.
+app.post("/api/workspaces/:workspaceId/channels/:id/disconnect", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await disconnectChannel(
+			c.env,
+			workspaceId,
+			c.req.param("id"),
 			session.user.id,
 		);
-		await disconnectChannel(
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+// DELETE keeps conversations but removes this Page from active routing/config.
+app.delete("/api/workspaces/:workspaceId/channels/:id", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await deleteFacebookChannel(
 			c.env,
 			workspaceId,
 			c.req.param("id"),
@@ -1117,11 +1185,6 @@ app.post("/api/channels/:id/disconnect", async (c) => {
 // bootstraps as owner, so single-tenant demos keep working).
 // ---------------------------------------------------------------------------
 
-async function defaultWorkspaceId(env: Env): Promise<string> {
-	const db = drizzle(env.DB);
-	const workspace = await getConfiguredWorkspace(db);
-	return workspace.id;
-}
 
 /**
  * A Messenger delivery identifies its Page in `entry[].id`. Resolve only the
@@ -1132,6 +1195,7 @@ async function verifyMessengerSignature(
 	env: Env,
 	rawBody: string,
 	signature: string | null | undefined,
+	metaAppId: string,
 ): Promise<boolean> {
 	let payload: unknown;
 	try {
@@ -1169,6 +1233,7 @@ async function verifyMessengerSignature(
 			and(
 				eq(channels.type, "facebook_page"),
 				eq(channels.status, "active"),
+				eq(channels.metaAppId, metaAppId),
 				inArray(channels.externalId, pageIds),
 			),
 		)
@@ -1197,167 +1262,6 @@ async function verifyMessengerSignature(
 	return verifyFacebookSignatureForSecrets(rawBody, signature, usableSecrets);
 }
 
-app.get("/api/inboxes", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
-		return c.json({
-			inboxes: await listInboxes(c.env, workspaceId, session.user.id),
-		});
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
-
-app.post("/api/inboxes", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
-		const decoded = await decodeJsonBody(c.req.raw, InboxCreateRequestSchema);
-		if (!decoded.ok)
-			return c.json({ success: false, error: decoded.error }, 400);
-		const inbox = await createInbox(
-			c.env,
-			workspaceId,
-			decoded.value,
-			session.user.id,
-		);
-		return c.json({ inbox }, 201);
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
-
-app.patch("/api/inboxes/:id", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
-		const decoded = await decodeJsonBody(c.req.raw, InboxUpdateRequestSchema);
-		if (!decoded.ok)
-			return c.json({ success: false, error: decoded.error }, 400);
-		const inbox = await updateInbox(
-			c.env,
-			workspaceId,
-			c.req.param("id"),
-			decoded.value,
-			session.user.id,
-		);
-		return c.json({ inbox });
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
-
-app.delete("/api/inboxes/:id", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
-		await deleteInbox(c.env, workspaceId, c.req.param("id"), session.user.id);
-		return c.json({ success: true });
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
-
-// Link a channel to an inbox; isDefault demotes the channel's other defaults.
-app.post("/api/inboxes/:id/channels", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
-		const decoded = await decodeJsonBody(c.req.raw, InboxChannelRequestSchema);
-		if (!decoded.ok)
-			return c.json({ success: false, error: decoded.error }, 400);
-		await linkChannelToInbox(
-			c.env,
-			workspaceId,
-			c.req.param("id"),
-			decoded.value,
-			session.user.id,
-		);
-		return c.json({ success: true });
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
-
-app.delete("/api/inboxes/:id/channels/:channelId", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
-		await unlinkChannelFromInbox(
-			c.env,
-			workspaceId,
-			c.req.param("id"),
-			c.req.param("channelId"),
-			session.user.id,
-		);
-		return c.json({ success: true });
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
-
-// Agent membership: join shares the queue with the agent; leave un-shares.
-// With {userId} in the body, admin member management (drawer) adds/removes
-// another workspace member instead of the session user.
-app.post("/api/inboxes/:id/members", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
-		const decoded = await decodeJsonBody(c.req.raw, InboxMemberRequestSchema);
-		if (!decoded.ok)
-			return c.json({ success: false, error: decoded.error }, 400);
-		const body = decoded.value;
-		if (body.userId) {
-			await addInboxMember(
-				c.env,
-				workspaceId,
-				c.req.param("id"),
-				body.userId,
-				session.user.id,
-			);
-		} else {
-			await joinInbox(c.env, workspaceId, c.req.param("id"), session.user.id);
-		}
-		return c.json({ success: true });
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
-
-app.delete("/api/inboxes/:id/members", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
-		const decoded = await decodeJsonBody(c.req.raw, InboxMemberRequestSchema);
-		if (!decoded.ok)
-			return c.json({ success: false, error: decoded.error }, 400);
-		const body = decoded.value;
-		if (body.userId) {
-			await removeInboxMember(
-				c.env,
-				workspaceId,
-				c.req.param("id"),
-				body.userId,
-				session.user.id,
-			);
-		} else {
-			await leaveInbox(c.env, workspaceId, c.req.param("id"), session.user.id);
-		}
-		return c.json({ success: true });
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
-
 // ---------------------------------------------------------------------------
 // WORKSPACE-SCOPED INBOX ROUTING + SIDEBAR (the Front-style surface)
 // Every route validates the session user belongs to the workspace; config
@@ -1365,18 +1269,7 @@ app.delete("/api/inboxes/:id/members", async (c) => {
 // trusted alone — every inner query re-checks workspace scoping.
 // ---------------------------------------------------------------------------
 
-// GET /api/workspaces — workspaces the session user belongs to (switcher).
-app.get("/api/workspaces", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		return c.json({
-			workspaces: await listWorkspacesForUser(c.env, session.user.id),
-		});
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
+// GET /api/workspaces and POST /api/workspaces are mounted from workspaceApi.
 
 // GET /api/workspaces/:workspaceId/sidebar — shaped sidebar data (sections,
 // inbox metadata, counts, permissions, effective preferences, stable ids).
@@ -1597,10 +1490,12 @@ app.get("/api/workspaces/:workspaceId/inboxes", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		return c.json({
 			inboxes: await listInboxes(
 				c.env,
-				c.req.param("workspaceId"),
+				workspaceId,
 				session.user.id,
 			),
 		});
@@ -1614,6 +1509,11 @@ app.post("/api/workspaces/:workspaceId/inboxes", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			c.req.param("workspaceId"),
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(c.req.raw, InboxCreateRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -1634,6 +1534,11 @@ app.patch("/api/workspaces/:workspaceId/inboxes/:inboxId", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			c.req.param("workspaceId"),
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(c.req.raw, InboxUpdateRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -1645,6 +1550,27 @@ app.patch("/api/workspaces/:workspaceId/inboxes/:inboxId", async (c) => {
 			session.user.id,
 		);
 		return c.json({ inbox });
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.delete("/api/workspaces/:workspaceId/inboxes/:inboxId", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			c.req.param("workspaceId"),
+			session.user.id,
+		);
+		await deleteInbox(
+			c.env,
+			c.req.param("workspaceId"),
+			c.req.param("inboxId"),
+			session.user.id,
+		);
+		return c.json({ success: true });
 	} catch (err) {
 		return manageError(c, err);
 	}
@@ -1669,12 +1595,15 @@ app.post("/api/workspaces/:workspaceId/inboxes/:inboxId/archive", async (c) => {
 });
 
 // POST /api/workspaces/:workspaceId/inboxes/:inboxId/channels — link (admin).
-app.post(
-	"/api/workspaces/:workspaceId/inboxes/:inboxId/channels",
-	async (c) => {
+app.post("/api/workspaces/:workspaceId/inboxes/:inboxId/channels", async (c) => {
 		const session = await getSession(c);
 		if (!session) return unauthorized(c);
 		try {
+			await requireWorkspaceAccess(
+				drizzle(c.env.DB),
+				c.req.param("workspaceId"),
+				session.user.id,
+			);
 			const decoded = await decodeJsonBody(
 				c.req.raw,
 				InboxChannelRequestSchema,
@@ -1696,12 +1625,15 @@ app.post(
 );
 
 // DELETE /api/workspaces/:workspaceId/inboxes/:inboxId/channels/:channelId
-app.delete(
-	"/api/workspaces/:workspaceId/inboxes/:inboxId/channels/:channelId",
-	async (c) => {
+app.delete("/api/workspaces/:workspaceId/inboxes/:inboxId/channels/:channelId", async (c) => {
 		const session = await getSession(c);
 		if (!session) return unauthorized(c);
 		try {
+			await requireWorkspaceAccess(
+				drizzle(c.env.DB),
+				c.req.param("workspaceId"),
+				session.user.id,
+			);
 			await unlinkChannelFromInbox(
 				c.env,
 				c.req.param("workspaceId"),
@@ -1848,14 +1780,12 @@ app.delete("/api/workspaces/:workspaceId/views/:viewId", async (c) => {
 // write + DO relay broadcast (conversation-updated pattern from ADR 0004).
 // ---------------------------------------------------------------------------
 
-app.get("/api/tags", async (c) => {
+app.get("/api/workspaces/:workspaceId/tags", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		return c.json({
 			tags: await listTags(c.env, workspaceId, session.user.id),
 		});
@@ -1864,14 +1794,12 @@ app.get("/api/tags", async (c) => {
 	}
 });
 
-app.post("/api/tags", async (c) => {
+app.post("/api/workspaces/:workspaceId/tags", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const decoded = await decodeJsonBody(c.req.raw, TagCreateRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -1887,14 +1815,12 @@ app.post("/api/tags", async (c) => {
 	}
 });
 
-app.patch("/api/tags/:id", async (c) => {
+app.patch("/api/workspaces/:workspaceId/tags/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const decoded = await decodeJsonBody(c.req.raw, TagUpdateRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -1911,14 +1837,12 @@ app.patch("/api/tags/:id", async (c) => {
 	}
 });
 
-app.delete("/api/tags/:id", async (c) => {
+app.delete("/api/workspaces/:workspaceId/tags/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		await deleteTag(c.env, workspaceId, c.req.param("id"), session.user.id);
 		return c.json({ success: true });
 	} catch (err) {
@@ -1928,12 +1852,13 @@ app.delete("/api/tags/:id", async (c) => {
 
 // Attach a tag to a conversation (D1 write + broadcast so open threads and
 // the list update in real time).
-app.post("/api/conversations/:id/tags", async (c) => {
+app.post("/api/workspaces/:workspaceId/conversations/:id/tags", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const access = await requireDefaultWorkspaceAccess(
+		const access = await requireWorkspaceAccess(
 			drizzle(c.env.DB),
+			c.req.param("workspaceId"),
 			session.user.id,
 		);
 		const { workspaceId } = access;
@@ -1999,12 +1924,13 @@ app.post("/api/conversations/:id/tags", async (c) => {
 });
 
 // Remove a tag from a conversation.
-app.delete("/api/conversations/:id/tags/:tagId", async (c) => {
+app.delete("/api/workspaces/:workspaceId/conversations/:id/tags/:tagId", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const access = await requireDefaultWorkspaceAccess(
+		const access = await requireWorkspaceAccess(
 			drizzle(c.env.DB),
+			c.req.param("workspaceId"),
 			session.user.id,
 		);
 		const { workspaceId } = access;
@@ -2060,11 +1986,12 @@ app.delete("/api/conversations/:id/tags/:tagId", async (c) => {
 // RULES (ADR 0009): management CRUD. Evaluation runs in ingest (rules.ts).
 // ---------------------------------------------------------------------------
 
-app.get("/api/rules", async (c) => {
+app.get("/api/workspaces/:workspaceId/rules", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		return c.json({
 			rules: await listRules(c.env, workspaceId, session.user.id),
 		});
@@ -2073,11 +2000,12 @@ app.get("/api/rules", async (c) => {
 	}
 });
 
-app.post("/api/rules", async (c) => {
+app.post("/api/workspaces/:workspaceId/rules", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const decoded = await decodeJsonBody(c.req.raw, RuleWriteRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -2095,11 +2023,12 @@ app.post("/api/rules", async (c) => {
 	}
 });
 
-app.patch("/api/rules/:id", async (c) => {
+app.patch("/api/workspaces/:workspaceId/rules/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const decoded = await decodeJsonBody(c.req.raw, RuleWriteRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -2123,11 +2052,12 @@ app.patch("/api/rules/:id", async (c) => {
 	}
 });
 
-app.delete("/api/rules/:id", async (c) => {
+app.delete("/api/workspaces/:workspaceId/rules/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const workspaceId = await defaultWorkspaceId(c.env);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		await deleteRule(c.env, workspaceId, c.req.param("id"), session.user.id);
 		return c.json({ success: true });
 	} catch (err) {
@@ -2139,14 +2069,12 @@ app.delete("/api/rules/:id", async (c) => {
 // CANNED REPLIES (used by the rule action 'send_canned_reply')
 // ---------------------------------------------------------------------------
 
-app.get("/api/canned-replies", async (c) => {
+app.get("/api/workspaces/:workspaceId/canned-replies", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		return c.json({
 			cannedReplies: await listCannedReplies(
 				c.env,
@@ -2159,14 +2087,12 @@ app.get("/api/canned-replies", async (c) => {
 	}
 });
 
-app.post("/api/canned-replies", async (c) => {
+app.post("/api/workspaces/:workspaceId/canned-replies", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const decoded = await decodeJsonBody(
 			c.req.raw,
 			CannedReplyWriteRequestSchema,
@@ -2185,14 +2111,12 @@ app.post("/api/canned-replies", async (c) => {
 	}
 });
 
-app.patch("/api/canned-replies/:id", async (c) => {
+app.patch("/api/workspaces/:workspaceId/canned-replies/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		const decoded = await decodeJsonBody(
 			c.req.raw,
 			CannedReplyWriteRequestSchema,
@@ -2212,14 +2136,12 @@ app.patch("/api/canned-replies/:id", async (c) => {
 	}
 });
 
-app.delete("/api/canned-replies/:id", async (c) => {
+app.delete("/api/workspaces/:workspaceId/canned-replies/:id", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(c.env.DB),
-			session.user.id,
-		);
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
 		await deleteCannedReply(
 			c.env,
 			workspaceId,
@@ -2232,25 +2154,40 @@ app.delete("/api/canned-replies/:id", async (c) => {
 	}
 });
 
-// Meta webhook verification handshake (GET).
-app.get("/webhooks/messenger", async (c) => {
+// Meta webhook verification is isolated per Meta App. The opaque App id makes
+// the GET handshake deterministic; only a SHA-256 token hash is retained in D1.
+app.get("/webhooks/messenger/:metaAppId", async (c) => {
 	if (!(await isInitialSetupComplete(c.env)))
 		return c.text("setup required", 503);
 	const verifyToken = c.req.query("hub.verify_token");
 	const challenge = c.req.query("hub.challenge");
-	if (verifyToken === c.env.MESSENGER_VERIFY_TOKEN && challenge) {
+	if (!verifyToken || !challenge) return c.text("forbidden", 403);
+	const match = await drizzle(c.env.DB)
+		.select({ webhookVerifyTokenHash: metaApps.webhookVerifyTokenHash })
+		.from(metaApps)
+		.where(eq(metaApps.id, c.req.param("metaAppId")))
+		.get();
+	if (
+		match?.webhookVerifyTokenHash ===
+		(await hashWebhookVerifyToken(verifyToken))
+	) {
 		return c.text(challenge);
 	}
 	return c.text("forbidden", 403);
 });
 
 // Meta webhook events (POST): verify signature → normalize → route to the DO.
-app.post("/webhooks/messenger", async (c) => {
+app.post("/webhooks/messenger/:metaAppId", async (c) => {
 	if (!(await isInitialSetupComplete(c.env)))
 		return c.text("setup required", 503);
 	const rawBody = await c.req.text();
 	const signature = c.req.header("X-Hub-Signature-256");
-	const ok = await verifyMessengerSignature(c.env, rawBody, signature);
+	const ok = await verifyMessengerSignature(
+		c.env,
+		rawBody,
+		signature,
+		c.req.param("metaAppId"),
+	);
 	if (!ok) {
 		return c.text("invalid signature", 403);
 	}
@@ -2312,8 +2249,12 @@ export default {
 async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 	const url = new URL(request.url);
 	const conversationId = url.searchParams.get("conversationId");
-	if (!conversationId) {
-		return new Response("missing conversationId", { status: 400 });
+	const workspaceId = url.searchParams.get("workspaceId");
+	if (!conversationId || !workspaceId) {
+		return new Response(
+			`missing ${!conversationId ? "conversationId" : "workspaceId"}`,
+			{ status: 400 },
+		);
 	}
 
 	// Authenticate: the Worker validates the session; the DO trusts it (ADR 0006).
@@ -2327,10 +2268,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 	// Authorize D1 workspace/mailbox ownership before resolving the globally
 	// derivable Durable Object name.
 	try {
-		const { workspaceId } = await requireDefaultWorkspaceAccess(
-			drizzle(env.DB),
-			agentId,
-		);
+		await requireWorkspaceAccess(drizzle(env.DB), workspaceId, agentId);
 		if (!(await getConversation(env, agentId, conversationId, workspaceId))) {
 			return new Response("not found", { status: 404 });
 		}

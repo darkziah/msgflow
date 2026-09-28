@@ -75,6 +75,8 @@ export interface Activity {
 // POST /api/conversations/:id/comments — author and timestamp are assigned
 // from the authenticated Worker session, never accepted from the client.
 export interface CreateCommentRequest {
+	/** Explicit workspace scope, validated against the authenticated membership. */
+	workspaceId: string;
 	text: string;
 	mentions?: string[];
 }
@@ -120,6 +122,8 @@ export interface ApiResponse {
 
 // POST /api/conversations/:id/messages
 export interface SendMessageRequest {
+	/** Explicit workspace scope, validated against the authenticated membership. */
+	workspaceId: string;
 	/** Server draft CAS revision; omitted means a new draft. */
 	draftRevision?: number;
 	text: string;
@@ -282,6 +286,8 @@ export type MessagesResponse = TimelineResponse;
 
 // POST /api/conversations/:id/read
 export interface MarkReadRequest {
+	/** Explicit workspace scope, validated against the authenticated membership. */
+	workspaceId: string;
 	lastReadSeq: number;
 }
 
@@ -289,6 +295,8 @@ export interface MarkReadRequest {
 // ADR 0004: write D1 first, then relay a conversation-updated broadcast
 // through the DO so open threads update in real time.
 export interface ConversationUpdateRequest {
+	/** Explicit workspace scope, validated against the authenticated membership. */
+	workspaceId: string;
 	status?: "open" | "archived";
 	/** User id, or null to unassign. */
 	assigneeId?: string | null;
@@ -477,6 +485,7 @@ export interface WorkspaceSummary {
 	name: string;
 	slug: string;
 	role: "owner" | "admin" | "member";
+	createdAt: string;
 }
 
 export interface TeamSummary {

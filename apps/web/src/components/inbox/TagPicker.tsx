@@ -16,36 +16,38 @@ import { TagChip } from "./TagChip";
  */
 export function TagPicker({
 	conversationId,
+	workspaceId,
 	tags,
 }: {
 	conversationId: string;
+	workspaceId: string;
 	tags: TagSummary[];
 }) {
 	const queryClient = useQueryClient();
 
 	const { data: tagsData } = useQuery({
-		queryKey: ["tags"],
-		queryFn: () => api.listTags(),
+		queryKey: ["tags", workspaceId],
+		queryFn: () => api.listTags(workspaceId),
 	});
 
 	const { mutate: addTag, isPending: adding } = useMutation({
 		mutationFn: (tagId: string) =>
-			api.addConversationTag(conversationId, tagId),
+			api.addConversationTag(workspaceId, conversationId, tagId),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["conversation", conversationId],
+				queryKey: ["conversation", workspaceId, conversationId],
 			});
-			queryClient.invalidateQueries({ queryKey: ["conversations"] });
+			queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
 		},
 	});
 	const { mutate: removeTag } = useMutation({
 		mutationFn: (tagId: string) =>
-			api.removeConversationTag(conversationId, tagId),
+			api.removeConversationTag(workspaceId, conversationId, tagId),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["conversation", conversationId],
+				queryKey: ["conversation", workspaceId, conversationId],
 			});
-			queryClient.invalidateQueries({ queryKey: ["conversations"] });
+			queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
 		},
 	});
 

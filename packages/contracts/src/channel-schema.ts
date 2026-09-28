@@ -23,7 +23,10 @@ export type ChannelConnectRequest = Schema.Schema.Type<
 /** Initial Messenger channel setup; the Worker derives ownership and status. */
 export const FacebookChannelCreateRequestSchema = Schema.Struct({
 	pageId: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
-	displayName: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
+	// OAuth supplies a Page name; manual token setup derives it from Graph.
+	displayName: Schema.optional(
+		Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
+	),
 	accessToken: ChannelAccessToken,
 	inboxId: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
 	metaAppId: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
@@ -41,6 +44,16 @@ export const MetaAppCreateRequestSchema = Schema.Struct({
 });
 
 export type MetaAppCreateRequest = Schema.Schema.Type<typeof MetaAppCreateRequestSchema>;
+
+/** App ID is immutable: changing it requires a new Meta App/dashboard setup. */
+export const MetaAppUpdateRequestSchema = Schema.Struct({
+	displayName: Schema.optional(
+		Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
+	),
+	appSecret: Schema.optional(ChannelAccessToken),
+});
+
+export type MetaAppUpdateRequest = Schema.Schema.Type<typeof MetaAppUpdateRequestSchema>;
 
 export const MetaOAuthStartRequestSchema = Schema.Struct({
 	metaAppId: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),

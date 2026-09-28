@@ -10,6 +10,7 @@ import type {
 	SidebarResponse,
 	SidebarSection,
 	SidebarTagItem,
+	WorkspaceCreateRequest,
 	WorkspaceSummary,
 } from "@msgflow/contracts";
 import {
@@ -34,6 +35,7 @@ import { Either, Schema } from "effect";
 import {
 	listUserWorkspaces,
 	requireWorkspaceAccess,
+	requireWorkspaceOwnerAccess,
 	userBelongsToWorkspace,
 } from "./access";
 import {
@@ -42,7 +44,7 @@ import {
 } from "./email-transport";
 import type { Env } from "./env";
 import { ManageError } from "./errors";
-
+import { provisionWorkspace } from "./workspace-provisioning";
 
 /**
  * Workspace-scoped inbox-routing surface: the left sidebar (Front-style),
@@ -737,6 +739,54 @@ export async function listWorkspacesForUser(
 	const rows = await listUserWorkspaces(db, userId);
 	if (rows.length > 0) return rows;
 	return [];
+}
+
+/**
+ * Creates a Workspace graph for an already-authenticated actor. Authorization
+ * is deliberately owned by the future workspace route; this service neither
+ * creates an account nor reads or changes first-use setup state.
+ */
+export async function createWorkspaceForActor(
+	env: Env,
+	actorUserId: string,
+	input: WorkspaceCreateRequest,
+): Promise<WorkspaceSummary & { teamId: string; inboxId: string }> {
+	try {
+		const provisioned = await provisionWorkspace(env, actorUserId, input);
+		return {
+			id: provisioned.workspaceId,
+			name: input.workspaceName,
+			slug: input.workspaceSlug,
+			role: "owner",
+			createdAt: provisioned.createdAt,
+			teamId: provisioned.teamId,
+			inboxId: provisioned.inboxId,
+		};
+	} catch (cause) {
+		const message = cause instanceof Error ? cause.message.toLowerCase() : "";
+		if (
+			message.includes("workspaces.slug") ||
+			message.includes("unique constraint failed: workspaces.slug")
+		) {
+			throw new ManageError("workspace slug is already in use", 409);
+		}
+		throw cause;
+	}
+}
+
+/** @deprecated Route-specific authorization wrapper retained for in-flight callers. */
+export async function createWorkspace(
+	env: Env,
+	sourceWorkspaceId: string,
+	actorUserId: string,
+	input: WorkspaceCreateRequest,
+): Promise<WorkspaceSummary & { teamId: string; inboxId: string }> {
+	await requireWorkspaceOwnerAccess(
+		drizzle(env.DB),
+		sourceWorkspaceId,
+		actorUserId,
+	);
+	return createWorkspaceForActor(env, actorUserId, input);
 }
 
 function decodeStoredJson<A, I>(

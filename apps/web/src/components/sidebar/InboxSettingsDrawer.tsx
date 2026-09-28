@@ -58,20 +58,17 @@ export function InboxSettingsDrawer({
 	);
 
 	const { data: channelsData } = useQuery({
-		queryKey: ["channels"],
-		queryFn: () => api.listChannels(),
+		queryKey: ["channels", workspaceId],
+		queryFn: () => api.listChannels(workspaceId),
 	});
-	const { data: usersData } = useQuery({
-		queryKey: ["users"],
-		queryFn: () => api.listUsers(),
-	});
+
 	const { data: teamsData } = useQuery({
 		queryKey: ["teams", workspaceId],
 		queryFn: () => api.listTeams(workspaceId),
 	});
 	const { data: rulesData } = useQuery({
-		queryKey: ["rules"],
-		queryFn: () => api.listRules(),
+		queryKey: ["rules", workspaceId],
+		queryFn: () => api.listRules(workspaceId),
 	});
 
 	// Form state (create defaults; edit hydrates from the fetched inbox).
@@ -83,7 +80,7 @@ export function InboxSettingsDrawer({
 	const [iconSearch, setIconSearch] = useState("");
 	const [teamId, setTeamId] = useState<string>("");
 	const [strategy, setStrategy] = useState<string>("manual");
-	const [memberToAdd, setMemberToAdd] = useState("");
+
 	const [channelToLink, setChannelToLink] = useState("");
 
 	useEffect(() => {
@@ -152,34 +149,6 @@ export function InboxSettingsDrawer({
 		}
 	}
 
-	async function addMember(userId: string) {
-		if (!inbox || !userId) return;
-		setError(null);
-		try {
-			await api.addInboxMember(inbox.id, userId);
-			setMemberToAdd("");
-			onChanged();
-			queryClient.invalidateQueries({
-				queryKey: ["workspace-inboxes", workspaceId],
-			});
-		} catch (err) {
-			setError(err instanceof Error ? err.message : "Add member failed.");
-		}
-	}
-
-	async function removeMember(userId: string) {
-		if (!inbox) return;
-		setError(null);
-		try {
-			await api.removeInboxMember(inbox.id, userId);
-			onChanged();
-			queryClient.invalidateQueries({
-				queryKey: ["workspace-inboxes", workspaceId],
-			});
-		} catch (err) {
-			setError(err instanceof Error ? err.message : "Remove member failed.");
-		}
-	}
 
 	async function linkChannel(channelId: string) {
 		if (!inbox || !channelId) return;
@@ -224,7 +193,6 @@ export function InboxSettingsDrawer({
 		}
 	}
 
-	const memberIds = new Set(inbox?.memberIds ?? []);
 	const linkedChannelIds = new Set(
 		inbox?.channels.map((link) => link.channelId) ?? [],
 	);
@@ -233,8 +201,7 @@ export function InboxSettingsDrawer({
 		channelsData?.channels.filter(
 			(channel) => !linkedChannelIds.has(channel.id),
 		) ?? [];
-	const memberOptions =
-		usersData?.users.filter((user) => !memberIds.has(user.id)) ?? [];
+
 	const filteredIcons = INBOX_ICON_KEYS.filter((key) =>
 		key.replace(/-/g, " ").includes(iconSearch.trim().toLowerCase()),
 	);
@@ -439,61 +406,6 @@ export function InboxSettingsDrawer({
 						</div>
 					</section>
 
-					{/* Members */}
-					{inbox ? (
-						<section>
-							<label
-								htmlFor="inbox-member-add"
-								className="text-xs font-bold uppercase tracking-wide text-gray-500"
-							>
-								Members
-							</label>
-							<div className="mt-1 flex gap-2">
-								<select
-									id="inbox-member-add"
-									value={memberToAdd}
-									onChange={(event) => setMemberToAdd(event.target.value)}
-									className="min-w-0 flex-1 rounded-md border px-2 py-1.5 text-sm"
-								>
-									<option value="">Add a member…</option>
-									{memberOptions.map((user) => (
-										<option key={user.id} value={user.id}>
-											{user.name || user.email}
-										</option>
-									))}
-								</select>
-								<Button
-									size="sm"
-									variant="outline"
-									disabled={!memberToAdd}
-									onClick={() => addMember(memberToAdd)}
-								>
-									Add
-								</Button>
-							</div>
-							<ul className="mt-2 space-y-1">
-								{usersData?.users
-									.filter((user) => memberIds.has(user.id))
-									.map((user) => (
-										<li
-											key={user.id}
-											className="flex items-center justify-between rounded border px-2 py-1 text-sm"
-										>
-											<span className="truncate">
-												{user.name || user.email}
-											</span>
-											<button
-												type="button"
-												onClick={() => removeMember(user.id)}
-												className="text-xs text-gray-400 hover:text-red-500"
-											>
-												Remove
-											</button>
-										</li>
-									))}
-							</ul>
-						</section>
-					) : null}
 
 					{/* Channels */}
 					{inbox ? (

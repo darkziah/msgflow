@@ -7,4 +7,5 @@ export * from "./mailbox-schema";
 export * from "./email-api-schema";
 export * from "./provider-schema";
 export * from "./setup-schema";
+export * from "./team-management-schema";
 export * from "./timeline-schema";

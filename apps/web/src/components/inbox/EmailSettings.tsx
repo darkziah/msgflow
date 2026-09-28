@@ -6,13 +6,12 @@ import { useSession } from "@/lib/auth-client";
 import { emailApi, type DomainVerification, type ProvisionInput, type ProvisionPreview } from "@/lib/email-api";
 
 const field = "rounded-md border px-3 py-1.5 text-sm";
-export function EmailSettings() {
+export function EmailSettings({ workspaceId }: { workspaceId: string }) {
  const { data: session } = useSession();
  const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: api.listWorkspaces });
- const [selected, setSelected] = useState("");
- const workspace = workspaces.data?.workspaces.find(w => w.id === selected) ?? workspaces.data?.workspaces[0];
+ const workspace = workspaces.data?.workspaces.find(w => w.id === workspaceId);
  return <section className="border-t pt-8 space-y-4"><h2 className="text-lg font-bold">Email domains and mailboxes</h2><p className="text-sm text-muted-foreground">Pending records do not change DNS. Owners manage lifecycle; admins can inspect readiness. Neither role grants access to private messages.</p>
- <select aria-label="Email workspace" value={workspace?.id ?? ""} onChange={e => setSelected(e.target.value)} className={field}>{workspaces.data?.workspaces.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>
+ <p className="text-sm font-medium">{workspace?.name ?? "Loading workspace…"}</p>
  {workspaces.isError ? <p role="alert">{workspaces.error.message}</p> : null}
  {workspace && session ? <WorkspaceEmail key={workspace.id} workspaceId={workspace.id} owner={workspace.role === "owner"} operator={workspace.role === "owner" || workspace.role === "admin"} userId={session.user.id} /> : null}</section>;
 }
@@ -20,7 +19,7 @@ function WorkspaceEmail({ workspaceId, owner, operator, userId }: { workspaceId:
  const cache = useQueryClient();
  const domains = useQuery({ queryKey: ["email-domains", workspaceId], queryFn: () => api.listEmailDomains(workspaceId) });
  const mailboxes = useQuery({ queryKey: ["mailboxes", workspaceId], queryFn: () => api.listMailboxes(workspaceId) });
- const users = useQuery({ queryKey: ["users"], queryFn: api.listUsers });
+ const users = useQuery({ queryKey: ["users", workspaceId], queryFn: () => api.listUsers(workspaceId) });
  const inboxes = useQuery({ queryKey: ["inboxes", workspaceId], queryFn: () => api.workspaceListInboxes(workspaceId) });
  const teams = useQuery({ queryKey: ["teams", workspaceId], queryFn: () => api.listTeams(workspaceId) });
  const [domain, setDomain] = useState("");

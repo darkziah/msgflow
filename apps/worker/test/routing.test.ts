@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { and, eq } from "drizzle-orm";
 import {
 	cannedReplies,
@@ -25,12 +26,15 @@ import {
 	createInbox,
 	createRule,
 	createTag,
+	deleteFacebookChannel,
+	deleteRule,
 	deleteTag,
 	disconnectChannel,
 	linkChannelToInbox,
 	listCannedReplies,
 	listChannels,
 	listInboxes,
+	listRules,
 	listTags,
 	reorderInboxes,
 	setDefaultInbox,
@@ -425,6 +429,16 @@ describe("legacy management workspace RBAC", () => {
 				updatedAt: now,
 			})
 			.run();
+		await insertRule(foreignWorkspaceId, "foreign-rule", 0, false, [], []);
+
+		// Every remaining management resource is constrained by the requested
+		// workspace, even when the actor also belongs to the foreign workspace.
+		expect(
+			(await listRules(ctx.env, workspaceId, ADMIN)).map((rule) => rule.id),
+		).not.toContain("foreign-rule");
+		await expect(
+			deleteRule(ctx.env, workspaceId, "foreign-rule", ADMIN),
+		).rejects.toMatchObject({ status: 404 });
 
 		await expect(
 			updateTag(ctx.env, workspaceId, foreignTag.id, { name: "Leaked" }, ADMIN),
@@ -476,6 +490,243 @@ describe("legacy management workspace RBAC", () => {
 	});
 });
 
+describe("workspace-scoped management route boundaries", () => {
+	test("registers every management route canonically and authorizes before resource access", () => {
+		const source = readFileSync(
+			new URL("../src/index.ts", import.meta.url),
+			"utf8",
+		);
+		const routes = [
+			[
+				"inbox list",
+				"get",
+				"/api/workspaces/:workspaceId/inboxes",
+				"listInboxes(",
+			],
+			[
+				"inbox create",
+				"post",
+				"/api/workspaces/:workspaceId/inboxes",
+				"createInbox(",
+			],
+			[
+				"inbox update",
+				"patch",
+				"/api/workspaces/:workspaceId/inboxes/:inboxId",
+				"updateInbox(",
+			],
+			[
+				"inbox delete",
+				"delete",
+				"/api/workspaces/:workspaceId/inboxes/:inboxId",
+				"deleteInbox(",
+			],
+			[
+				"inbox channel link",
+				"post",
+				"/api/workspaces/:workspaceId/inboxes/:inboxId/channels",
+				"linkChannelToInbox(",
+			],
+			[
+				"inbox channel unlink",
+				"delete",
+				"/api/workspaces/:workspaceId/inboxes/:inboxId/channels/:channelId",
+				"unlinkChannelFromInbox(",
+			],
+			[
+				"users",
+				"get",
+				"/api/workspaces/:workspaceId/users",
+				"const users = await db",
+			],
+			[
+				"channels",
+				"get",
+				"/api/workspaces/:workspaceId/channels",
+				"listChannels(",
+			],
+			[
+				"channel token",
+				"post",
+				"/api/workspaces/:workspaceId/channels/:id/token",
+				"connectChannelToken(",
+			],
+			[
+				"channel disconnect",
+				"post",
+				"/api/workspaces/:workspaceId/channels/:id/disconnect",
+				"disconnectChannel(",
+			],
+			[
+				"channel delete",
+				"delete",
+				"/api/workspaces/:workspaceId/channels/:id",
+				"deleteFacebookChannel(",
+			],
+			["tag list", "get", "/api/workspaces/:workspaceId/tags", "listTags("],
+			["tag create", "post", "/api/workspaces/:workspaceId/tags", "createTag("],
+			[
+				"tag update",
+				"patch",
+				"/api/workspaces/:workspaceId/tags/:id",
+				"updateTag(",
+			],
+			[
+				"tag delete",
+				"delete",
+				"/api/workspaces/:workspaceId/tags/:id",
+				"deleteTag(",
+			],
+			[
+				"conversation tag add",
+				"post",
+				"/api/workspaces/:workspaceId/conversations/:id/tags",
+				"getConversation(",
+			],
+			[
+				"conversation tag remove",
+				"delete",
+				"/api/workspaces/:workspaceId/conversations/:id/tags/:tagId",
+				"getConversation(",
+			],
+			["rule list", "get", "/api/workspaces/:workspaceId/rules", "listRules("],
+			[
+				"rule create",
+				"post",
+				"/api/workspaces/:workspaceId/rules",
+				"createRule(",
+			],
+			[
+				"rule update",
+				"patch",
+				"/api/workspaces/:workspaceId/rules/:id",
+				"updateRule(",
+			],
+			[
+				"rule delete",
+				"delete",
+				"/api/workspaces/:workspaceId/rules/:id",
+				"deleteRule(",
+			],
+			[
+				"canned reply list",
+				"get",
+				"/api/workspaces/:workspaceId/canned-replies",
+				"listCannedReplies(",
+			],
+			[
+				"canned reply create",
+				"post",
+				"/api/workspaces/:workspaceId/canned-replies",
+				"createCannedReply(",
+			],
+			[
+				"canned reply update",
+				"patch",
+				"/api/workspaces/:workspaceId/canned-replies/:id",
+				"updateCannedReply(",
+			],
+			[
+				"canned reply delete",
+				"delete",
+				"/api/workspaces/:workspaceId/canned-replies/:id",
+				"deleteCannedReply(",
+			],
+		] as const;
+
+		function extractRouteBlock(method: string, path: string): string {
+			const registration = `app.${method}("${path}", async (c) => {`;
+			const matches = [
+				...source.matchAll(new RegExp(escapeRegExp(registration), "g")),
+			];
+			expect(
+				matches,
+				`${method.toUpperCase()} ${path} registration`,
+			).toHaveLength(1);
+			const start = matches[0]?.index;
+			expect(start).toBeDefined();
+
+			const bodyStart = start + registration.length - 1;
+			let depth = 0;
+			let quote: "'" | '"' | "`" | null = null;
+			let lineComment = false;
+			let blockComment = false;
+			for (let index = bodyStart; index < source.length; index += 1) {
+				const char = source[index];
+				const next = source[index + 1];
+				if (lineComment) {
+					if (char === "\n") lineComment = false;
+					continue;
+				}
+				if (blockComment) {
+					if (char === "*" && next === "/") {
+						blockComment = false;
+						index += 1;
+					}
+					continue;
+				}
+				if (quote) {
+					if (char === "\\") {
+						index += 1;
+					} else if (char === quote) {
+						quote = null;
+					}
+					continue;
+				}
+				if (char === "/" && next === "/") {
+					lineComment = true;
+					index += 1;
+					continue;
+				}
+				if (char === "/" && next === "*") {
+					blockComment = true;
+					index += 1;
+					continue;
+				}
+				if (char === "'" || char === '"' || char === "`") {
+					quote = char;
+					continue;
+				}
+				if (char === "{") depth += 1;
+				if (char === "}" && --depth === 0)
+					return source.slice(start, index + 1);
+			}
+			throw new Error(`unterminated ${method.toUpperCase()} ${path} handler`);
+		}
+
+		for (const [name, method, path, resourceMarker] of routes) {
+			const handler = extractRouteBlock(method, path);
+			const authorization = handler.indexOf("requireWorkspaceAccess(");
+			const resourceAccess = handler.indexOf(resourceMarker);
+			expect(authorization, `${name} authorization`).toBeGreaterThanOrEqual(0);
+			expect(resourceAccess, `${name} resource access`).toBeGreaterThanOrEqual(
+				0,
+			);
+			expect(authorization, `${name} authorization order`).toBeLessThan(
+				resourceAccess,
+			);
+			if (name.startsWith("inbox")) {
+				expect(handler).toContain('c.req.param("workspaceId")');
+			}
+		}
+
+		for (const legacyRegistration of [
+			'app.get("/api/inboxes",',
+			'app.post("/api/inboxes",',
+			'app.patch("/api/inboxes/:id",',
+			'app.delete("/api/inboxes/:id",',
+			'app.post("/api/inboxes/:id/channels",',
+			'app.delete("/api/inboxes/:id/channels/:channelId",',
+		]) {
+			expect(source).not.toContain(legacyRegistration);
+		}
+	});
+});
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // ---------------------------------------------------------------------------
 // Inbox CRUD + name uniqueness + validation
 // ---------------------------------------------------------------------------
@@ -491,7 +742,7 @@ describe("inbox CRUD", () => {
 			return Response.json(
 				url.includes("subscribed_apps")
 					? { success: true }
-					: { id: "page-123" },
+					: { id: url.includes("page-456") ? "page-456" : "page-123" },
 			);
 		}) as typeof fetch;
 		const inbox = await createInbox(
@@ -562,6 +813,26 @@ describe("inbox CRUD", () => {
 				.bind(channel.id)
 				.first(),
 		).toEqual({ access_token: null, status: "disconnected" });
+		const secondChannel = await createFacebookChannel(
+			ctx.env,
+			workspaceId,
+			{
+				pageId: "page-456",
+				displayName: "Acme Sales",
+				accessToken: "second-page-token",
+				inboxId: inbox.id,
+				metaAppId: "meta-app",
+			},
+			ADMIN,
+		);
+		expect(secondChannel.externalId).toBe("page-456");
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT count(*) AS count FROM channels WHERE meta_app_id=?",
+			)
+				.bind("meta-app")
+				.first<{ count: number }>(),
+		).toEqual({ count: 2 });
 		await expect(
 			createFacebookChannel(
 				ctx.env,
@@ -576,6 +847,80 @@ describe("inbox CRUD", () => {
 				ADMIN,
 			),
 		).rejects.toMatchObject({ status: 409 });
+	});
+
+	test("reconnect revives a deleted Facebook Page in the same workspace", async () => {
+		const { workspaceId } = await setup();
+		ctx.env.CHANNEL_TOKEN_ENCRYPTION_KEY =
+			"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+		restoreFetch = globalThis.fetch;
+		globalThis.fetch = (async (input) =>
+			Response.json(
+				String(input).includes("subscribed_apps")
+					? { success: true }
+					: { id: "page-reconnect" },
+			)) as typeof fetch;
+		const inbox = await createInbox(
+			ctx.env,
+			workspaceId,
+			{ name: "Messenger" },
+			ADMIN,
+		);
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(metaApps)
+			.values({
+				id: "meta-app-reconnect",
+				workspaceId,
+				displayName: "Development App",
+				appId: "app-reconnect",
+				appSecret: "enc:v1:test",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		const original = await createFacebookChannel(
+			ctx.env,
+			workspaceId,
+			{
+				pageId: "page-reconnect",
+				accessToken: "first-token",
+				inboxId: inbox.id,
+				metaAppId: "meta-app-reconnect",
+			},
+			ADMIN,
+		);
+		await deleteFacebookChannel(ctx.env, workspaceId, original.id, ADMIN);
+		const reconnected = await createFacebookChannel(
+			ctx.env,
+			workspaceId,
+			{
+				pageId: "page-reconnect",
+				accessToken: "second-token",
+				inboxId: inbox.id,
+				metaAppId: "meta-app-reconnect",
+			},
+			ADMIN,
+		);
+		expect(reconnected.id).toBe(original.id);
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT status,access_token,meta_app_id FROM channels WHERE id=?",
+			)
+				.bind(original.id)
+				.first(),
+		).toMatchObject({
+			status: "active",
+			meta_app_id: "meta-app-reconnect",
+			access_token: expect.stringMatching(/^enc:v1:/),
+		});
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT count(*) AS count FROM inbox_channels WHERE channel_id=?",
+			)
+				.bind(original.id)
+				.first<{ count: number }>(),
+		).toEqual({ count: 1 });
 	});
 
 	test("admin creates an inbox with the full settings surface", async () => {

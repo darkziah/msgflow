@@ -93,7 +93,7 @@ export async function storePrivateEmailAttachment(
 		name: clean,
 		type: type as Attachment["type"],
 		size: bytes.length,
-		url: `/api/email-attachments/${encodeURIComponent(id)}`,
+		url: `/api/email-attachments/${encodeURIComponent(id)}?workspaceId=${encodeURIComponent(scope.workspaceId)}`,
 	};
 }
 async function authorizeScope(

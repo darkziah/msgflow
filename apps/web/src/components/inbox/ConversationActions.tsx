@@ -53,28 +53,30 @@ function snoozeTarget(kind: string): string {
 
 export function ConversationActions({
 	conversation,
+	workspaceId,
 }: {
 	conversation: ConversationSummary;
+	workspaceId: string;
 }) {
 	const queryClient = useQueryClient();
 	const { data: usersData } = useQuery({
-		queryKey: ["users"],
-		queryFn: () => api.listUsers(),
+		queryKey: ["users", workspaceId],
+		queryFn: () => api.listUsers(workspaceId),
 	});
 	const { data: inboxesData } = useQuery({
-		queryKey: ["inboxes"],
-		queryFn: () => api.listInboxes(),
+		queryKey: ["inboxes", workspaceId],
+		queryFn: () => api.workspaceListInboxes(workspaceId),
 	});
 	const { mutate: update, isPending } = useMutation({
-		mutationFn: (patch: ConversationUpdateRequest) =>
-			api.updateConversation(conversation.id, patch),
+		mutationFn: (patch: Omit<ConversationUpdateRequest, "workspaceId">) =>
+			api.updateConversation(conversation.id, { ...patch, workspaceId }),
 		onSuccess: (result) => {
 			queryClient.setQueryData(
-				["conversation", conversation.id],
+				["conversation", workspaceId, conversation.id],
 				result.conversation,
 			);
-			queryClient.invalidateQueries({ queryKey: ["conversations"] });
-			queryClient.invalidateQueries({ queryKey: ["sidebar"] });
+			queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
+			queryClient.invalidateQueries({ queryKey: ["sidebar", workspaceId] });
 		},
 	});
 	const assigneeName = usersData?.users.find(

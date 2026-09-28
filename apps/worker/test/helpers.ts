@@ -35,7 +35,7 @@ export interface TestCtx {
 }
 
 export async function createTestDb(
-	options: { script?: string } = {},
+	options: { script?: string; throughMigration?: string } = {},
 ): Promise<TestCtx> {
 	// Miniflare v5 validates the new workers[] shape; the exported v4→v5
 	// converter keeps the classic script/modules/d1Databases form readable.
@@ -59,7 +59,7 @@ export async function createTestDb(
 	const d1 = await mf.getD1Database("DB");
 	const attachments = await mf.getR2Bucket("ATTACHMENTS");
 	const emailArchive = await mf.getR2Bucket("EMAIL_ARCHIVE");
-	await applyMigrations(d1);
+	await applyMigrations(d1, { throughMigration: options.throughMigration });
 	const db = drizzle(d1 as unknown as D1Database);
 	const activityRequests: unknown[] = [];
 	const conversationDo = {
@@ -89,11 +89,16 @@ export async function createTestDb(
 	};
 }
 
-async function applyMigrations(d1: D1Database): Promise<void> {
+export async function applyMigrations(
+	d1: D1Database,
+	options: { fromMigration?: string; throughMigration?: string } = {},
+): Promise<void> {
 	const files = readdirSync(MIGRATIONS_DIR)
 		.filter((name) => /^\d{4}_.+\.sql$/.test(name))
 		.sort();
 	for (const file of files) {
+		if (options.fromMigration && file < options.fromMigration) continue;
+		if (options.throughMigration && file > options.throughMigration) continue;
 		const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
 		for (const statement of sql.split("--> statement-breakpoint")) {
 			const trimmed = statement.trim();

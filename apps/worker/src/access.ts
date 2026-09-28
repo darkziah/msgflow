@@ -1,7 +1,7 @@
+import type { WorkspaceSummary } from "@msgflow/contracts";
+import { user, workspaceMembers, workspaces } from "@msgflow/db";
 import { and, asc, eq } from "drizzle-orm";
 import type { drizzle } from "drizzle-orm/d1";
-import { user, workspaceMembers, workspaces } from "@msgflow/db";
-import type { WorkspaceSummary } from "@msgflow/contracts";
 import { ManageError } from "./errors";
 
 /**
@@ -103,6 +103,33 @@ export async function requireOwnerAccess(
 	return access;
 }
 
+/** Workspace creation is reserved for a verified Owner, not an Administrator. */
+export async function requireWorkspaceOwnerAccess(
+	db: ReturnType<typeof drizzle>,
+	workspaceId: string,
+	userId: string,
+): Promise<WorkspaceAccess> {
+	const access = await requireWorkspaceAccess(db, workspaceId, userId);
+	if (access.role !== "owner") {
+		throw new ManageError(
+			"workspace owner role is required for this action",
+			403,
+		);
+	}
+	const actor = await db
+		.select({ emailVerified: user.emailVerified })
+		.from(user)
+		.where(eq(user.id, userId))
+		.get();
+	if (!actor?.emailVerified) {
+		throw new ManageError(
+			"a verified recovery email is required for this action",
+			403,
+		);
+	}
+	return access;
+}
+
 /** Shared-inbox configuration changes require owner/admin. */
 export async function requireAdminAccess(
 	db: ReturnType<typeof drizzle>,
@@ -130,16 +157,19 @@ export async function listUserWorkspaces(
 			name: workspaces.name,
 			slug: workspaces.slug,
 			role: workspaceMembers.role,
+			createdAt: workspaces.createdAt,
 		})
 		.from(workspaceMembers)
 		.innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
 		.where(eq(workspaceMembers.userId, userId))
+		.orderBy(asc(workspaces.createdAt), asc(workspaces.id))
 		.all();
 	return rows.map((row) => ({
 		id: row.id,
 		name: row.name,
 		slug: row.slug,
 		role: row.role,
+		createdAt: row.createdAt,
 	}));
 }
 
@@ -160,25 +190,4 @@ export async function userBelongsToWorkspace(
 		)
 		.get();
 	return !!row;
-}
-
-/** Resolve the legacy default workspace and require membership before access. */
-export async function requireDefaultWorkspaceAccess(
-	db: ReturnType<typeof drizzle>,
-	userId: string,
-): Promise<WorkspaceAccess> {
-	// Legacy endpoints choose an existing membership, never create a workspace
-	// as a read side effect. First-use setup may use a non-default slug.
-	const memberships = await db
-		.select({ id: workspaces.id, slug: workspaces.slug })
-		.from(workspaceMembers)
-		.innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
-		.where(eq(workspaceMembers.userId, userId))
-		.orderBy(asc(workspaces.createdAt), asc(workspaces.id))
-		.all();
-	const workspace =
-		memberships.find((row) => row.slug === "default") ?? memberships[0];
-	if (!workspace)
-		throw new ManageError("you are not a member of this workspace", 403);
-	return requireWorkspaceAccess(db, workspace.id, userId);
 }

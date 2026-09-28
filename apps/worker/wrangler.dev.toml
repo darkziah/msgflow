@@ -1,0 +1,52 @@
+# Isolated pre-production deployment. Do not point this configuration at
+# msgflow.yeheyremit.jp or production resources.
+name = "messageflow-dev"
+account_id = "2b264b86e8b917f95fc97400900af720"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+# Wrangler manages this Email Routing catch-all on every deployment. The
+# Worker rejects recipients without an enabled MsgFlow mailbox.
+addresses = ["*@messageflow.dev"]
+
+[assets]
+directory = "../web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/health", "/webhooks/*", "/ws"]
+
+[observability]
+enabled = true
+
+[vars]
+ATTACHMENT_PUBLIC_BASE_URL = "https://attachments.messageflow.dev"
+AUTH_EMAIL_FROM = "auth@messageflow.dev"
+BETTER_AUTH_URL = "https://messageflow.dev"
+BETTER_AUTH_TRUSTED_ORIGINS = "https://messageflow.dev"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "messageflow-dev"
+database_id = "cae87ab7-d564-40b5-a320-25487aeb492d"
+
+[[durable_objects.bindings]]
+name = "CONVERSATION_DO"
+class_name = "ConversationDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ConversationDO"]
+
+[[send_email]]
+name = "EMAIL"
+
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "messageflow-dev-attachments"
+
+[[r2_buckets]]
+binding = "EMAIL_ARCHIVE"
+bucket_name = "messageflow-dev-email-archive"
+
+[triggers]
+crons = ["* * * * *"]

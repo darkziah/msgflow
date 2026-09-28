@@ -16,6 +16,18 @@ const WorkspaceSlug = Schema.String.pipe(
 	Schema.pattern(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/),
 );
 
+/** Public body for an Owner-led Workspace creation request. */
+export const WorkspaceCreateRequestSchema = Schema.Struct({
+	workspaceName: Name,
+	workspaceSlug: WorkspaceSlug,
+	initialTeamName: Name,
+	initialInboxName: Name,
+});
+
+export type WorkspaceCreateRequest = Schema.Schema.Type<
+	typeof WorkspaceCreateRequestSchema
+>;
+
 /** Public body for the one-time, first-use Workspace Owner setup route. */
 export const OwnerSetupRequestSchema = Schema.Struct({
 	email: Email,

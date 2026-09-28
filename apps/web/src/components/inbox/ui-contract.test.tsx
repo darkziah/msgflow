@@ -42,7 +42,7 @@ vi.mock("@/lib/api", () => ({
 		getConversation: vi.fn(),
 		getMessages: vi.fn(),
 		listConversations: vi.fn(),
-		listInboxes: vi.fn(),
+		workspaceListInboxes: vi.fn(),
 		listTags: vi.fn(),
 		listUsers: vi.fn(),
 		listWorkspaces: vi.fn(),
@@ -146,7 +146,7 @@ describe("inbox UI contracts", () => {
 				{ id: "user_123", name: "Morgan Lee", email: "morgan@example.com" },
 			],
 		});
-		vi.mocked(api.listInboxes).mockResolvedValue({
+		vi.mocked(api.workspaceListInboxes).mockResolvedValue({
 			inboxes: [
 				{
 					id: "inbox_support",
@@ -178,6 +178,7 @@ describe("inbox UI contracts", () => {
 					name: "Support",
 					slug: "support",
 					role: "member",
+					createdAt: "2026-09-25T12:00:00.000Z",
 				},
 			],
 		});
@@ -228,7 +229,7 @@ describe("inbox UI contracts", () => {
 	});
 
 	it("archives an open conversation through the API", async () => {
-		renderWithQueryClient(<ConversationActions conversation={conversation} />);
+		renderWithQueryClient(<ConversationActions conversation={conversation} workspaceId="workspace-1" />);
 
 		fireEvent.click(
 			screen.getByRole("button", { name: "Archive conversation" }),
@@ -237,6 +238,7 @@ describe("inbox UI contracts", () => {
 		await waitFor(() => {
 			expect(api.updateConversation).toHaveBeenCalledWith(conversation.id, {
 				status: "archived",
+				workspaceId: "workspace-1",
 			});
 		});
 	});
@@ -245,6 +247,7 @@ describe("inbox UI contracts", () => {
 		renderWithQueryClient(
 			<ConversationActions
 				conversation={{ ...conversation, status: "archived" }}
+				workspaceId="workspace-1"
 			/>,
 		);
 
@@ -255,12 +258,13 @@ describe("inbox UI contracts", () => {
 		await waitFor(() => {
 			expect(api.updateConversation).toHaveBeenCalledWith(conversation.id, {
 				status: "open",
+				workspaceId: "workspace-1",
 			});
 		});
 	});
 
 	it("keeps detail actions compact and exposes their purpose", () => {
-		renderWithQueryClient(<ConversationActions conversation={conversation} />);
+		renderWithQueryClient(<ConversationActions conversation={conversation} workspaceId="workspace-1" />);
 
 		expect(
 			screen.getByRole("button", { name: "Archive conversation" }),
@@ -280,7 +284,7 @@ describe("inbox UI contracts", () => {
 		vi.mocked(api.getConversation).mockReturnValue(new Promise(() => {}));
 		vi.mocked(api.getMessages).mockReturnValue(new Promise(() => {}));
 		renderWithQueryClient(
-			<ConversationThread conversationId={conversation.id} />,
+			<ConversationThread conversationId={conversation.id} workspaceId="workspace-1" />,
 		);
 		expect(screen.getByLabelText("Loading conversation")).toBeInTheDocument();
 	});
@@ -293,7 +297,7 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread conversationId={conversation.id} />,
+			<ConversationThread conversationId={conversation.id} workspaceId="workspace-1" />,
 		);
 
 		expect(
@@ -329,7 +333,7 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread conversationId={conversation.id} />,
+			<ConversationThread conversationId={conversation.id} workspaceId="workspace-1" />,
 		);
 
 		const earlierEmail = await screen.findByText("Earlier email body");
@@ -355,7 +359,7 @@ describe("inbox UI contracts", () => {
 			sent: true,
 			message: {},
 		} as never);
-		renderWithQueryClient(<Composer conversationId={conversation.id} />);
+		renderWithQueryClient(<Composer conversationId={conversation.id} workspaceId="workspace-1" />);
 
 		const send = screen.getByRole("button", { name: "Send" });
 		expect(send).toBeDisabled();
@@ -367,6 +371,7 @@ describe("inbox UI contracts", () => {
 		await waitFor(() => {
 			expect(api.sendMessage).toHaveBeenCalledWith(
 				conversation.id,
+				"workspace-1",
 				expect.objectContaining({ text: "I can help with that." }),
 			);
 		});
@@ -374,7 +379,7 @@ describe("inbox UI contracts", () => {
 
 	it("prevents a second send while the first request is pending", async () => {
 		vi.mocked(api.sendMessage).mockImplementation(() => new Promise(() => {}));
-		renderWithQueryClient(<Composer conversationId={conversation.id} />);
+		renderWithQueryClient(<Composer conversationId={conversation.id} workspaceId="workspace-1" />);
 
 		fireEvent.change(screen.getByRole("textbox", { name: "Reply text" }), {
 			target: { value: "I can help with that." },
@@ -386,7 +391,7 @@ describe("inbox UI contracts", () => {
 	});
 
 	it("uses a focusable attachment button to open the hidden file input", () => {
-		renderWithQueryClient(<Composer conversationId={conversation.id} />);
+		renderWithQueryClient(<Composer conversationId={conversation.id} workspaceId="workspace-1" />);
 
 		const input = document.querySelector<HTMLInputElement>('input[type="file"]');
 		if (!input) throw new Error("Expected attachment input");
@@ -405,7 +410,7 @@ describe("inbox UI contracts", () => {
 			tags: [...conversation.tags, availableTag],
 		});
 		renderWithQueryClient(
-			<TagPicker conversationId={conversation.id} tags={conversation.tags} />,
+			<TagPicker conversationId={conversation.id} workspaceId="workspace-1" tags={conversation.tags} />,
 		);
 
 		await waitFor(() => expect(api.listTags).toHaveBeenCalled());
@@ -416,6 +421,7 @@ describe("inbox UI contracts", () => {
 		fireEvent.click(screen.getByRole("button", { name: "Urgent" }));
 		await waitFor(() => {
 			expect(api.addConversationTag).toHaveBeenCalledWith(
+				"workspace-1",
 				conversation.id,
 				availableTag.id,
 			);
@@ -424,6 +430,7 @@ describe("inbox UI contracts", () => {
 		fireEvent.click(screen.getByRole("button", { name: "Remove tag Billing" }));
 		await waitFor(() => {
 			expect(api.removeConversationTag).toHaveBeenCalledWith(
+				"workspace-1",
 				conversation.id,
 				"tag_billing",
 			);
@@ -431,7 +438,7 @@ describe("inbox UI contracts", () => {
 	});
 
 	it("uses exclusive toggle semantics for Reply and Comment", () => {
-		renderWithQueryClient(<Composer conversationId={conversation.id} />);
+		renderWithQueryClient(<Composer conversationId={conversation.id} workspaceId="workspace-1" />);
 
 		const reply = screen.getByRole("radio", { name: "Reply" });
 		const comment = screen.getByRole("radio", { name: "Comment" });
@@ -448,12 +455,14 @@ describe("inbox UI contracts", () => {
 
 	it("disables email sending when the required email context is absent", async () => {
 		renderWithQueryClient(
-			<Composer conversationId={conversation.id} showSubject />,
+			<Composer conversationId={conversation.id} workspaceId="workspace-1" showSubject />,
 		);
 
 		const reply = await screen.findByRole("textbox", { name: "Reply text" });
 		fireEvent.change(reply, { target: { value: "I can help with that." } });
 		expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+		expect(emailApi.context).toHaveBeenCalledWith(conversation.id, "workspace-1");
+		expect(emailApi.getDraft).toHaveBeenCalledWith(conversation.id, "workspace-1");
 	});
 
 	it("opens the activity dialog with its accessible name", async () => {
@@ -464,7 +473,7 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread conversationId={conversation.id} />,
+			<ConversationThread conversationId={conversation.id} workspaceId="workspace-1" />,
 		);
 
 		fireEvent.click(await screen.findByRole("button", { name: "Activity" }));
@@ -475,7 +484,7 @@ describe("inbox UI contracts", () => {
 
 	it("submits an entered search query only on Enter", () => {
 		const onChange = vi.fn();
-		renderWithQueryClient(<SearchBar filters={{}} onChange={onChange} />);
+		renderWithQueryClient(<SearchBar filters={{}} workspaceId="workspace-1" onChange={onChange} />);
 
 		const input = screen.getByPlaceholderText("Search conversations… (Enter)");
 		fireEvent.change(input, { target: { value: " invoice  " } });
@@ -491,6 +500,7 @@ describe("inbox UI contracts", () => {
 		renderWithQueryClient(
 			<SearchBar
 				filters={{ channel: "email", q: "invoice" }}
+				workspaceId="workspace-1"
 				onChange={onChange}
 			/>,
 		);
@@ -505,6 +515,7 @@ describe("inbox UI contracts", () => {
 		renderWithQueryClient(
 			<SearchBar
 				filters={{ channel: "email", q: "invoice" }}
+				workspaceId="workspace-1"
 				onChange={onChange}
 			/>,
 		);

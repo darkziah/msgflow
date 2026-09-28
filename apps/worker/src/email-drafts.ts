@@ -1,10 +1,10 @@
-import { SendMessageRequestSchema } from "@msgflow/contracts";
+import { EmailDraftRequestSchema } from "@msgflow/contracts";
 import { Either, Schema } from "effect";
 import type { Env } from "./env";
 import { ManageError } from "./errors";
 import { canReadConversation } from "./conversation-permissions";
 
-export type EmailDraft = Schema.Schema.Type<typeof SendMessageRequestSchema>;
+export type EmailDraft = Schema.Schema.Type<typeof EmailDraftRequestSchema>;
 
 async function authorize(
 	env: Env,
@@ -30,7 +30,7 @@ export async function readEmailDraft(
 		.first<{ payload_json: string; revision: number }>();
 	if (!row) return null;
 	try {
-		const decoded = Schema.decodeUnknownEither(SendMessageRequestSchema)(
+		const decoded = Schema.decodeUnknownEither(EmailDraftRequestSchema)(
 			JSON.parse(row.payload_json),
 		);
 		return Either.isRight(decoded)
@@ -49,7 +49,7 @@ export async function saveEmailDraft(
 	input: EmailDraft,
 ): Promise<EmailDraft> {
 	await authorize(env, workspaceId, conversationId, userId);
-	const decoded = Schema.decodeUnknownEither(SendMessageRequestSchema)(input);
+	const decoded = Schema.decodeUnknownEither(EmailDraftRequestSchema)(input);
 	if (Either.isLeft(decoded)) throw new ManageError("invalid draft", 400);
 	const { draftRevision = 0, ...body } = decoded.right;
 	const payload = JSON.stringify(body);

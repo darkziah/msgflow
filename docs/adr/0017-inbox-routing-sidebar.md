@@ -58,14 +58,22 @@ append. The DO's own providerMessageId dedup remains the backstop for messages.
 
 ### Workspace-scoped API + access model
 
+**Supersession note (ADR 0024):** The lazy first-accessor owner bootstrap and
+fresh-signup default-Workspace claim in this section are superseded. They must
+not be implemented or used; ADR 0024 requires an explicit authorized Workspace
+for backend operations. The remaining route scoping and role requirements below
+remain accepted.
+
 New routes under `/api/workspaces/:workspaceId/*` (sidebar, inboxes CRUD,
 archive, channel links, default-inbox, reorder, sidebar-preferences, teams,
 views). Access: the session user must be a `workspace_members` row; a
 workspace with zero members bootstraps its first accessor as owner (keeps the
-lazy single-tenant 'default' workspace working). Inbox/rules configuration
-requires owner/admin; reads require membership. `GET /api/workspaces` claims
-the default workspace for a fresh signup so the client always has a workspace
-id (the bootstrap otherwise only runs on workspace-scoped calls).
+lazy single-tenant 'default' workspace working) **[superseded by ADR 0024]**.
+Inbox/rules configuration requires owner/admin; reads require membership.
+`GET /api/workspaces` claims the default workspace for a fresh signup so the
+client always has a workspace id **[superseded by ADR 0024]**. Initial setup is
+instead the singleton provisioning path for the initial Owner and Workspace;
+later Workspaces are created through the explicit authorized product flow.
 
 ### Sidebar
 
@@ -92,5 +100,6 @@ keys are validated separately from item ids — and never touch shared routing.
   stop_processing / skipped logging, and workspace permission boundaries on a
   real Miniflare D1 with the full migration chain.
 - Integration coverage lives in `bun run smoke-routing` (requires a running
-  dev worker on a fresh local D1 — the bootstrap makes the first signup the
-  owner, so a stale dev DB 403s new users).
+  dev worker with initial setup complete and an explicitly provisioned,
+  authorized Workspace; stale local setup state or missing membership can
+  still 403 requests).

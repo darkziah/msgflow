@@ -11,16 +11,19 @@ import {
 } from "@/lib/email-admin-api";
 
 const field = "rounded-md border px-3 py-1.5 text-sm";
-export function EmailAdmin() {
+export function EmailAdmin({
+	workspaceId,
+	showSharedMailboxCreation = false,
+}: {
+	workspaceId: string;
+	showSharedMailboxCreation?: boolean;
+}) {
 	const { data: session } = useSession();
 	const workspaces = useQuery({
 		queryKey: ["workspaces"],
 		queryFn: api.listWorkspaces,
 	});
-	const [selected, setSelected] = useState("");
-	const workspace =
-		workspaces.data?.workspaces.find((w) => w.id === selected) ??
-		workspaces.data?.workspaces[0];
+	const workspace = workspaces.data?.workspaces.find((w) => w.id === workspaceId);
 	return (
 		<section className="border-t pt-8 space-y-4">
 			<h2 className="text-lg font-bold">Email domains and mailboxes</h2>
@@ -28,18 +31,7 @@ export function EmailAdmin() {
 				Pending records do not change DNS. Owners manage lifecycle; admins can
 				inspect readiness. Neither role grants access to private messages.
 			</p>
-			<select
-				aria-label="Email workspace"
-				value={workspace?.id ?? ""}
-				onChange={(e) => setSelected(e.target.value)}
-				className={field}
-			>
-				{workspaces.data?.workspaces.map((w) => (
-					<option key={w.id} value={w.id}>
-						{w.name}
-					</option>
-				))}
-			</select>
+			<p className="text-sm font-medium">{workspace?.name ?? "Loading workspace…"}</p>
 			{workspaces.isError ? (
 				<p role="alert">{workspaces.error.message}</p>
 			) : null}
@@ -50,6 +42,7 @@ export function EmailAdmin() {
 					owner={workspace.role === "owner"}
 					operator={workspace.role === "owner" || workspace.role === "admin"}
 					userId={session.user.id}
+					showSharedMailboxCreation={showSharedMailboxCreation}
 				/>
 			) : null}
 		</section>
@@ -60,11 +53,13 @@ function WorkspaceEmail({
 	owner,
 	operator,
 	userId,
+	showSharedMailboxCreation,
 }: {
 	workspaceId: string;
 	owner: boolean;
 	operator: boolean;
 	userId: string;
+	showSharedMailboxCreation: boolean;
 }) {
 	const cache = useQueryClient();
 	const domains = useQuery({
@@ -76,8 +71,8 @@ function WorkspaceEmail({
 		queryFn: () => api.listMailboxes(workspaceId),
 	});
 	const defaultUsers = useQuery({
-		queryKey: ["users"],
-		queryFn: api.listUsers,
+		queryKey: ["users", workspaceId],
+		queryFn: () => api.listUsers(workspaceId),
 	});
 	const members = useQuery({
 		queryKey: ["email-members", workspaceId, domains.data?.emailDomains[0]?.id],
@@ -147,7 +142,6 @@ function WorkspaceEmail({
 					Cannot load workspace Agents: {members.error.message}
 				</p>
 			) : null}
-			{owner ? <Invitation workspaceId={workspaceId} /> : null}
 			{owner ? (
 				<form
 					className="flex gap-2"
@@ -231,7 +225,8 @@ function WorkspaceEmail({
 							Assign private mailbox
 						</Button>
 					</div>
-					<div className="flex flex-wrap gap-2">
+					{showSharedMailboxCreation ? (
+						<div className="flex flex-wrap gap-2">
 						<input
 							aria-label="Shared local part"
 							className={field}
@@ -282,7 +277,8 @@ function WorkspaceEmail({
 						>
 							Create shared mailbox
 						</Button>
-					</div>
+						</div>
+					) : null}
 				</div>
 			) : null}
 			{mailboxes.data?.mailboxes.map((m) => (
@@ -997,85 +993,6 @@ function Operations({
 					</p>
 				) : null}
 			</div>
-		</details>
-	);
-}
-function Invitation({ workspaceId }: { workspaceId: string }) {
-	const [email, setEmail] = useState("");
-	const [username, setUsername] = useState("");
-	const invite = useMutation({
-		mutationFn: () =>
-			emailApi.invite(workspaceId, email.trim(), username.trim()),
-	});
-	return (
-		<details className="rounded-lg border p-4">
-			<summary className="font-semibold">Invite an Agent</summary>
-			<form
-				className="mt-3 space-y-3"
-				onSubmit={(e) => {
-					e.preventDefault();
-					invite.mutate();
-				}}
-			>
-				<p className="text-sm">
-					A verified Workspace Owner or Administrator reserves the Agent's
-					immutable username and recovery email. Membership does not
-					automatically provision a mailbox.
-				</p>
-				<label className="block text-sm">
-					Recovery email{" "}
-					<input
-						type="email"
-						required
-						className={field}
-						value={email}
-						onChange={(e) => setEmail(e.target.value)}
-					/>
-				</label>
-				<label className="block text-sm">
-					Reserved immutable username
-					<input
-						required
-						minLength={3}
-						maxLength={30}
-						className={field}
-						value={username}
-						onChange={(e) => setUsername(e.target.value)}
-					/>
-				</label>
-				<Button
-					size="sm"
-					disabled={invite.isPending || !email.trim() || !username.trim()}
-				>
-					Create invitation
-				</Button>
-			</form>
-			{invite.data ? (
-				<div role="status" className="mt-3 space-y-2 text-sm">
-					<p>
-						{invite.data.data.delivery === "email_sent"
-							? "Invitation email sent."
-							: invite.data.data.delivery === "email_delivery_failed"
-								? "Email delivery failed. Share the link securely instead."
-								: "Email not sent. Share this link securely."}{" "}
-						Expires {new Date(invite.data.data.expiresAt).toLocaleString()}.
-					</p>
-					<label className="block">
-						Invitation link (sensitive)
-						<input
-							readOnly
-							className={`${field} w-full`}
-							value={invite.data.data.invitationUrl}
-							onFocus={(e) => e.target.select()}
-						/>
-					</label>
-				</div>
-			) : null}
-			{invite.isError ? (
-				<p role="alert" className="text-red-600">
-					{invite.error.message}
-				</p>
-			) : null}
 		</details>
 	);
 }

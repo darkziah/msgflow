@@ -6,6 +6,7 @@ import {
 } from "./agent-onboarding";
 import { RESERVED_PRIVATE_LOCAL_PARTS } from "./email-address";
 import type { Env } from "./env";
+import { provisionWorkspace } from "./workspace-provisioning";
 
 export class OwnerSetupError extends Error {
 	public readonly status: 400 | 409 | 500;
@@ -124,51 +125,28 @@ export async function setupInitialOwner(
 		);
 	}
 
-	const workspaceId = crypto.randomUUID();
-	const teamId = crypto.randomUUID();
-	const inboxId = crypto.randomUUID();
 	try {
 		// D1 batch is transactional: no partially configured workspace can become
 		// visible. If D1 fails, the retained claim + account make the failure
 		// inspectable rather than allowing another caller to seize ownership.
-		await env.DB.batch([
-			env.DB.prepare(
-				"UPDATE workspace_setup_claim SET user_id = ? WHERE id = 1",
-			).bind(userId),
-			env.DB.prepare(
-				"INSERT INTO workspaces (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-			).bind(workspaceId, input.workspaceName, input.workspaceSlug, now, now),
-			env.DB.prepare(
-				"INSERT INTO workspace_members (id, workspace_id, user_id, role, created_at) VALUES (?, ?, ?, 'owner', ?)",
-			).bind(crypto.randomUUID(), workspaceId, userId, now),
-			env.DB.prepare(
-				"INSERT INTO teams (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
-			).bind(teamId, workspaceId, input.initialTeamName, now),
-			env.DB.prepare(
-				"INSERT INTO team_members (id, team_id, user_id, role, created_at) VALUES (?, ?, ?, 'admin', ?)",
-			).bind(crypto.randomUUID(), teamId, userId, now),
-			env.DB.prepare(
-				"INSERT INTO inboxes (id, workspace_id, team_id, name, color, sort_order, is_archived, assignment_strategy, created_at) VALUES (?, ?, ?, ?, '#64748B', 0, 0, 'manual', ?)",
-			).bind(inboxId, workspaceId, teamId, input.initialInboxName, now),
-			env.DB.prepare(
-				"INSERT INTO inbox_members (id, inbox_id, user_id) VALUES (?, ?, ?)",
-			).bind(crypto.randomUUID(), inboxId, userId),
-			env.DB.prepare(
-				"UPDATE workspace_setup_claim SET workspace_id = ?, completed_at = ? WHERE id = 1",
-			).bind(workspaceId, now),
-		]);
+		const provisioned = await provisionWorkspace(env, userId, input, {
+			afterStatements: ({ workspaceId }) => [
+				env.DB.prepare(
+					"UPDATE workspace_setup_claim SET user_id = ?, workspace_id = ?, completed_at = ? WHERE id = 1 AND email = ?",
+				).bind(userId, workspaceId, now, email),
+			],
+		});
+		return {
+			workspaceId: provisioned.workspaceId,
+			teamId: provisioned.teamId,
+			inboxId: provisioned.inboxId,
+			userId,
+			verification: await requestAccountVerification(env, email),
+		};
 	} catch (_cause) {
 		throw new OwnerSetupError(
 			"owner account was created but workspace setup could not finish; operator recovery is required",
 			500,
 		);
 	}
-
-	return {
-		workspaceId,
-		teamId,
-		inboxId,
-		userId,
-		verification: await requestAccountVerification(env, email),
-	};
 }

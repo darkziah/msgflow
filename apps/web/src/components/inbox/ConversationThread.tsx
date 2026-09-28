@@ -38,8 +38,10 @@ const ACTIVITY_DISPLAY_LIMIT = 50;
 
 export function ConversationThread({
 	conversationId,
+	workspaceId,
 }: {
 	conversationId: string;
+	workspaceId: string;
 }) {
 	const queryClient = useQueryClient();
 	const [liveMessages, setLiveMessages] = useState<Message[]>([]);
@@ -52,23 +54,23 @@ export function ConversationThread({
 	);
 
 	const { data: conversation, isPending: conversationPending } = useQuery({
-		queryKey: ["conversation", conversationId],
-		queryFn: () => api.getConversation(conversationId),
+		queryKey: ["conversation", workspaceId, conversationId],
+		queryFn: () => api.getConversation(conversationId, workspaceId),
 	});
 
 	const { data: timeline, isPending: messagesPending } = useQuery({
-		queryKey: ["messages", conversationId],
-		queryFn: () => api.getMessages(conversationId),
+		queryKey: ["messages", workspaceId, conversationId],
+		queryFn: () => api.getMessages(conversationId, workspaceId),
 	});
 	const emailContext = useQuery({
-		queryKey: ["email-context", conversationId],
-		queryFn: () => emailApi.context(conversationId),
+		queryKey: ["email-context", workspaceId, conversationId],
+		queryFn: () => emailApi.context(conversationId, workspaceId),
 		enabled: conversation?.channel === "email",
 		refetchInterval: 5000,
 	});
 	const { data: usersData } = useQuery({
-		queryKey: ["users"],
-		queryFn: () => api.listUsers(),
+		queryKey: ["users", workspaceId],
+		queryFn: () => api.listUsers(workspaceId),
 	});
 
 	// Reset per-conversation live state when switching threads — handled by the
@@ -76,7 +78,7 @@ export function ConversationThread({
 
 	// Real-time: WebSocket to the Conversation DO (authenticated via session cookie).
 	useEffect(() => {
-		const ws = new WebSocket(conversationSocketUrl(conversationId));
+		const ws = new WebSocket(conversationSocketUrl(conversationId, workspaceId));
 		ws.onmessage = (event) => {
 			const parsed = JSON.parse(event.data) as ConversationEvent;
 			switch (parsed.type) {
@@ -102,9 +104,9 @@ export function ConversationThread({
 					);
 					break;
 				case "conversation-updated":
-					queryClient.invalidateQueries({ queryKey: ["conversations"] });
+					queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
 					queryClient.invalidateQueries({
-						queryKey: ["conversation", conversationId],
+						queryKey: ["conversation", workspaceId, conversationId],
 					});
 					break;
 				case "presence":
@@ -115,7 +117,7 @@ export function ConversationThread({
 			}
 		};
 		return () => ws.close();
-	}, [conversationId, queryClient]);
+	}, [conversationId, queryClient, workspaceId]);
 
 	const timelineItems = useMemo(() => {
 		const messages = [...(timeline?.messages ?? [])];
@@ -165,9 +167,9 @@ export function ConversationThread({
 			.reverse()
 			.find((item): item is Message => "kind" in item);
 		if (!lastMessage || typeof lastMessage.seq !== "number") return;
-		api.markRead(conversationId, lastMessage.seq).catch(() => {});
-		queryClient.invalidateQueries({ queryKey: ["conversations"] });
-	}, [conversationId, timelineItems, queryClient]);
+		api.markRead(conversationId, workspaceId, lastMessage.seq).catch(() => {});
+		queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
+	}, [conversationId, timelineItems, queryClient, workspaceId]);
 
 	// Keep the newest timeline item in view whenever the timeline grows.
 	const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -228,7 +230,7 @@ export function ConversationThread({
 					</div>
 				</div>
 				<div className="flex min-w-0 items-center justify-between gap-1 sm:justify-end">
-					<TagPicker conversationId={conversationId} tags={conversation.tags} />
+					<TagPicker conversationId={conversationId} workspaceId={workspaceId} tags={conversation.tags} />
 					<Separator orientation="vertical" className="hidden h-6 sm:block" />
 					<Button
 						type="button"
@@ -238,7 +240,7 @@ export function ConversationThread({
 					>
 						Activity
 					</Button>
-					<ConversationActions conversation={conversation} />
+					<ConversationActions conversation={conversation} workspaceId={workspaceId} />
 				</div>
 			</header>
 
@@ -266,6 +268,7 @@ export function ConversationThread({
 								key={item.id}
 								message={item}
 								isEmail={conversation.channel === "email"}
+								workspaceId={workspaceId}
 								collapsed={
 									conversation.channel === "email" &&
 									item.id !== newestEmailId &&
@@ -332,10 +335,11 @@ export function ConversationThread({
 			<div className="border-t px-4 py-3">
 				<ReplyComposer
 					conversationId={conversationId}
+					workspaceId={workspaceId}
 					showSubject={conversation.channel === "email"}
 					onSent={() =>
 						queryClient.invalidateQueries({
-							queryKey: ["messages", conversationId],
+							queryKey: ["messages", workspaceId, conversationId],
 						})
 					}
 					onCommentCreated={(comment) =>
@@ -361,11 +365,13 @@ export function ConversationThread({
 function MessageBubble({
 	message,
 	isEmail,
+	workspaceId,
 	collapsed = false,
 	onCollapsedChange,
 }: {
 	message: Message;
 	isEmail: boolean;
+	workspaceId: string;
 	collapsed?: boolean;
 	onCollapsedChange?: () => void;
 }) {
@@ -375,6 +381,7 @@ function MessageBubble({
 			<EmailMessageCard
 				message={message}
 				inbound={inbound}
+				workspaceId={workspaceId}
 				collapsed={collapsed}
 				onCollapsedChange={onCollapsedChange}
 			/>
@@ -403,7 +410,7 @@ function MessageBubble({
 								key={attachment.id}
 								href={
 									isEmail
-										? emailApi.attachmentUrl(attachment.id)
+										? emailApi.attachmentUrl(attachment.id, workspaceId)
 										: attachment.url
 								}
 								target="_blank"
@@ -440,11 +447,13 @@ function MessageBubble({
 function EmailMessageCard({
 	message,
 	inbound,
+	workspaceId,
 	collapsed,
 	onCollapsedChange,
 }: {
 	message: Message;
 	inbound: boolean;
+	workspaceId: string;
 	collapsed: boolean;
 	onCollapsedChange?: () => void;
 }) {
@@ -523,7 +532,7 @@ function EmailMessageCard({
 							.map((attachment) => (
 							<a
 								key={attachment.id}
-								href={emailApi.attachmentUrl(attachment.id)}
+								href={emailApi.attachmentUrl(attachment.id, workspaceId)}
 								target="_blank"
 								rel="noreferrer"
 								className="w-fit text-primary underline underline-offset-4"

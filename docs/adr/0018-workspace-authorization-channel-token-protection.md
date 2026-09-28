@@ -15,6 +15,13 @@ not be stored as plaintext D1 values.
 
 ### Workspace authorization
 
+**Supersession note (ADR 0024):** The legacy lazy `default` Workspace
+first-accessor owner bootstrap and `requireDefaultWorkspaceAccess` API direction
+in this section are superseded. They must not be implemented or used; ADR 0024
+requires an explicit authorized Workspace for every backend, API, and service
+operation. The remaining authorization and role requirements below remain
+accepted.
+
 Every workspace-scoped route requires an authenticated session and validates
 that the session user belongs to the path's workspace. Every resource lookup
 and mutation is additionally constrained to that workspace; a path parameter
@@ -26,12 +33,16 @@ including inbox and channel configuration, routing rules, shared ordering, and
 member management. A legacy lazy `default` workspace with no
 `workspace_members` rows bootstraps its first authenticated accessor as
 `owner`; after the first membership exists, normal membership checks apply.
+**This bootstrap is superseded by ADR 0024 and is retained only as historical
+context.**
 
-Legacy default-workspace APIs use the same authorization seam: they resolve
-`requireDefaultWorkspaceAccess` after session validation, then pass that
-workspace to service-layer lookups and writes. This includes tags, canned
-replies, and channel connection state; foreign or missing resource IDs use the
-existing resource-not-found response rather than crossing workspace boundaries.
+**Superseded by ADR 0024:** Legacy default-workspace APIs must be migrated or
+retired; they must not resolve `requireDefaultWorkspaceAccess` or infer a
+Workspace from a default/first membership. Tags, canned replies, and channel
+connection state instead require an explicit authorized Workspace passed to
+service-layer lookups and writes. Foreign or missing resource IDs continue to
+use the existing resource-not-found response rather than crossing Workspace
+boundaries.
 
 ### Channel credentials at rest
 
