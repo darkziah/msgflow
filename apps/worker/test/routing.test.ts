@@ -1664,6 +1664,62 @@ describe("inbox tree persistence", () => {
 	});
 });
 
+describe("demo inbox tree seed", () => {
+	test("adds only idempotent navigation metadata without changing routing destinations", () => {
+		const seed = readFileSync(
+			new URL("../../../packages/db/seed/demo.sql", import.meta.url),
+			"utf8",
+		);
+
+		for (const [id, name, parentId, sortOrder] of [
+			["in-customer-support", "Customer Support", "NULL", 0],
+			["in-sales", "Sales", "NULL", 1],
+		] as const) {
+			expect(seed).toContain("INSERT OR IGNORE INTO inboxes");
+			expect(seed).toContain(`'${id}'`);
+			expect(seed).toContain(`'${name}'`);
+			expect(seed).toContain(`'${parentId}'`.replace("'NULL'", "NULL"));
+			expect(seed).toContain(`, ${sortOrder}, 0, 'manual'`);
+		}
+
+		for (const [id, parentId, sortOrder] of [
+			["in-fb-general", "in-customer-support", 0],
+			["in-email-general", "in-customer-support", 1],
+			["in-tech-support", "in-customer-support", 2],
+			["in-billing", "in-customer-support", 3],
+			["in-sales-leads", "in-sales", 0],
+			["in-vip", "in-sales", 1],
+		] as const) {
+			expect(seed).toContain(
+			`SET parent_inbox_id = '${parentId}', sort_order = ${sortOrder}`,
+		);
+			expect(seed).toContain(`WHERE id = '${id}'`);
+		}
+
+		// Routing stays bound to the same leaf IDs: hierarchy changes must never
+		// replace these defaults or rule action targets.
+		expect(seed).toContain("'link-fb', 'in-fb-general', 'ch-fb-main', 1");
+		expect(seed).toContain(
+			"'link-sales', 'in-email-general', 'ch-sales-mail', 1",
+		);
+		expect(seed).toContain(
+			"'link-support', 'in-email-general', 'ch-support-mail', 1",
+		);
+		expect(seed).toContain(
+			"'ra-billing-1', 'rule-billing', 'move_inbox', 'in-billing'",
+		);
+		expect(seed).toContain(
+			"'ra-quote-1', 'rule-quote', 'move_inbox', 'in-sales-leads'",
+		);
+		expect(seed).toContain(
+			"'ra-vip-1', 'rule-vip', 'move_inbox', 'in-vip'",
+		);
+		expect(seed).toContain(
+			"'ra-tech-1', 'rule-tech', 'move_inbox', 'in-tech-support'",
+		);
+	});
+});
+
 // ---------------------------------------------------------------------------
 // Sidebar: counts scoped to permitted inboxes, prefs, saved filters
 // ---------------------------------------------------------------------------

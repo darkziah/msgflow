@@ -70,7 +70,22 @@ WHERE EXISTS (SELECT 1 FROM user);
 
 -- ---------------------------------------------------------------------------
 -- Inboxes (colors/icons are the controlled library keys; updated_at is Unix ms)
+--
+-- The two roots are navigation-only. Channel defaults and rule destinations
+-- intentionally continue to reference the existing leaf inbox IDs below.
 -- ---------------------------------------------------------------------------
+INSERT OR IGNORE INTO inboxes (id, workspace_id, team_id, parent_inbox_id, name, description, color, icon, sort_order, is_archived, assignment_strategy, created_at, updated_at)
+SELECT 'in-customer-support', id, NULL, NULL, 'Customer Support',
+       'Navigation root for customer support queues.', '#64748B', 'folder', 0, 0, 'manual',
+       '2026-01-01T00:00:00.000Z', 1767225600000
+FROM workspaces WHERE slug = 'default';
+
+INSERT OR IGNORE INTO inboxes (id, workspace_id, team_id, parent_inbox_id, name, description, color, icon, sort_order, is_archived, assignment_strategy, created_at, updated_at)
+SELECT 'in-sales', id, NULL, NULL, 'Sales',
+       'Navigation root for sales queues.', '#F97316', 'folder', 1, 0, 'manual',
+       '2026-01-01T00:00:00.000Z', 1767225600000
+FROM workspaces WHERE slug = 'default';
+
 INSERT OR IGNORE INTO inboxes (id, workspace_id, team_id, name, description, color, icon, sort_order, is_archived, assignment_strategy, created_at, updated_at)
 SELECT 'in-fb-general', id, NULL, 'Facebook - General',
        'Default queue for the Main Facebook Page.', '#3B82F6', 'inbox', 0, 0, 'manual',
@@ -106,6 +121,38 @@ SELECT 'in-vip', id, 'team-sales', 'VIP Customers',
        'High-value contacts (rule destination).', '#EF4444', 'briefcase', 5, 0, 'manual',
        '2026-01-01T00:00:00.000Z', 1767225600000
 FROM workspaces WHERE slug = 'default';
+
+-- Apply hierarchy metadata separately so re-running this seed upgrades an
+-- existing demo database without replacing any routing/default/rule rows.
+UPDATE inboxes
+SET parent_inbox_id = 'in-customer-support', sort_order = 0, updated_at = 1767225600000
+WHERE id = 'in-fb-general'
+  AND workspace_id = (SELECT id FROM workspaces WHERE slug = 'default');
+
+UPDATE inboxes
+SET parent_inbox_id = 'in-customer-support', sort_order = 1, updated_at = 1767225600000
+WHERE id = 'in-email-general'
+  AND workspace_id = (SELECT id FROM workspaces WHERE slug = 'default');
+
+UPDATE inboxes
+SET parent_inbox_id = 'in-customer-support', sort_order = 2, updated_at = 1767225600000
+WHERE id = 'in-tech-support'
+  AND workspace_id = (SELECT id FROM workspaces WHERE slug = 'default');
+
+UPDATE inboxes
+SET parent_inbox_id = 'in-customer-support', sort_order = 3, updated_at = 1767225600000
+WHERE id = 'in-billing'
+  AND workspace_id = (SELECT id FROM workspaces WHERE slug = 'default');
+
+UPDATE inboxes
+SET parent_inbox_id = 'in-sales', sort_order = 0, updated_at = 1767225600000
+WHERE id = 'in-sales-leads'
+  AND workspace_id = (SELECT id FROM workspaces WHERE slug = 'default');
+
+UPDATE inboxes
+SET parent_inbox_id = 'in-sales', sort_order = 1, updated_at = 1767225600000
+WHERE id = 'in-vip'
+  AND workspace_id = (SELECT id FROM workspaces WHERE slug = 'default');
 
 -- ---------------------------------------------------------------------------
 -- Channel → default inbox links (exactly one default per channel)
