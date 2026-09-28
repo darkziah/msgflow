@@ -5,7 +5,6 @@ import {
 	conversationReads,
 	conversations,
 	conversationTags,
-	mailboxes,
 	tags,
 } from "@msgflow/db";
 import {
@@ -23,8 +22,10 @@ import {
 	sql,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { canAccessMailbox, conversationReadPredicate } from "./email-transport";
+import { canReadConversation } from "./conversation-permissions";
+import { getMailboxAccessByAddress } from "./email-transport";
 import type { Env } from "./env";
+import { getInboxDescendantIds, getReadableInboxIds } from "./inbox-tree";
 
 // Fields shared by the list and single-conversation queries. The unread count
 // (ADR 0015) is computed per agent: unread = message_count − last_read_seq.
@@ -109,6 +110,8 @@ export interface ConversationListOptions {
 	mailboxId?: string;
 	status?: "open" | "archived" | "all";
 	inboxId?: string;
+	/** A tree-node selection resolved server-side; clients never submit id arrays. */
+	inboxScope?: "exact" | "descendants";
 	/** Free text: contact name/email, subject, last-message preview. */
 	q?: string;
 	assigneeId?: string;
@@ -135,6 +138,24 @@ export async function listConversations(
 	workspaceId?: string,
 ): Promise<ConversationSummary[]> {
 	const db = drizzle(env.DB);
+	if (!workspaceId) return [];
+	const readableInboxIds = await getReadableInboxIds(db, workspaceId, agentId);
+	const readableInboxSet = new Set(readableInboxIds);
+	let scopedInboxIds = readableInboxIds;
+	if (opts.inboxId) {
+		// A guessed, foreign, or inaccessible node has the same empty result as an
+		// empty filter, so list selection cannot reveal hierarchy membership.
+		if (!readableInboxSet.has(opts.inboxId)) return [];
+		scopedInboxIds =
+			opts.inboxScope === "descendants"
+				? await getInboxDescendantIds(
+						db,
+						workspaceId,
+						opts.inboxId,
+						readableInboxSet,
+					)
+				: [opts.inboxId];
+	}
 	const q = opts.q?.trim();
 	const now = new Date().toISOString();
 	// Future-snoozed open conversations belong exclusively to the Snoozed
@@ -146,7 +167,9 @@ export async function listConversations(
 		lte(conversations.snoozedUntil, now),
 	);
 	const conditions = [
-		conversationReadPredicate(agentId),
+		scopedInboxIds.length
+			? inArray(conversations.inboxId, scopedInboxIds)
+			: sql`0`,
 		opts.mailboxId
 			? sql`EXISTS (SELECT 1 FROM mailboxes m WHERE m.id = ${opts.mailboxId} AND m.workspace_id = ${conversations.workspaceId} AND m.canonical_address = ${channels.externalId} AND ${channels.type} = 'email')`
 			: undefined,
@@ -154,7 +177,6 @@ export async function listConversations(
 		opts.status && opts.status !== "all"
 			? eq(conversations.status, opts.status)
 			: undefined,
-		opts.inboxId ? eq(conversations.inboxId, opts.inboxId) : undefined,
 		opts.assigneeId ? eq(conversations.assigneeId, opts.assigneeId) : undefined,
 		opts.unassigned ? isNull(conversations.assigneeId) : undefined,
 		opts.snoozed
@@ -260,51 +282,34 @@ export async function getConversation(
 		.get();
 
 	if (!row) return null;
-	if (!(await canReadConversation(env, agentId, workspaceId, row))) return null;
+	if (!(await canReadConversation(env, agentId, id, workspaceId))) return null;
 	const tagsByConversation = await loadTagsForConversations(db, [row.id]);
 	return toSummary(row, tagsByConversation[row.id] ?? []);
 }
 
+/**
+ * Inbox scope is already enforced in the list SQL. Email rows additionally
+ * intersect that scope with mailbox policy in a fixed number of queries.
+ */
 async function filterMailboxAccess(
 	env: Env,
 	userId: string,
-	workspaceId: string | undefined,
+	workspaceId: string,
 	rows: ConversationRow[],
 ): Promise<ConversationRow[]> {
-	return (
-		await Promise.all(
-			rows.map(async (row) =>
-				(await canReadConversation(env, userId, workspaceId, row)) ? row : null,
-			),
-		)
-	).filter((row): row is ConversationRow => row !== null);
-}
-
-async function canReadConversation(
-	env: Env,
-	userId: string,
-	workspaceId: string | undefined,
-	row: ConversationRow,
-): Promise<boolean> {
-	if (row.channelType !== "email") return true;
-	if (!workspaceId) return false;
-	// Logical mailbox rows carry private/team visibility rules and must always
-	// pass that authorization. Channels created before logical mailboxes existed
-	// retain the existing workspace-scoped visibility model; hiding them would
-	// make established queues (including Snoozed) disappear during migration.
-	const mailbox = await drizzle(env.DB)
-		.select({ id: mailboxes.id })
-		.from(mailboxes)
-		.where(
-			and(
-				eq(mailboxes.workspaceId, workspaceId),
-				eq(mailboxes.canonicalAddress, row.channelExternalId),
-			),
-		)
-		.get();
-	return (
-		!mailbox ||
-		canAccessMailbox(env, workspaceId, row.channelExternalId, userId)
+	const mailboxAccess = await getMailboxAccessByAddress(
+		env,
+		workspaceId,
+		rows
+			.filter((row) => row.channelType === "email")
+			.map((row) => row.channelExternalId),
+		userId,
+	);
+	return rows.filter(
+		(row) =>
+			row.channelType !== "email" ||
+			!mailboxAccess.has(row.channelExternalId) ||
+			mailboxAccess.get(row.channelExternalId) === true,
 	);
 }
 

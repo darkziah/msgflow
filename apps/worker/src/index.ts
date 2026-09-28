@@ -136,6 +136,7 @@ import {
 } from "./meta-oauth";
 import { scheduleOutbound, sendOutbound } from "./outbound";
 import { getConversation, listConversations } from "./queries";
+import { getReadableInboxIds } from "./inbox-tree";
 import { handleScheduled } from "./scheduled";
 import { verifyFacebookSignatureForSecrets } from "./webhook";
 import { decryptChannelToken } from "./channel-token-crypto";
@@ -417,6 +418,10 @@ app.get("/api/conversations", async (c) => {
 						? statusParam
 						: "open",
 				inboxId,
+				inboxScope:
+					c.req.query("inboxScope") === "descendants"
+						? "descendants"
+						: "exact",
 				q: c.req.query("q") ?? undefined,
 				mailboxId: c.req.query("mailboxId") ?? undefined,
 				assigneeId: c.req.query("assigneeId") ?? undefined,
@@ -830,7 +835,16 @@ app.patch("/api/conversations/:id", async (c) => {
 			patch.snoozedUntil = body.snoozedUntil;
 		}
 		if (body.inboxId !== undefined) {
-			// Conversations can only move to an inbox in their authorized workspace.
+			// Moving into a hidden inbox would create a conversation the actor can no
+			// longer read, so target scope is checked before the metadata write.
+			const readableInboxIds = await getReadableInboxIds(
+				drizzle(c.env.DB),
+				workspaceId,
+				session.user.id,
+			);
+			if (!readableInboxIds.includes(body.inboxId)) {
+				return c.json({ success: false, error: "inbox not found" }, 404);
+			}
 			const target = await drizzle(c.env.DB)
 				.select({ id: inboxes.id })
 				.from(inboxes)
@@ -842,7 +856,7 @@ app.patch("/api/conversations/:id", async (c) => {
 				)
 				.get();
 			if (!target) {
-				return c.json({ success: false, error: "inbox not found" }, 400);
+				return c.json({ success: false, error: "inbox not found" }, 404);
 			}
 			patch.inboxId = body.inboxId;
 		}

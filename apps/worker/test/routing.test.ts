@@ -5,6 +5,7 @@ import {
 	channels,
 	contacts,
 	conversations,
+	conversationTags,
 	emailDomains,
 	inboxChannels,
 	inboxes,
@@ -29,6 +30,7 @@ import {
 	requireAdminAccess,
 	requireWorkspaceAccess,
 } from "../src/access";
+import { canReadConversation } from "../src/conversation-permissions";
 import { ManageError } from "../src/errors";
 import {
 	assertValidInboxParent,
@@ -61,6 +63,7 @@ import {
 	updateInbox,
 	updateTag,
 } from "../src/manage";
+import { getConversation, listConversations } from "../src/queries";
 import { evaluateRules, type RuleEvaluationContext } from "../src/rules";
 import {
 	createSavedFilter,
@@ -2584,5 +2587,298 @@ describe("inbox tree authorization and moves", () => {
 				.where(eq(inboxes.id, "system-sibling"))
 				.get(),
 		).toEqual(systemBefore);
+	});
+});
+
+describe("conversation inbox visibility scope", () => {
+	test("lists multiple email conversations with direct private and team mailbox policy", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "mail-policy-inbox");
+		const privateChannelId = await insertChannel(workspaceId);
+		const teamChannelId = await insertChannel(workspaceId);
+		await ctx.db
+			.update(channels)
+			.set({ externalId: "private@test.dev" })
+			.where(eq(channels.id, privateChannelId))
+			.run();
+		await ctx.db
+			.update(channels)
+			.set({ externalId: "team@test.dev" })
+			.where(eq(channels.id, teamChannelId))
+			.run();
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(emailDomains)
+			.values({
+				id: "list-policy-domain",
+				workspaceId,
+				canonicalDomain: "test.dev",
+				inboundState: "pending",
+				outboundState: "pending",
+				dnsStatusJson: "{}",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(teams)
+			.values({
+				id: "list-policy-team",
+				workspaceId,
+				name: "List policy team",
+				createdAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(teamMembers)
+			.values({
+				id: crypto.randomUUID(),
+				teamId: "list-policy-team",
+				userId: MEMBER,
+				createdAt: now,
+			})
+			.run();
+		await ctx.db
+			.update(inboxes)
+			.set({ visibilityType: "team", teamId: "list-policy-team" })
+			.where(eq(inboxes.id, "mail-policy-inbox"))
+			.run();
+		await ctx.db
+			.insert(mailboxes)
+			.values([
+				{
+					id: "list-private-mailbox",
+					workspaceId,
+					emailDomainId: "list-policy-domain",
+					localPart: "private",
+					canonicalAddress: "private@test.dev",
+					type: "private",
+					ownerUserId: ADMIN,
+					inboxId: null,
+					isEnabled: false,
+					isSendEnabled: false,
+					createdAt: now,
+					updatedAt: now,
+				},
+				{
+					id: "list-team-mailbox",
+					workspaceId,
+					emailDomainId: "list-policy-domain",
+					localPart: "team",
+					canonicalAddress: "team@test.dev",
+					type: "shared",
+					inboxId: "mail-policy-inbox",
+					teamId: "list-policy-team",
+					isEnabled: false,
+					isSendEnabled: false,
+					createdAt: now,
+					updatedAt: now,
+				},
+			])
+			.run();
+		const contactId = await insertContact(workspaceId);
+		await insertConversation(
+			workspaceId,
+			privateChannelId,
+			"mail-policy-inbox",
+			contactId,
+			"private-one",
+		);
+		await insertConversation(
+			workspaceId,
+			privateChannelId,
+			"mail-policy-inbox",
+			contactId,
+			"private-two",
+		);
+		await insertConversation(
+			workspaceId,
+			teamChannelId,
+			"mail-policy-inbox",
+			contactId,
+			"team-one",
+		);
+
+		const ids = (
+			await listConversations(ctx.env, MEMBER, { status: "all" }, workspaceId)
+		).map((conversation) => conversation.id);
+		expect(ids).toContain("team-one");
+		expect(ids).not.toContain("private-one");
+		expect(ids).not.toContain("private-two");
+	});
+
+	test("scopes every list facet and detail read to permitted inboxes", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "scope-root");
+		await insertTreeInbox(workspaceId, "scope-allowed", {
+			parentInboxId: "scope-root",
+		});
+		await insertTreeInbox(workspaceId, "scope-private", {
+			parentInboxId: "scope-root",
+			visibilityType: "private",
+		});
+		await ctx.db
+			.insert(teams)
+			.values({
+				id: "scope-team",
+				workspaceId,
+				name: "Scope team",
+				createdAt: new Date().toISOString(),
+			})
+			.run();
+		await ctx.db
+			.insert(teamMembers)
+			.values({
+				id: crypto.randomUUID(),
+				teamId: "scope-team",
+				userId: MEMBER,
+				createdAt: new Date().toISOString(),
+			})
+			.run();
+		await insertTreeInbox(workspaceId, "scope-team-inbox", {
+			parentInboxId: "scope-root",
+			visibilityType: "team",
+			teamId: "scope-team",
+		});
+		const channelId = await insertChannel(workspaceId);
+		const contactId = await insertContact(workspaceId);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"scope-allowed",
+			contactId,
+			"scope-visible",
+		);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"scope-private",
+			contactId,
+			"scope-hidden",
+		);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"scope-team-inbox",
+			contactId,
+			"scope-team-visible",
+		);
+
+		expect(
+			(
+				await listConversations(
+					ctx.env,
+					MEMBER,
+					{ inboxId: "scope-root", inboxScope: "descendants" },
+					workspaceId,
+				)
+			).map((conversation) => conversation.id),
+		).toEqual(["scope-visible", "scope-team-visible"]);
+		expect(
+			await listConversations(
+				ctx.env,
+				MEMBER,
+				{ inboxId: "scope-private", inboxScope: "exact" },
+				workspaceId,
+			),
+		).toEqual([]);
+		expect(
+			await getConversation(ctx.env, MEMBER, "scope-hidden", workspaceId),
+		).toBeNull();
+		expect(
+			await canReadConversation(ctx.env, MEMBER, "scope-hidden", workspaceId),
+		).toBe(false);
+
+		const now = new Date().toISOString();
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"scope-allowed",
+			contactId,
+			"scope-archived-visible",
+			"archived",
+		);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"scope-private",
+			contactId,
+			"scope-archived-hidden",
+			"archived",
+		);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"scope-allowed",
+			contactId,
+			"scope-snoozed-visible",
+		);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"scope-private",
+			contactId,
+			"scope-snoozed-hidden",
+		);
+		await ctx.db
+			.update(conversations)
+			.set({ assigneeId: MEMBER })
+			.where(eq(conversations.id, "scope-visible"))
+			.run();
+		await ctx.db
+			.update(conversations)
+			.set({ snoozedUntil: new Date(Date.now() + 60_000).toISOString() })
+			.where(eq(conversations.id, "scope-snoozed-visible"))
+			.run();
+		await ctx.db
+			.update(conversations)
+			.set({ snoozedUntil: new Date(Date.now() + 60_000).toISOString() })
+			.where(eq(conversations.id, "scope-snoozed-hidden"))
+			.run();
+		await ctx.db
+			.insert(tags)
+			.values({
+				id: "scope-tag",
+				workspaceId,
+				name: "Scope tag",
+				visibility: "shared",
+				createdAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(conversationTags)
+			.values([
+				{
+					id: "scope-visible-tag",
+					conversationId: "scope-visible",
+					tagId: "scope-tag",
+					createdAt: now,
+				},
+				{
+					id: "scope-hidden-tag",
+					conversationId: "scope-hidden",
+					tagId: "scope-tag",
+					createdAt: now,
+				},
+			])
+			.run();
+
+		const ids = async (options: Parameters<typeof listConversations>[2]) =>
+			(await listConversations(ctx.env, MEMBER, options, workspaceId)).map(
+				(conversation) => conversation.id,
+			);
+		expect(await ids({ status: "all" })).not.toContain("scope-hidden");
+		const allIds = await ids({ status: "all" });
+		expect(new Set(allIds).size).toBe(allIds.length);
+		expect(await ids({ status: "archived" })).toEqual([
+			"scope-archived-visible",
+		]);
+		expect(await ids({ assigneeId: MEMBER })).toEqual(["scope-visible"]);
+		expect(await ids({ unassigned: true })).not.toContain("scope-hidden");
+		expect(await ids({ snoozed: true })).toEqual(["scope-snoozed-visible"]);
+		expect(await ids({ channel: "email" })).not.toContain("scope-hidden");
+		expect(await ids({ tagId: "scope-tag" })).toEqual(["scope-visible"]);
 	});
 });

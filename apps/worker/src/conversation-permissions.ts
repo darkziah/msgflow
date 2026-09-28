@@ -1,8 +1,14 @@
-import { conversations, workspaceMembers } from "@msgflow/db";
+import {
+	channels,
+	conversations,
+	mailboxes,
+	workspaceMembers,
+} from "@msgflow/db";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import { canAccessMailbox } from "./email-transport";
 import type { Env } from "./env";
-import { getConversation } from "./queries";
+import { getReadableInboxIds } from "./inbox-tree";
 
 /** Re-check current grants for durable projections and hibernated sockets. */
 export async function canReadConversation(
@@ -13,8 +19,14 @@ export async function canReadConversation(
 ): Promise<boolean> {
 	const db = drizzle(env.DB);
 	const row = await db
-		.select({ workspaceId: conversations.workspaceId })
+		.select({
+			workspaceId: conversations.workspaceId,
+			inboxId: conversations.inboxId,
+			channelType: channels.type,
+			channelExternalId: channels.externalId,
+		})
 		.from(conversations)
+		.innerJoin(channels, eq(conversations.channelId, channels.id))
 		.where(eq(conversations.id, conversationId))
 		.get();
 	if (!row || (workspaceId && row.workspaceId !== workspaceId)) return false;
@@ -29,12 +41,27 @@ export async function canReadConversation(
 		)
 		.get();
 	if (!member) return false;
-	return !!(await getConversation(
-		env,
-		userId,
-		conversationId,
-		row.workspaceId,
-	));
+	if (
+		!(await getReadableInboxIds(db, row.workspaceId, userId)).includes(
+			row.inboxId,
+		)
+	)
+		return false;
+	if (row.channelType !== "email") return true;
+	const mailbox = await db
+		.select({ id: mailboxes.id })
+		.from(mailboxes)
+		.where(
+			and(
+				eq(mailboxes.workspaceId, row.workspaceId),
+				eq(mailboxes.canonicalAddress, row.channelExternalId),
+			),
+		)
+		.get();
+	return (
+		!mailbox ||
+		canAccessMailbox(env, row.workspaceId, row.channelExternalId, userId)
+	);
 }
 
 export async function filterReadableNotifications<

@@ -6,6 +6,7 @@ import {
 	conversations,
 	emailDomains,
 	inboxes,
+	inboxMembers,
 	mailboxes,
 	outboundIntents,
 	teamMembers,
@@ -16,10 +17,12 @@ import { eq } from "drizzle-orm";
 import {
 	authorizeEmailOutbound,
 	authorizeIncomingEmail,
+	canAccessMailbox,
+	getMailboxAccessByAddress,
 	resolveInboundEmailRoute,
 } from "../src/email-transport";
 import { recordProviderAccepted } from "../src/outbound-state";
-import { listConversations } from "../src/queries";
+import { getConversation, listConversations } from "../src/queries";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
 
 let ctx: TestCtx;
@@ -80,7 +83,14 @@ async function seedMailTransport(
 	}
 	await ctx.db
 		.insert(inboxes)
-		.values({ id: inboxId, workspaceId, name: "Support", createdAt: now })
+		.values({
+			id: inboxId,
+			workspaceId,
+			name: "Support",
+			visibilityType: input.teamOnly ? "team" : "shared",
+			teamId,
+			createdAt: now,
+		})
 		.run();
 	await ctx.db
 		.insert(emailDomains)
@@ -162,7 +172,7 @@ async function seedMailTransport(
 			updatedAt: now,
 		})
 		.run();
-	return { workspaceId, mailboxId, conversationId };
+	return { workspaceId, mailboxId, inboxId, conversationId };
 }
 
 describe("logical mailbox transport gates", () => {
@@ -225,6 +235,77 @@ describe("logical mailbox transport gates", () => {
 				(conversation) => conversation.id,
 			),
 		).toEqual([seeded.conversationId]);
+	});
+
+	test("team-linked shared mailbox requires team membership across access seams", async () => {
+		const seeded = await seedMailTransport({ teamOnly: true });
+		await ctx.db
+			.insert(inboxMembers)
+			.values({
+				id: crypto.randomUUID(),
+				inboxId: seeded.inboxId,
+				userId: "member",
+			})
+			.run();
+
+		expect(
+			await canAccessMailbox(
+				ctx.env,
+				seeded.workspaceId,
+				"support@example.com",
+				"member",
+			),
+		).toBe(false);
+		expect(
+			await canAccessMailbox(
+				ctx.env,
+				seeded.workspaceId,
+				"support@example.com",
+				"owner",
+			),
+		).toBe(true);
+
+		const [memberAccess, ownerAccess] = await Promise.all([
+			getMailboxAccessByAddress(
+				ctx.env,
+				seeded.workspaceId,
+				["support@example.com"],
+				"member",
+			),
+			getMailboxAccessByAddress(
+				ctx.env,
+				seeded.workspaceId,
+				["support@example.com"],
+				"owner",
+			),
+		]);
+		expect(memberAccess.get("support@example.com")).toBe(false);
+		expect(ownerAccess.get("support@example.com")).toBe(true);
+
+		expect(
+			await listConversations(ctx.env, "member", {}, seeded.workspaceId),
+		).toEqual([]);
+		expect(
+			(await listConversations(ctx.env, "owner", {}, seeded.workspaceId)).map(
+				(conversation) => conversation.id,
+			),
+		).toEqual([seeded.conversationId]);
+		expect(
+			await getConversation(
+				ctx.env,
+				"member",
+				seeded.conversationId,
+				seeded.workspaceId,
+			),
+		).toBeNull();
+		expect(
+			await getConversation(
+				ctx.env,
+				"owner",
+				seeded.conversationId,
+				seeded.workspaceId,
+			),
+		).toMatchObject({ id: seeded.conversationId });
 	});
 
 	test("provider handoff is recorded as accepted, never delivered", async () => {

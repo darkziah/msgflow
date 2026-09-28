@@ -10,7 +10,7 @@ import {
 	teamMembers,
 	workspaceMembers,
 } from "@msgflow/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { canonicalAddress } from "./email-address";
 import type { Env } from "./env";
@@ -152,18 +152,58 @@ export async function canAccessMailbox(
 	canonicalAddress: string,
 	userId: string,
 ): Promise<boolean> {
+	return (
+		(
+			await getMailboxAccessByAddress(
+				env,
+				workspaceId,
+				[canonicalAddress],
+				userId,
+			)
+		).get(canonicalAddress) === true
+	);
+}
+
+/**
+ * Resolve mailbox grants for a bounded address set. This is the batch form of
+ * canAccessMailbox: private owner/delegate, or shared inbox/team member.
+ */
+export async function getMailboxAccessByAddress(
+	env: Env,
+	workspaceId: string,
+	canonicalAddresses: readonly string[],
+	userId: string,
+): Promise<Map<string, boolean>> {
+	const addresses = [...new Set(canonicalAddresses)];
+	if (addresses.length === 0) return new Map();
 	const db = drizzle(env.DB);
-	const mailbox = await db
-		.select()
+	const mailboxesForAddress = await db
+		.select({
+			id: mailboxes.id,
+			canonicalAddress: mailboxes.canonicalAddress,
+			type: mailboxes.type,
+			ownerUserId: mailboxes.ownerUserId,
+			inboxId: mailboxes.inboxId,
+			teamId: mailboxes.teamId,
+			inboxVisibilityType: inboxes.visibilityType,
+			inboxTeamId: inboxes.teamId,
+		})
 		.from(mailboxes)
+		.leftJoin(
+			inboxes,
+			and(
+				eq(inboxes.id, mailboxes.inboxId),
+				eq(inboxes.workspaceId, workspaceId),
+			),
+		)
 		.where(
 			and(
 				eq(mailboxes.workspaceId, workspaceId),
-				eq(mailboxes.canonicalAddress, canonicalAddress),
+				inArray(mailboxes.canonicalAddress, addresses),
 			),
 		)
-		.get();
-	if (!mailbox) return false;
+		.all();
+	if (mailboxesForAddress.length === 0) return new Map();
 	const member = await db
 		.select({ id: workspaceMembers.id })
 		.from(workspaceMembers)
@@ -174,48 +214,83 @@ export async function canAccessMailbox(
 			),
 		)
 		.get();
-	if (!member) return false;
-	if (mailbox.type === "private") {
-		if (mailbox.ownerUserId === userId) return true;
-		return !!(await db
+	const access = new Map<string, boolean>();
+	if (!member) {
+		for (const mailbox of mailboxesForAddress)
+			access.set(mailbox.canonicalAddress, false);
+		return access;
+	}
+	const mailboxIds = mailboxesForAddress.map((mailbox) => mailbox.id);
+	const inboxIds = mailboxesForAddress
+		.map((mailbox) => mailbox.inboxId)
+		.filter((id): id is string => id !== null);
+	const teamIds = mailboxesForAddress
+		.map((mailbox) => mailbox.teamId)
+		.filter((id): id is string => id !== null);
+	const [delegates, inboxGrants, teamGrants] = await Promise.all([
+		db
 			.select({ mailboxId: mailboxDelegates.mailboxId })
 			.from(mailboxDelegates)
 			.where(
 				and(
-					eq(mailboxDelegates.mailboxId, mailbox.id),
+					inArray(mailboxDelegates.mailboxId, mailboxIds),
 					eq(mailboxDelegates.userId, userId),
 				),
 			)
-			.get());
-	}
-	// A shared mailbox needs an explicit inbox grant OR its linked team grant.
-	if (
-		mailbox.inboxId &&
-		(await db
-			.select({ id: inboxMembers.id })
-			.from(inboxMembers)
-			.where(
-				and(
-					eq(inboxMembers.inboxId, mailbox.inboxId),
-					eq(inboxMembers.userId, userId),
-				),
-			)
-			.get())
-	)
-		return true;
-	return !!(
-		mailbox.teamId &&
-		(await db
-			.select({ teamId: teamMembers.teamId })
-			.from(teamMembers)
-			.where(
-				and(
-					eq(teamMembers.teamId, mailbox.teamId),
-					eq(teamMembers.userId, userId),
-				),
-			)
-			.get())
+			.all(),
+		inboxIds.length
+			? db
+					.select({
+						inboxId: inboxMembers.inboxId,
+						userId: inboxMembers.userId,
+					})
+					.from(inboxMembers)
+					.where(inArray(inboxMembers.inboxId, inboxIds))
+					.all()
+			: Promise.resolve([]),
+		teamIds.length
+			? db
+					.select({ teamId: teamMembers.teamId })
+					.from(teamMembers)
+					.where(
+						and(
+							inArray(teamMembers.teamId, teamIds),
+							eq(teamMembers.userId, userId),
+						),
+					)
+					.all()
+			: Promise.resolve([]),
+	]);
+	const delegatedMailboxIds = new Set(
+		delegates.map((delegate) => delegate.mailboxId),
 	);
+	const inboxGrantUsersByInbox = new Map<string, Set<string>>();
+	for (const grant of inboxGrants) {
+		const users =
+			inboxGrantUsersByInbox.get(grant.inboxId) ?? new Set<string>();
+		users.add(grant.userId);
+		inboxGrantUsersByInbox.set(grant.inboxId, users);
+	}
+	const grantedTeamIds = new Set(teamGrants.map((grant) => grant.teamId));
+	for (const mailbox of mailboxesForAddress) {
+		const inboxGrantUsers =
+			mailbox.inboxId === null
+				? new Set<string>()
+				: (inboxGrantUsersByInbox.get(mailbox.inboxId) ?? new Set<string>());
+		const allowed =
+			mailbox.type === "private"
+				? mailbox.ownerUserId === userId || delegatedMailboxIds.has(mailbox.id)
+				: mailbox.teamId !== null
+					? mailbox.inboxId !== null &&
+						mailbox.inboxVisibilityType === "team" &&
+						mailbox.inboxTeamId === mailbox.teamId &&
+						grantedTeamIds.has(mailbox.teamId)
+					: mailbox.inboxId !== null &&
+						mailbox.inboxVisibilityType === "shared" &&
+						(inboxGrantUsers.size === 0 || inboxGrantUsers.has(userId));
+		access.set(mailbox.canonicalAddress, allowed);
+	}
+	return access;
 }
 
 /** Authorize the server-derived From mailbox for an email conversation. */
@@ -289,8 +364,10 @@ export async function authorizeEmailOutbound(
 export function mailboxReadPredicate(userId: string) {
 	return sql`EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = mailboxes.workspace_id AND wm.user_id = ${userId}) AND (
 	 (mailboxes.type = 'private' AND (mailboxes.owner_user_id = ${userId} OR EXISTS (SELECT 1 FROM mailbox_delegates md WHERE md.mailbox_id = mailboxes.id AND md.user_id = ${userId}))) OR
-	 (mailboxes.type = 'shared' AND ((mailboxes.team_id IS NOT NULL AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = mailboxes.team_id AND tm.user_id = ${userId})) OR
-	 (EXISTS (SELECT 1 FROM inbox_members im WHERE im.inbox_id = mailboxes.inbox_id AND im.user_id = ${userId})))))`;
+	 (mailboxes.type = 'shared' AND (
+		(mailboxes.team_id IS NOT NULL AND EXISTS (SELECT 1 FROM inboxes i WHERE i.id = mailboxes.inbox_id AND i.workspace_id = mailboxes.workspace_id AND i.visibility_type = 'team' AND i.team_id = mailboxes.team_id) AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = mailboxes.team_id AND tm.user_id = ${userId})) OR
+		(mailboxes.team_id IS NULL AND EXISTS (SELECT 1 FROM inboxes i WHERE i.id = mailboxes.inbox_id AND i.workspace_id = mailboxes.workspace_id AND i.visibility_type = 'shared') AND (NOT EXISTS (SELECT 1 FROM inbox_members any_im WHERE any_im.inbox_id = mailboxes.inbox_id) OR EXISTS (SELECT 1 FROM inbox_members im WHERE im.inbox_id = mailboxes.inbox_id AND im.user_id = ${userId})))
+	 )))`;
 }
 
 export function conversationReadPredicate(userId: string) {

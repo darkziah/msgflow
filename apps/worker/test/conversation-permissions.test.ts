@@ -372,3 +372,23 @@ test("workspace-specific authorization precedes conversation Durable Object look
 		if (lookup >= 0) expect(guard).toBeLessThan(lookup);
 	}
 });
+
+test("conversation list parses descendant scope and PATCH hides missing move targets", () => {
+	const source = readFileSync(
+		new URL("../src/index.ts", import.meta.url),
+		"utf8",
+	);
+	const listRoute = source.slice(
+		source.indexOf('app.get("/api/conversations",'),
+		source.indexOf("// GET /api/conversations/:id"),
+	);
+	const patchRoute = source.slice(
+		source.indexOf('app.patch("/api/conversations/:id",'),
+		source.indexOf("// ---------------------------------------------------------------------------\n// TAGS"),
+	);
+	expect(listRoute).toContain("inboxScope:");
+	expect(listRoute).toContain('c.req.query("inboxScope") === "descendants"');
+	expect(patchRoute).toContain(
+		'c.json({ success: false, error: "inbox not found" }, 404)',
+	);
+});
