@@ -13,12 +13,24 @@ export const Route = createRootRoute({
 	component: Root,
 });
 
+function pageTitle(pathname: string): string {
+	if (pathname === "/login") return "Sign in";
+	if (pathname === "/setup") return "Set up MsgFlow";
+	if (pathname === "/settings") return "Settings";
+	if (pathname === "/rules") return "Rules and canned replies";
+	return "Shared inbox";
+}
+
 function Root() {
 	const router = useRouter();
 	const { data: session, isPending } = useSession();
 	const cache = useQueryClient();
 	const identity = session?.user.id ?? null;
 	const [cacheOwner, setCacheOwner] = useState<string | null | undefined>(undefined);
+	const pathname = router.state.location.pathname;
+	useEffect(() => {
+		document.title = `${pageTitle(pathname)} · MsgFlow`;
+	}, [pathname]);
 	useEffect(() => {
 		if (isPending || cacheOwner === identity) return;
 		cache.clear();
