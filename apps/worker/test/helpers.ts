@@ -9,7 +9,7 @@ import type { Env } from "../src/env";
 
 /**
  * Miniflare-backed D1 test database: fresh instance per call, full migration
- * chain (0000 → 0005) applied, wrapped in the worker Env shape so the real
+ * chain (0000 → 0026) applied, wrapped in the worker Env shape so the real
  * manage/access/rules/workspace-api functions run against actual SQLite.
  *
  * This is how the routing-spec invariants are tested for real: default-inbox

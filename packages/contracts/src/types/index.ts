@@ -498,6 +498,15 @@ export interface TeamSummary {
 //   | system:closed | inbox:<inbox-id> | tag:<tag-id> | view:<saved-filter-id>
 export type SidebarItemKind = "system" | "inbox" | "tag" | "view";
 
+/** Persisted visibility classification for an inbox tree node. */
+export type InboxVisibilityType = "shared" | "team" | "private" | "system";
+
+/** Additive per-user tree state stored with sidebar preferences. */
+export interface SidebarTreePreferences {
+	collapsedNodeIds: string[];
+	lastOpenBranchIds: string[];
+}
+
 export interface SidebarItemBase {
 	kind: SidebarItemKind;
 	/** Stable id (see above). */

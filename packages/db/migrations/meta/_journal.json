@@ -183,6 +183,13 @@
 			"when": 1791244800003,
 			"tag": "0025_workspace_owner_invariant",
 			"breakpoints": true
+		},
+		{
+			"idx": 26,
+			"version": "6",
+			"when": 1791331200000,
+			"tag": "0026_inbox_tree_sidebar_preferences",
+			"breakpoints": true
 		}
 	]
 }

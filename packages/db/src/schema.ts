@@ -192,12 +192,20 @@ export const metaApps = sqliteTable(
 // 3. INBOXES (team/queue grouping of conversations)
 // ---------------------------------------------------------------------------
 
-export const inboxes = sqliteTable("inboxes", {
+export const inboxes = sqliteTable(
+	"inboxes",
+	{
 	id: text("id").primaryKey(),
 	workspaceId: text("workspace_id")
 		.notNull()
 		.references(() => workspaces.id, { onDelete: "cascade" }),
 	teamId: text("team_id").references(() => teams.id, { onDelete: "set null" }),
+	// Navigation-only. Migration 0026 triggers preserve a same-workspace,
+	// acyclic forest; deleting a parent preserves its children as roots.
+	parentInboxId: text("parent_inbox_id").references(
+		(): AnySQLiteColumn => inboxes.id,
+		{ onDelete: "set null" },
+	),
 	name: text("name").notNull(),
 	description: text("description"),
 	// Validated hex color (#RRGGBB); the sidebar dot falls back to it when no icon.
@@ -209,6 +217,12 @@ export const inboxes = sqliteTable("inboxes", {
 	isArchived: integer("is_archived", { mode: "boolean" })
 		.notNull()
 		.default(false),
+	visibilityType: text("visibility_type", {
+		enum: ["shared", "team", "private", "system"],
+	})
+		.notNull()
+		.default("shared"),
+	treeVersion: integer("tree_version").notNull().default(0),
 	// Queue assignment strategy; round-robin/least-busy are hooks for a later phase.
 	assignmentStrategy: text("assignment_strategy", {
 		enum: ["manual", "round_robin", "least_busy"],
@@ -219,7 +233,21 @@ export const inboxes = sqliteTable("inboxes", {
 	// Unix milliseconds (deliberate: the inbox-routing spec's new columns use ms,
 	// unlike the older ISO-8601 TEXT columns in this table).
 	updatedAt: integer("updated_at"),
-});
+	},
+	(table) => [
+		index("idx_inboxes_workspace_parent_order").on(
+			table.workspaceId,
+			table.parentInboxId,
+			table.sortOrder,
+			table.id,
+		),
+		index("idx_inboxes_workspace_visibility").on(
+			table.workspaceId,
+			table.visibilityType,
+			table.isArchived,
+		),
+	],
+);
 
 // A channel can feed several inboxes; exactly one link per channel must be the
 // default (ADR 0008: "each Channel has a default Inbox, overridable by rules").
@@ -806,6 +834,10 @@ export const userSidebarPreferences = sqliteTable(
 			.notNull()
 			.references(() => workspaces.id, { onDelete: "cascade" }),
 		collapsedSectionsJson: text("collapsed_sections_json")
+			.notNull()
+			.default("[]"),
+		collapsedNodeIdsJson: text("collapsed_node_ids_json").notNull().default("[]"),
+		lastOpenBranchIdsJson: text("last_open_branch_ids_json")
 			.notNull()
 			.default("[]"),
 		pinnedItemIdsJson: text("pinned_item_ids_json").notNull().default("[]"),

@@ -1309,6 +1309,323 @@ describe("rule evaluation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Inbox tree persistence migration
+// ---------------------------------------------------------------------------
+
+describe("inbox tree persistence", () => {
+	test("fresh migrated D1 enforces tree integrity and Drizzle roundtrips defaults", async () => {
+		const { workspaceId } = await setup();
+		const inboxColumns = await ctx.env.DB.prepare("PRAGMA table_info(inboxes)").all<{
+			name: string;
+		}>();
+		expect(inboxColumns.results.map((column) => column.name)).toEqual(
+			expect.arrayContaining(["parent_inbox_id", "visibility_type", "tree_version"]),
+		);
+		const inboxIndexes = await ctx.env.DB.prepare("PRAGMA index_list(inboxes)").all<{
+			name: string;
+		}>();
+		expect(inboxIndexes.results.map((index) => index.name)).toEqual(
+			expect.arrayContaining([
+				"idx_inboxes_workspace_parent_order",
+				"idx_inboxes_workspace_visibility",
+			]),
+		);
+		const indexColumns = async (name: string): Promise<string[]> => {
+			const result = await ctx.env.DB.prepare(`PRAGMA index_info(${name})`).all<{
+				name: string;
+			}>();
+			return result.results.map((column: { name: string }) => column.name);
+		};
+		expect(
+			await indexColumns("idx_inboxes_workspace_parent_order"),
+		).toEqual(["workspace_id", "parent_inbox_id", "sort_order", "id"]);
+		expect(await indexColumns("idx_inboxes_workspace_visibility")).toEqual([
+			"workspace_id",
+			"visibility_type",
+			"is_archived",
+		]);
+		const preferenceColumns = await ctx.env.DB
+			.prepare("PRAGMA table_info(user_sidebar_preferences)")
+			.all<{ name: string }>();
+		expect(preferenceColumns.results.map((column) => column.name)).toEqual(
+			expect.arrayContaining([
+				"collapsed_node_ids_json",
+				"last_open_branch_ids_json",
+			]),
+		);
+
+		const now = new Date().toISOString();
+		const parentId = crypto.randomUUID();
+		const childId = crypto.randomUUID();
+		await ctx.db
+			.insert(inboxes)
+			.values({
+				id: parentId,
+				workspaceId,
+				name: "Parent",
+				createdAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(inboxes)
+			.values({
+				id: childId,
+				workspaceId,
+				parentInboxId: parentId,
+				name: "Child",
+				createdAt: now,
+			})
+			.run();
+		const child = await ctx.db
+			.select()
+			.from(inboxes)
+			.where(eq(inboxes.id, childId))
+			.get();
+		expect(child).toMatchObject({
+			parentInboxId: parentId,
+			visibilityType: "shared",
+			treeVersion: 0,
+		});
+
+		const foreignWorkspaceId = crypto.randomUUID();
+		await ctx.db
+			.insert(workspaces)
+			.values({
+				id: foreignWorkspaceId,
+				name: "Foreign workspace",
+				slug: `foreign-${foreignWorkspaceId}`,
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		const foreignParentId = crypto.randomUUID();
+		await ctx.db
+			.insert(inboxes)
+			.values({
+				id: foreignParentId,
+				workspaceId: foreignWorkspaceId,
+				name: "Foreign parent",
+				createdAt: now,
+			})
+			.run();
+
+		// These use the fresh Miniflare D1 after the real migration, bypassing
+		// Worker validation so the SQLite triggers and constraints are exercised.
+		await expect(
+			ctx.env.DB
+				.prepare("UPDATE inboxes SET workspace_id = ? WHERE id = ?")
+				.bind(foreignWorkspaceId, parentId)
+				.run(),
+		).rejects.toThrow(
+			"inbox workspace cannot change while children remain in another workspace",
+		);
+		await expect(
+			ctx.env.DB
+				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+				.bind(childId, parentId)
+				.run(),
+		).rejects.toThrow("inbox parent would create a cycle");
+		const crossWorkspaceChildId = crypto.randomUUID();
+		await expect(
+			ctx.env.DB
+				.prepare(
+					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+				)
+				.bind(
+					crossWorkspaceChildId,
+					workspaceId,
+					foreignParentId,
+					"Cross-workspace child",
+					now,
+				)
+				.run(),
+		).rejects.toThrow("inbox parent must belong to the same workspace");
+		const selfInsertId = crypto.randomUUID();
+		await expect(
+			ctx.env.DB
+				.prepare(
+					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+				)
+				.bind(selfInsertId, workspaceId, selfInsertId, "Self parent", now)
+				.run(),
+		).rejects.toThrow("inbox cannot be its own parent");
+		await expect(
+			ctx.env.DB
+				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+				.bind(foreignParentId, childId)
+				.run(),
+		).rejects.toThrow("inbox parent must belong to the same workspace");
+		await expect(
+			ctx.env.DB
+				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+				.bind(childId, childId)
+				.run(),
+		).rejects.toThrow("inbox cannot be its own parent");
+		await expect(
+			ctx.env.DB
+				.prepare("UPDATE inboxes SET workspace_id = ? WHERE id = ?")
+				.bind(foreignWorkspaceId, childId)
+				.run(),
+		).rejects.toThrow("inbox parent must belong to the same workspace");
+		await expect(
+			ctx.env.DB
+				.prepare(
+					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+				)
+				.bind(
+					crypto.randomUUID(),
+					workspaceId,
+					"missing-parent",
+					"Missing parent",
+					now,
+				)
+				.run(),
+		).rejects.toThrow(/FOREIGN KEY constraint failed/);
+		await expect(
+			ctx.env.DB
+				.prepare(
+					"INSERT INTO inboxes (id, workspace_id, name, created_at, visibility_type) VALUES (?, ?, ?, ?, ?)",
+				)
+				.bind(crypto.randomUUID(), workspaceId, "Bad visibility", now, "invalid")
+				.run(),
+		).rejects.toThrow(/CHECK constraint failed/);
+
+		const grandchildId = crypto.randomUUID();
+		await ctx.env.DB
+			.prepare(
+				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
+			.bind(grandchildId, workspaceId, childId, "Grandchild", now)
+			.run();
+		await expect(
+			ctx.env.DB
+				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+				.bind(grandchildId, parentId)
+				.run(),
+		).rejects.toThrow("inbox parent would create a cycle");
+
+		// A root plus 63 descendants has a 63-edge path; adding one more child
+		// reaches the allowed 64-edge maximum, while the 65th must be rejected.
+		let deepestId = crypto.randomUUID();
+		await ctx.env.DB
+			.prepare(
+				"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
+			)
+			.bind(deepestId, workspaceId, "Depth root", now)
+			.run();
+		for (let depth = 1; depth <= 64; depth += 1) {
+			const childAtDepthId = crypto.randomUUID();
+			await ctx.env.DB
+				.prepare(
+					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+				)
+				.bind(
+					childAtDepthId,
+					workspaceId,
+					deepestId,
+					`Depth ${depth}`,
+					now,
+				)
+				.run();
+			deepestId = childAtDepthId;
+		}
+		await expect(
+			ctx.env.DB
+				.prepare(
+					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+				)
+				.bind(
+					crypto.randomUUID(),
+					workspaceId,
+					deepestId,
+					"Depth 65",
+					now,
+				)
+				.run(),
+		).rejects.toThrow("inbox parent hierarchy exceeds maximum depth");
+
+		// The maximum is 64 edges from a root to a node. Reparenting must account
+		// for the moved node's entire existing subtree, not merely the moved node.
+		let depth63TargetId = crypto.randomUUID();
+		await ctx.env.DB
+			.prepare(
+				"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
+			)
+			.bind(depth63TargetId, workspaceId, "Move target root", now)
+			.run();
+		for (let depth = 1; depth <= 63; depth += 1) {
+			const childAtDepthId = crypto.randomUUID();
+			await ctx.env.DB
+				.prepare(
+					"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+				)
+				.bind(
+					childAtDepthId,
+					workspaceId,
+					depth63TargetId,
+					`Move target depth ${depth}`,
+					now,
+				)
+				.run();
+			depth63TargetId = childAtDepthId;
+		}
+		const subtreeRootId = crypto.randomUUID();
+		const subtreeChildId = crypto.randomUUID();
+		await ctx.env.DB
+			.prepare(
+				"INSERT INTO inboxes (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)",
+			)
+			.bind(subtreeRootId, workspaceId, "Move subtree root", now)
+			.run();
+		await ctx.env.DB
+			.prepare(
+				"INSERT INTO inboxes (id, workspace_id, parent_inbox_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
+			.bind(subtreeChildId, workspaceId, subtreeRootId, "Move subtree child", now)
+			.run();
+		await expect(
+			ctx.env.DB
+				.prepare("UPDATE inboxes SET parent_inbox_id = ? WHERE id = ?")
+				.bind(depth63TargetId, subtreeRootId)
+				.run(),
+		).rejects.toThrow("inbox parent hierarchy exceeds maximum depth");
+
+		await ctx.db.delete(inboxes).where(eq(inboxes.id, parentId)).run();
+		expect(
+			await ctx.db
+				.select({ parentInboxId: inboxes.parentInboxId })
+				.from(inboxes)
+				.where(eq(inboxes.id, childId))
+				.get(),
+		).toEqual({ parentInboxId: null });
+
+		await ctx.db
+			.insert(userSidebarPreferences)
+			.values({
+				id: crypto.randomUUID(),
+				userId: ADMIN,
+				workspaceId,
+				updatedAt: Date.now(),
+			})
+			.run();
+		const preferences = await ctx.db
+			.select()
+			.from(userSidebarPreferences)
+			.where(
+				and(
+					eq(userSidebarPreferences.userId, ADMIN),
+					eq(userSidebarPreferences.workspaceId, workspaceId),
+				),
+			)
+			.get();
+		expect(preferences).toMatchObject({
+			collapsedNodeIdsJson: "[]",
+			lastOpenBranchIdsJson: "[]",
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Sidebar: counts scoped to permitted inboxes, prefs, saved filters
 // ---------------------------------------------------------------------------
 
