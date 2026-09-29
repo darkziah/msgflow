@@ -380,9 +380,10 @@ export interface InboxSummary {
 	isDefault: boolean;
 	/** Channel instances feeding this inbox. */
 	channels: InboxChannelLink[];
-	/** Agent ids that are members of this inbox. */
-	memberIds: string[];
-	conversationCount: number;
+	/** Present only when the caller can read this inbox. */
+	memberIds?: string[];
+	/** Present only when the caller can read this inbox. */
+	conversationCount?: number;
 	createdAt: string;
 	/** Unix ms; null for inboxes created before the routing migration. */
 	updatedAtMs: number | null;

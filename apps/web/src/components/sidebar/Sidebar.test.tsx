@@ -34,7 +34,7 @@ function sidebarTree(): SidebarTreeResponse {
 	const child = node("inbox:child", "Child");
 	child.parentId = "inbox:parent";
 	const parent = node("inbox:parent", "Parent", [child]);
-	parent.parentId = "section:shared";
+	parent.parentId = "section:shared-inboxes";
 	return {
 		workspace: { id: "workspace", name: "Workspace", slug: "workspace" },
 		permissions: { isAdmin: false },
@@ -46,12 +46,11 @@ function sidebarTree(): SidebarTreeResponse {
 			hiddenItemIds: [],
 			itemOrder: {},
 		},
-		sections: [node("section:shared", "Shared Inboxes", [parent])],
+		sections: [node("section:shared-inboxes", "Shared Inboxes", [parent])],
 	};
 }
 
-async function renderSidebar(
-): Promise<void> {
+async function renderSidebar(): Promise<void> {
 	vi.spyOn(api, "getSidebar").mockResolvedValue(sidebarTree());
 	const queryClient = new QueryClient({
 		defaultOptions: { queries: { retry: false } },
@@ -110,7 +109,34 @@ describe("Sidebar preference persistence", () => {
 		expect(updatePreferences).toHaveBeenCalledWith("workspace", {
 			collapsedNodeIds: ["inbox:parent"],
 		});
-		expect(screen.queryByRole("treeitem", { name: /child/i })).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("treeitem", { name: /child/i }),
+		).not.toBeInTheDocument();
+	});
+
+	test("persists the stable section id after the 250ms debounce", async () => {
+		const updatePreferences = vi
+			.spyOn(api, "updateSidebarPreferences")
+			.mockResolvedValue({
+				preferences: {
+					...sidebarTree().preferences,
+					collapsedSections: ["section:shared-inboxes"],
+				},
+			});
+		await renderSidebar();
+		vi.useFakeTimers();
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Collapse Shared Inboxes" }),
+		);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(250);
+			await vi.advanceTimersByTimeAsync(0);
+		});
+
+		expect(updatePreferences).toHaveBeenCalledWith("workspace", {
+			collapsedSections: ["section:shared-inboxes"],
+		});
 	});
 
 	test("rolls back a collapsed node when preference persistence fails", async () => {
@@ -132,6 +158,8 @@ describe("Sidebar preference persistence", () => {
 		expect(updatePreferences).toHaveBeenCalledWith("workspace", {
 			collapsedNodeIds: ["inbox:parent"],
 		});
-		expect(screen.getByRole("treeitem", { name: /child/i })).toBeInTheDocument();
+		expect(
+			screen.getByRole("treeitem", { name: /child/i }),
+		).toBeInTheDocument();
 	});
 });

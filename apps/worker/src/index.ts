@@ -1,3 +1,4 @@
+// biome-ignore assist/source/organizeImports: preserve the existing route-domain import grouping.
 import { Hono } from "hono";
 import { Either, Schema } from "effect";
 import type { Context } from "hono";
@@ -37,7 +38,6 @@ import {
 	CannedReplyWriteRequestSchema,
 	InboxCreateRequestSchema,
 	InboxChannelRequestSchema,
-	InboxMemberRequestSchema,
 	InboxReorderRequestSchema,
 	InboxTreeMoveRequestSchema,
 	InboxUpdateRequestSchema,
@@ -72,7 +72,6 @@ import { routeInbound } from "./ingest";
 
 import {
 	ManageError,
-	addInboxMember,
 	archiveInbox,
 	connectChannelToken,
 	createFacebookChannel,
@@ -83,11 +82,8 @@ import {
 	disconnectChannel,
 	deleteFacebookChannel,
 	deleteCannedReply,
-	deleteInbox,
 	deleteRule,
 	deleteTag,
-	joinInbox,
-	leaveInbox,
 	linkChannelToInbox,
 	listCannedReplies,
 	listChannels,
@@ -95,7 +91,6 @@ import {
 	listRules,
 	listTags,
 	listTeams,
-	removeInboxMember,
 	reorderInboxes,
 	setDefaultInbox,
 	unlinkChannelFromInbox,
@@ -1620,13 +1615,14 @@ app.delete("/api/workspaces/:workspaceId/inboxes/:inboxId", async (c) => {
 			c.req.param("workspaceId"),
 			session.user.id,
 		);
-		await deleteInbox(
-			c.env,
-			c.req.param("workspaceId"),
-			c.req.param("inboxId"),
-			session.user.id,
+		return c.json(
+			{
+				success: false,
+				error:
+					"inbox deletion is disabled: archive the inbox or explicitly transfer its conversations first",
+			},
+			409,
 		);
-		return c.json({ success: true });
 	} catch (err) {
 		return manageError(c, err);
 	}

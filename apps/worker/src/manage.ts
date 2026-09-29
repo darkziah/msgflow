@@ -43,7 +43,7 @@ import { encryptChannelToken } from "./channel-token-crypto";
 import type { Env } from "./env";
 import { ManageError } from "./errors";
 import { validateAndSubscribeFacebookPage } from "./facebook-page";
-import { assertValidInboxParent } from "./inbox-tree";
+import { assertValidInboxParent, getReadableInboxIds } from "./inbox-tree";
 
 export { ManageError } from "./errors";
 
@@ -1085,16 +1085,30 @@ export async function listInboxes(
 	userId: string,
 ): Promise<InboxSummary[]> {
 	const db = drizzle(env.DB);
-	await requireWorkspaceAccess(db, workspaceId, userId);
+	const access = await requireWorkspaceAccess(db, workspaceId, userId);
+	const readableInboxIds = await getReadableInboxIds(db, workspaceId, userId);
+	const readableInboxIdSet = new Set(readableInboxIds);
 	const rows = await db
 		.select()
 		.from(inboxes)
-		.where(eq(inboxes.workspaceId, workspaceId))
+		.where(
+			access.isAdmin
+				? eq(inboxes.workspaceId, workspaceId)
+				: readableInboxIds.length > 0
+					? and(
+							eq(inboxes.workspaceId, workspaceId),
+							inArray(inboxes.id, readableInboxIds),
+						)
+					: sql`0`,
+		)
 		.orderBy(asc(inboxes.sortOrder), asc(inboxes.name))
 		.all();
 	if (rows.length === 0) return [];
 
 	const inboxIds = rows.map((row) => row.id);
+	const readableRowIds = rows
+		.filter((row) => readableInboxIdSet.has(row.id))
+		.map((row) => row.id);
 	const links = await db
 		.select({
 			inboxId: inboxChannels.inboxId,
@@ -1107,20 +1121,24 @@ export async function listInboxes(
 		.innerJoin(channels, eq(inboxChannels.channelId, channels.id))
 		.where(inArray(inboxChannels.inboxId, inboxIds))
 		.all();
-	const members = await db
-		.select()
-		.from(inboxMembers)
-		.where(inArray(inboxMembers.inboxId, inboxIds))
-		.all();
-	const counts = await db
-		.select({
-			inboxId: conversations.inboxId,
-			count: sqlCount(),
-		})
-		.from(conversations)
-		.where(inArray(conversations.inboxId, inboxIds))
-		.groupBy(conversations.inboxId)
-		.all();
+	const members = readableRowIds.length
+		? await db
+				.select()
+				.from(inboxMembers)
+				.where(inArray(inboxMembers.inboxId, readableRowIds))
+				.all()
+		: [];
+	const counts = readableRowIds.length
+		? await db
+				.select({
+					inboxId: conversations.inboxId,
+					count: sqlCount(),
+				})
+				.from(conversations)
+				.where(inArray(conversations.inboxId, readableRowIds))
+				.groupBy(conversations.inboxId)
+				.all()
+		: [];
 	const teamRows = await db
 		.select({ id: teams.id, name: teams.name })
 		.from(teams)
@@ -1148,27 +1166,39 @@ export async function listInboxes(
 	const countByInbox = new Map<string, number>();
 	for (const row of counts) countByInbox.set(row.inboxId, row.count ?? 0);
 
-	return rows.map((row) => ({
-		id: row.id,
-		parentInboxId: row.parentInboxId,
-		visibilityType: row.visibilityType,
-		treeVersion: row.treeVersion,
-		name: row.name,
-		description: row.description,
-		color: row.color,
-		icon: row.icon,
-		teamId: row.teamId,
-		teamName: row.teamId ? (teamNameById.get(row.teamId) ?? null) : null,
-		sortOrder: row.sortOrder,
-		isArchived: row.isArchived,
-		assignmentStrategy: row.assignmentStrategy,
-		isDefault: (linksByInbox.get(row.id) ?? []).some((link) => link.isDefault),
-		channels: linksByInbox.get(row.id) ?? [],
-		memberIds: membersByInbox.get(row.id) ?? [],
-		conversationCount: countByInbox.get(row.id) ?? 0,
-		createdAt: row.createdAt,
-		updatedAtMs: row.updatedAt,
-	}));
+	return rows.map((row) => {
+		const summary = {
+			id: row.id,
+			parentInboxId: row.parentInboxId,
+			visibilityType: row.visibilityType,
+			treeVersion: row.treeVersion,
+			name: row.name,
+			description: row.description,
+			color: row.color,
+			icon: row.icon,
+			teamId: row.teamId,
+			teamName: row.teamId ? (teamNameById.get(row.teamId) ?? null) : null,
+			sortOrder: row.sortOrder,
+			isArchived: row.isArchived,
+			assignmentStrategy: row.assignmentStrategy,
+			isDefault: (linksByInbox.get(row.id) ?? []).some(
+				(link) => link.isDefault,
+			),
+			channels: linksByInbox.get(row.id) ?? [],
+			createdAt: row.createdAt,
+			updatedAtMs: row.updatedAt,
+		};
+		// Admins can configure every inbox, but configuration access is not
+		// conversation access. Do not disclose membership or traffic for an
+		// inbox outside their readable scope.
+		return readableInboxIdSet.has(row.id)
+			? {
+					...summary,
+					memberIds: membersByInbox.get(row.id) ?? [],
+					conversationCount: countByInbox.get(row.id) ?? 0,
+				}
+			: summary;
+	});
 }
 
 // SQL count helper (drizzle's count() needs an alias; this keeps the query flat).
@@ -1370,32 +1400,11 @@ export async function deleteInbox(
 ): Promise<void> {
 	const db = drizzle(env.DB);
 	await requireAdminAccess(db, workspaceId, actorUserId);
-	const existing = await db
-		.select()
-		.from(inboxes)
-		.where(and(eq(inboxes.id, id), eq(inboxes.workspaceId, workspaceId)))
-		.get();
-	if (!existing) throw new ManageError("inbox not found", 404);
-
-	// Conversations in this inbox must re-route, never orphan (ADR 0008: the
-	// FK is NOT NULL with no ON DELETE). Re-home to the workspace's first
-	// remaining inbox, then remove links/members and the inbox itself.
-	const fallback = await db
-		.select()
-		.from(inboxes)
-		.where(eq(inboxes.workspaceId, workspaceId))
-		.all();
-	const target = fallback.find((row) => row.id !== id);
-	if (!target) throw new ManageError("cannot delete the last inbox", 409);
-
-	await db
-		.update(conversations)
-		.set({ inboxId: target.id, updatedAt: new Date().toISOString() })
-		.where(eq(conversations.inboxId, id))
-		.run();
-	await db.delete(inboxChannels).where(eq(inboxChannels.inboxId, id)).run();
-	await db.delete(inboxMembers).where(eq(inboxMembers.inboxId, id)).run();
-	await db.delete(inboxes).where(eq(inboxes.id, id)).run();
+	void id;
+	throw new ManageError(
+		"inbox deletion is disabled: archive the inbox or explicitly transfer its conversations first",
+		409,
+	);
 }
 
 /**

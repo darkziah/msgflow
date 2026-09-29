@@ -47,6 +47,7 @@ import {
 	createRule,
 	createTag,
 	deleteFacebookChannel,
+	deleteInbox,
 	deleteRule,
 	deleteTag,
 	disconnectChannel,
@@ -564,7 +565,7 @@ describe("workspace-scoped management route boundaries", () => {
 				"inbox delete",
 				"delete",
 				"/api/workspaces/:workspaceId/inboxes/:inboxId",
-				"deleteInbox(",
+				"inbox deletion is disabled",
 			],
 			[
 				"inbox channel link",
@@ -777,6 +778,70 @@ function escapeRegExp(value: string): string {
 // ---------------------------------------------------------------------------
 
 describe("inbox CRUD", () => {
+	test("lists only readable inboxes for members and redacts unreadable admin metadata", async () => {
+		const { workspaceId } = await setup();
+		await addMember(workspaceId, MEMBER);
+		await insertTreeInbox(workspaceId, "shared");
+		await insertTreeInbox(workspaceId, "restricted", {
+			visibilityType: "private",
+		});
+		const channelId = await insertChannel(workspaceId);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			"restricted",
+			await insertContact(workspaceId),
+			"restricted-conversation",
+		);
+
+		expect(
+			(await listInboxes(ctx.env, workspaceId, MEMBER)).map(
+				(inbox) => inbox.id,
+			),
+		).toEqual(["shared"]);
+		const adminInboxes = await listInboxes(ctx.env, workspaceId, ADMIN);
+		const restricted = adminInboxes.find((inbox) => inbox.id === "restricted");
+		expect(restricted?.name).toBe("restricted");
+		expect(restricted).not.toHaveProperty("memberIds");
+		expect(restricted).not.toHaveProperty("conversationCount");
+	});
+
+	test("deprecated inbox deletion never rehomes conversations or changes rows", async () => {
+		const { workspaceId } = await setup();
+		const source = (
+			await createInbox(ctx.env, workspaceId, { name: "Source" }, ADMIN)
+		).id;
+		await createInbox(ctx.env, workspaceId, { name: "Destination" }, ADMIN);
+		const channelId = await insertChannel(workspaceId);
+		await insertConversation(
+			workspaceId,
+			channelId,
+			source,
+			await insertContact(workspaceId),
+			"deletion-conversation",
+		);
+
+		await expect(
+			deleteInbox(ctx.env, workspaceId, source, ADMIN),
+		).rejects.toMatchObject({
+			status: 409,
+		});
+		expect(
+			await ctx.db
+				.select({ inboxId: conversations.inboxId })
+				.from(conversations)
+				.where(eq(conversations.id, "deletion-conversation"))
+				.get(),
+		).toEqual({ inboxId: source });
+		expect(
+			await ctx.db
+				.select({ id: inboxes.id })
+				.from(inboxes)
+				.where(eq(inboxes.id, source))
+				.get(),
+		).toEqual({ id: source });
+	});
+
 	test("owner creates an explicit Facebook Page channel with one default Inbox", async () => {
 		const { workspaceId } = await setup();
 		ctx.env.CHANNEL_TOKEN_ENCRYPTION_KEY =
@@ -1691,8 +1756,8 @@ describe("demo inbox tree seed", () => {
 			["in-vip", "in-sales", 1],
 		] as const) {
 			expect(seed).toContain(
-			`SET parent_inbox_id = '${parentId}', sort_order = ${sortOrder}`,
-		);
+				`SET parent_inbox_id = '${parentId}', sort_order = ${sortOrder}`,
+			);
 			expect(seed).toContain(`WHERE id = '${id}'`);
 		}
 
@@ -1711,9 +1776,7 @@ describe("demo inbox tree seed", () => {
 		expect(seed).toContain(
 			"'ra-quote-1', 'rule-quote', 'move_inbox', 'in-sales-leads'",
 		);
-		expect(seed).toContain(
-			"'ra-vip-1', 'rule-vip', 'move_inbox', 'in-vip'",
-		);
+		expect(seed).toContain("'ra-vip-1', 'rule-vip', 'move_inbox', 'in-vip'");
 		expect(seed).toContain(
 			"'ra-tech-1', 'rule-tech', 'move_inbox', 'in-tech-support'",
 		);
@@ -2000,7 +2063,7 @@ describe("sidebar + preferences", () => {
 		});
 	});
 
-	test("sidebar preferences validate stable item ids and persist per user", async () => {
+	test("sidebar preferences persist stable section ids and map legacy keys", async () => {
 		const { workspaceId } = await setup();
 		await expect(
 			updateSidebarPreferences(ctx.env, workspaceId, ADMIN, {
@@ -2009,12 +2072,12 @@ describe("sidebar + preferences", () => {
 		).rejects.toThrow(ManageError);
 
 		const prefs = await updateSidebarPreferences(ctx.env, workspaceId, ADMIN, {
-			collapsedSections: ["teams"],
+			collapsedSections: ["section:channels"],
 			pinnedItemIds: ["system:all", "system:unassigned"],
 			hiddenItemIds: ["inbox:xyz"],
 			itemOrder: { "system:all": 3 },
 		});
-		expect(prefs.collapsedSections).toEqual(["teams"]);
+		expect(prefs.collapsedSections).toEqual(["section:channels"]);
 		expect(prefs.pinnedItemIds).toContain("system:unassigned");
 
 		const row = await ctx.db
@@ -2028,6 +2091,17 @@ describe("sidebar + preferences", () => {
 			)
 			.get();
 		expect(row).not.toBeNull();
+		expect(row?.collapsedSectionsJson).toBe('["section:channels"]');
+
+		await ctx.db
+			.update(userSidebarPreferences)
+			.set({ collapsedSectionsJson: '["teams","tags"]' })
+			.where(eq(userSidebarPreferences.id, row?.id ?? "missing"))
+			.run();
+		expect(
+			(await getSidebar(ctx.env, workspaceId, ADMIN)).preferences
+				.collapsedSections,
+		).toEqual(["section:shared-inboxes", "section:tags"]);
 
 		// Another user's preferences are independent.
 		await addMember(workspaceId, MEMBER);
@@ -2368,9 +2442,9 @@ describe("inbox tree authorization and moves", () => {
 		expect(
 			await getReadableInboxIds(ctx.db, workspaceId, MEMBER),
 		).not.toContain("mail-shared-public");
-		expect(JSON.stringify(await getSidebar(ctx.env, workspaceId, MEMBER))).not.toContain(
-			"support@test.dev",
-		);
+		expect(
+			JSON.stringify(await getSidebar(ctx.env, workspaceId, MEMBER)),
+		).not.toContain("support@test.dev");
 		await ctx.db
 			.insert(inboxMembers)
 			.values({

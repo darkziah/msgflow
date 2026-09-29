@@ -61,8 +61,23 @@ const LEGACY_ITEM_IDS = new Set([
 	"system:snoozed",
 	"system:closed",
 ]);
-// Section keys are NOT item ids — they are the sidebar section identifiers.
-const SECTION_KEYS = new Set(["inbox", "assigned", "teams", "tags", "views"]);
+// Section ids are emitted by the tree and are the persisted preference shape.
+// The legacy renderer stored short keys; map them during read/update so users
+// retain their collapse state without reintroducing ambiguous values.
+const LEGACY_SECTION_IDS: Record<string, string> = {
+	inbox: "section:shared-inboxes",
+	assigned: "section:my-work",
+	teams: "section:shared-inboxes",
+	tags: "section:tags",
+	views: "section:saved-views",
+};
+const SECTION_IDS = new Set([
+	"section:my-work",
+	"section:shared-inboxes",
+	"section:channels",
+	"section:tags",
+	"section:saved-views",
+]);
 const FILTER_KEYS = new Set([
 	"status",
 	"inboxId",
@@ -551,10 +566,10 @@ function sanitizePreferences(
 	}
 	return {
 		...preferences,
-		// Section keys are the legacy persisted collapse contract. They are not
-		// tree node ids and must not be remapped to a coincidentally named node.
+		// Only stable tree section ids leave the Worker. Legacy ids were mapped
+		// when preferences were read or updated.
 		collapsedSections: preferences.collapsedSections.filter((id) =>
-			SECTION_KEYS.has(id),
+			SECTION_IDS.has(id),
 		),
 		collapsedNodeIds: (preferences.collapsedNodeIds ?? []).filter((id) =>
 			permittedIds.has(id),
@@ -668,7 +683,9 @@ async function loadPreferences(
 		.get();
 	if (!row) return DEFAULT_PREFERENCES;
 	return {
-		collapsedSections: parseJsonArray(row.collapsedSectionsJson),
+		collapsedSections: normalizeSectionIds(
+			parseJsonArray(row.collapsedSectionsJson),
+		),
 		collapsedNodeIds: parseJsonArray(row.collapsedNodeIdsJson),
 		lastOpenBranchIds: parseJsonArray(row.lastOpenBranchIdsJson),
 		pinnedItemIds: parseJsonArray(row.pinnedItemIdsJson),
@@ -767,16 +784,25 @@ function validateSectionKeys(keys: string[]): string[] {
 	}
 	const out: string[] = [];
 	for (const key of keys) {
-		if (typeof key !== "string" || !SECTION_KEYS.has(key)) {
+		const normalized =
+			typeof key === "string" ? (LEGACY_SECTION_IDS[key] ?? key) : key;
+		if (typeof normalized !== "string" || !SECTION_IDS.has(normalized)) {
 			throw new ManageError(
-				`invalid sidebar section key: ${String(key)} — expected one of ${[
-					...SECTION_KEYS,
+				`invalid sidebar section id: ${String(key)} — expected one of ${[
+					...SECTION_IDS,
 				].join(", ")}`,
 			);
 		}
-		if (!out.includes(key)) out.push(key);
+		if (!out.includes(normalized)) out.push(normalized);
 	}
 	return out;
+}
+
+function normalizeSectionIds(ids: string[]): string[] {
+	return ids.flatMap((id) => {
+		const normalized = LEGACY_SECTION_IDS[id] ?? id;
+		return SECTION_IDS.has(normalized) ? [normalized] : [];
+	});
 }
 
 function validateItemIds(ids: string[]): string[] {
