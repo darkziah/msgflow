@@ -22,7 +22,7 @@ enabled = true
 ATTACHMENT_PUBLIC_BASE_URL = "https://attachments.messageflow.dev"
 AUTH_EMAIL_FROM = "auth@messageflow.dev"
 BETTER_AUTH_URL = "https://messageflow.dev"
-BETTER_AUTH_TRUSTED_ORIGINS = "https://messageflow.dev"
+BETTER_AUTH_TRUSTED_ORIGINS = "https://messageflow.dev,https://msgflow.yeheyremit.jp"
 
 [[d1_databases]]
 binding = "DB"
