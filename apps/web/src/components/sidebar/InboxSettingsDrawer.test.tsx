@@ -27,6 +27,7 @@ vi.mock("@/lib/api", () => ({
 		listTeams: vi.fn(),
 		listRules: vi.fn(),
 		moveInboxInTree: vi.fn(),
+		workspaceUpdateInbox: vi.fn(),
 	},
 }));
 
@@ -89,16 +90,19 @@ function renderDrawer() {
 	const queryClient = new QueryClient({
 		defaultOptions: { queries: { retry: false } },
 	});
-	return render(
+	const onClose = vi.fn();
+	const onChanged = vi.fn();
+	const result = render(
 		<QueryClientProvider client={queryClient}>
 			<InboxSettingsDrawer
 				workspaceId="workspace-1"
 				inboxId="child"
-				onClose={vi.fn()}
-				onChanged={vi.fn()}
+				onClose={onClose}
+				onChanged={onChanged}
 			/>
 		</QueryClientProvider>,
 	);
+	return { ...result, onClose, onChanged, queryClient };
 }
 
 describe("InboxSettingsDrawer tree moves", () => {
@@ -108,6 +112,7 @@ describe("InboxSettingsDrawer tree moves", () => {
 		mocks.listTeams.mockResolvedValue({ teams: [] });
 		mocks.listRules.mockResolvedValue({ rules: [] });
 		mocks.moveInboxInTree.mockResolvedValue({ success: true });
+		mocks.workspaceUpdateInbox.mockResolvedValue({ inbox: inboxes[1] });
 		mocks.getSidebar.mockResolvedValue({ permissions: { isAdmin: true } });
 	});
 
@@ -130,6 +135,42 @@ describe("InboxSettingsDrawer tree moves", () => {
 				{ parentInboxId: "parent", expectedTreeVersion: 7 },
 			);
 		});
+	});
+
+	it("saves a changed parent with metadata and refreshes tree queries", async () => {
+		const { onChanged, onClose, queryClient } = renderDrawer();
+		const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+		const parent = await screen.findByLabelText("Parent");
+		fireEvent.change(parent, { target: { value: "parent" } });
+		fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+		await waitFor(() => {
+			expect(mocks.moveInboxInTree).toHaveBeenCalledWith(
+				"workspace-1",
+				"child",
+				{ parentInboxId: "parent", expectedTreeVersion: 7 },
+			);
+		});
+		expect(invalidateQueries).toHaveBeenCalledWith({
+			queryKey: ["sidebar", "workspace-1"],
+		});
+		expect(invalidateQueries).toHaveBeenCalledWith({
+			queryKey: ["workspace-inboxes", "workspace-1"],
+		});
+		expect(onChanged).toHaveBeenCalledOnce();
+		expect(onClose).toHaveBeenCalledOnce();
+	});
+
+	it("keeps the drawer open when saving a changed parent fails", async () => {
+		mocks.moveInboxInTree.mockRejectedValue(new Error("inbox tree version is stale"));
+		const { onChanged, onClose } = renderDrawer();
+		const parent = await screen.findByLabelText("Parent");
+		fireEvent.change(parent, { target: { value: "parent" } });
+		fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+		expect(await screen.findByRole("button", { name: "Reload" })).not.toBeNull();
+		expect(onChanged).not.toHaveBeenCalled();
+		expect(onClose).not.toHaveBeenCalled();
 	});
 
 	it("hides tree move controls for non-admins", async () => {

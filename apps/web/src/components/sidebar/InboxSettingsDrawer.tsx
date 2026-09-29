@@ -114,6 +114,8 @@ export function InboxSettingsDrawer({
 	async function save() {
 		setSaving(true);
 		setError(null);
+		setMoveConflict(false);
+		let metadataSaved = false;
 		try {
 			const body: InboxCreateRequest = {
 				name: name.trim(),
@@ -126,13 +128,32 @@ export function InboxSettingsDrawer({
 			};
 			if (inbox) {
 				await api.workspaceUpdateInbox(workspaceId, inbox.id, body);
+				metadataSaved = true;
+				if (parentInboxId !== (inbox.parentInboxId ?? "")) {
+					await api.moveInboxInTree(workspaceId, inbox.id, {
+						parentInboxId: parentInboxId || null,
+						expectedTreeVersion: inbox.treeVersion ?? 0,
+					});
+					await Promise.all([
+						queryClient.invalidateQueries({ queryKey: ["sidebar", workspaceId] }),
+						queryClient.invalidateQueries({
+							queryKey: ["workspace-inboxes", workspaceId],
+						}),
+					]);
+				}
 			} else {
 				await api.workspaceCreateInbox(workspaceId, body);
 			}
 			onChanged();
 			onClose();
 		} catch (err) {
-			setError(err instanceof Error ? err.message : "Save failed.");
+			const message = err instanceof Error ? err.message : "Save failed.";
+			if (metadataSaved) {
+				setError(`Inbox settings were saved, but tree location could not be updated: ${message}`);
+				setMoveConflict(/stale|tree version|before inbox/i.test(message));
+			} else {
+				setError(`Could not save inbox settings: ${message}`);
+			}
 		} finally {
 			setSaving(false);
 		}
@@ -160,6 +181,7 @@ export function InboxSettingsDrawer({
 		if (!inbox) return;
 		setError(null);
 		setMoveConflict(false);
+		setSaving(true);
 		try {
 			await api.moveInboxInTree(workspaceId, inbox.id, {
 				parentInboxId: parentInboxId || null,
@@ -176,6 +198,8 @@ export function InboxSettingsDrawer({
 			const message = err instanceof Error ? err.message : "Move failed.";
 			setError(message);
 			setMoveConflict(/stale|tree version|before inbox/i.test(message));
+		} finally {
+			setSaving(false);
 		}
 	}
 
@@ -504,7 +528,9 @@ export function InboxSettingsDrawer({
 								className="mt-2"
 								size="sm"
 								variant="outline"
-								disabled={parentInboxId === (inbox.parentInboxId ?? "")}
+								disabled={
+									saving || parentInboxId === (inbox.parentInboxId ?? "")
+								}
 								onClick={moveTreeLocation}
 							>
 								Move location
