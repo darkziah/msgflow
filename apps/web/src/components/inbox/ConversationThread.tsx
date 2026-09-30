@@ -342,6 +342,7 @@ export function ConversationThread({
 					conversationId={conversationId}
 					workspaceId={workspaceId}
 					showSubject={conversation.channel === "email"}
+					attachmentUnavailable={conversation.channel === "whatsapp"}
 					onSent={() =>
 						queryClient.invalidateQueries({
 							queryKey: ["messages", workspaceId, conversationId],

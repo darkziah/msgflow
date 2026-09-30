@@ -62,6 +62,81 @@ export const FacebookGraphSendResponseSchema = Schema.Struct({
 	),
 });
 
+/** Consumed subset of Meta's WhatsApp Cloud API webhook envelope. */
+export const WhatsAppWebhookEnvelopeSchema = Schema.Struct({
+	object: Schema.Literal("whatsapp_business_account"),
+	entry: Schema.Array(
+		Schema.Struct({
+			changes: Schema.Array(
+				Schema.Struct({
+					value: Schema.Struct({
+						metadata: Schema.optionalWith(
+							Schema.Struct({
+								phone_number_id: Schema.optionalWith(Schema.String, {
+									exact: true,
+								}),
+							}),
+							{ exact: true },
+						),
+						contacts: Schema.optionalWith(
+							Schema.Array(
+								Schema.Struct({
+									wa_id: Schema.optionalWith(Schema.String, { exact: true }),
+									profile: Schema.optionalWith(
+										Schema.Struct({
+											name: Schema.optionalWith(Schema.String, {
+												exact: true,
+											}),
+										}),
+										{ exact: true },
+									),
+								}),
+							),
+							{ exact: true },
+						),
+						messages: Schema.optionalWith(
+							Schema.Array(
+								Schema.Struct({
+									id: Schema.optionalWith(Schema.String, { exact: true }),
+									from: Schema.optionalWith(Schema.String, { exact: true }),
+									timestamp: Schema.optionalWith(Schema.String, { exact: true }),
+									type: Schema.optionalWith(Schema.String, { exact: true }),
+									text: Schema.optionalWith(
+										Schema.Struct({
+											body: Schema.optionalWith(Schema.String, {
+												exact: true,
+											}),
+										}),
+										{ exact: true },
+									),
+								}),
+							),
+							{ exact: true },
+						),
+					}),
+				}),
+			),
+		}),
+	),
+});
+
+/** Consumed subset of Graph's WhatsApp text-send response. */
+export const WhatsAppGraphSendResponseSchema = Schema.Struct({
+	messages: Schema.optionalWith(
+		Schema.Array(
+			Schema.Struct({ id: Schema.optionalWith(Schema.String, { exact: true }) }),
+		),
+		{ exact: true },
+	),
+	error: Schema.optionalWith(
+		Schema.Struct({
+			message: Schema.optionalWith(Schema.String, { exact: true }),
+			code: Schema.optionalWith(Schema.Number, { exact: true }),
+		}),
+		{ exact: true },
+	),
+});
+
 /** Parsed inbound fields consumed by email normalization. */
 export const ParsedEmailSchema = Schema.Struct({
 	from: Schema.String,

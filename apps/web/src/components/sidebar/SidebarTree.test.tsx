@@ -243,6 +243,18 @@ describe("SidebarTree", () => {
 			channel: "facebook",
 			channelId: "page-1",
 		};
+		const whatsapp = node("channel-group:whatsapp", "WhatsApp", [
+			node("channel:phone-1", "Support phone"),
+		]);
+		whatsapp.type = "channel-group";
+		whatsapp.filter = { status: "open", channel: "whatsapp" };
+		whatsapp.children[0].type = "channel";
+		whatsapp.children[0].filter = {
+			status: "open",
+			channel: "whatsapp",
+			channelId: "phone-1",
+		};
+		channels.children.push(whatsapp);
 		const views = node("section:saved-views", "Saved Views", [
 			node("view:urgent", "Urgent"),
 		]);
@@ -258,6 +270,15 @@ describe("SidebarTree", () => {
 			status: "open",
 			channel: "facebook",
 			channelId: "page-1",
+		});
+		expect(nodeFilter(whatsapp)).toEqual({
+			status: "open",
+			channel: "whatsapp",
+		});
+		expect(nodeFilter(whatsapp.children[0])).toEqual({
+			status: "open",
+			channel: "whatsapp",
+			channelId: "phone-1",
 		});
 		expect(nodeFilter(views.children[0])).toEqual({ savedViewId: "urgent" });
 	});

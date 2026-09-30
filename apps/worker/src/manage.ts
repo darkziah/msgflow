@@ -15,6 +15,8 @@ import {
 	type TagSummary,
 	type TagUpdateRequest,
 	type TeamSummary,
+	type WhatsAppChannelCreateRequest,
+	type WhatsAppChannelUpdateRequest,
 } from "@msgflow/contracts";
 import {
 	cannedReplies,
@@ -44,6 +46,7 @@ import type { Env } from "./env";
 import { ManageError } from "./errors";
 import { validateAndSubscribeFacebookPage } from "./facebook-page";
 import { assertValidInboxParent, getReadableInboxIds } from "./inbox-tree";
+import { validateWhatsAppPhoneNumber } from "./whatsapp";
 
 export { ManageError } from "./errors";
 
@@ -856,6 +859,222 @@ export async function createFacebookChannel(
 	};
 }
 
+/** Creates or revives a validated WhatsApp Cloud API phone channel. */
+export async function createWhatsAppChannel(
+	env: Env,
+	workspaceId: string,
+	input: WhatsAppChannelCreateRequest,
+	actorUserId: string,
+): Promise<ChannelSummary> {
+	const db = drizzle(env.DB);
+	await requireAdminAccess(db, workspaceId, actorUserId);
+	const inbox = await db
+		.select({ id: inboxes.id })
+		.from(inboxes)
+		.where(
+			and(
+				eq(inboxes.id, input.inboxId),
+				eq(inboxes.workspaceId, workspaceId),
+				eq(inboxes.isArchived, false),
+			),
+		)
+		.get();
+	if (!inbox) throw new ManageError("active inbox not found", 404);
+	const metaApp = await db
+		.select({ id: metaApps.id })
+		.from(metaApps)
+		.where(
+			and(
+				eq(metaApps.id, input.metaAppId),
+				eq(metaApps.workspaceId, workspaceId),
+			),
+		)
+		.get();
+	if (!metaApp) throw new ManageError("Meta App not found", 404);
+
+	let phone: { phoneNumberId: string; displayName: string };
+	try {
+		phone = await validateWhatsAppPhoneNumber(
+			input.phoneNumberId,
+			input.accessToken,
+		);
+	} catch {
+		throw new ManageError("WhatsApp phone number validation failed", 400);
+	}
+	let accessToken: string;
+	try {
+		accessToken = await encryptChannelToken(
+			input.accessToken,
+			env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+		);
+	} catch {
+		throw new ManageError("channel token encryption is unavailable", 503);
+	}
+
+	const now = new Date().toISOString();
+	const id = crypto.randomUUID();
+	const deletedChannel = await db
+		.select({ id: channels.id, createdAt: channels.createdAt })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "whatsapp_phone"),
+				eq(channels.externalId, phone.phoneNumberId),
+				eq(channels.status, "deleted"),
+			),
+		)
+		.get();
+	try {
+		if (deletedChannel) {
+			await env.DB.batch([
+				env.DB.prepare(`UPDATE channels SET display_name=?, access_token=?, refresh_token=NULL, token_expires_at=NULL, meta_app_id=?, status='active', updated_at=?
+					WHERE id=? AND workspace_id=? AND type='whatsapp_phone' AND external_id=? AND status='deleted'`).bind(
+					phone.displayName,
+					accessToken,
+					metaApp.id,
+					now,
+					deletedChannel.id,
+					workspaceId,
+					phone.phoneNumberId,
+				),
+				env.DB.prepare(
+					"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+				).bind(crypto.randomUUID(), inbox.id, deletedChannel.id),
+			]);
+		} else {
+			await env.DB.batch([
+				env.DB.prepare(`INSERT INTO channels (id,workspace_id,type,display_name,external_id,access_token,meta_app_id,status,created_at,updated_at)
+					VALUES (?,?,?,?,?,?,?,'active',?,?)`).bind(
+					id,
+					workspaceId,
+					"whatsapp_phone",
+					phone.displayName,
+					phone.phoneNumberId,
+					accessToken,
+					metaApp.id,
+					now,
+					now,
+				),
+				env.DB.prepare(
+					"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+				).bind(crypto.randomUUID(), inbox.id, id),
+			]);
+		}
+	} catch {
+		throw new ManageError(
+			"a channel for this WhatsApp phone number already exists",
+			409,
+		);
+	}
+	return {
+		id: deletedChannel?.id ?? id,
+		type: "whatsapp_phone",
+		displayName: phone.displayName,
+		externalId: phone.phoneNumberId,
+		status: "active",
+		hasToken: true,
+		tokenExpiresAt: null,
+		createdAt: deletedChannel?.createdAt ?? now,
+		updatedAt: now,
+	};
+}
+
+export async function updateWhatsAppChannel(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	input: WhatsAppChannelUpdateRequest,
+	actorUserId: string,
+): Promise<ChannelSummary> {
+	const db = drizzle(env.DB);
+	await requireAdminAccess(db, workspaceId, actorUserId);
+	const existing = await db
+		.select()
+		.from(channels)
+		.where(
+			and(
+				eq(channels.id, id),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "whatsapp_phone"),
+				ne(channels.status, "deleted"),
+			),
+		)
+		.get();
+	if (!existing) throw new ManageError("WhatsApp channel not found", 404);
+	if (input.displayName === undefined && input.accessToken === undefined) {
+		throw new ManageError("displayName or accessToken is required", 400);
+	}
+	const set: Partial<typeof channels.$inferInsert> = {
+		updatedAt: new Date().toISOString(),
+	};
+	if (input.displayName !== undefined) set.displayName = input.displayName;
+	if (input.accessToken !== undefined) {
+		try {
+			await validateWhatsAppPhoneNumber(existing.externalId, input.accessToken);
+		} catch {
+			throw new ManageError("WhatsApp phone number validation failed", 400);
+		}
+		try {
+			set.accessToken = await encryptChannelToken(
+				input.accessToken,
+				env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+			);
+		} catch {
+			throw new ManageError("channel token encryption is unavailable", 503);
+		}
+	}
+	await db.update(channels).set(set).where(eq(channels.id, id)).run();
+	return {
+		id,
+		type: "whatsapp_phone",
+		displayName: set.displayName ?? existing.displayName,
+		externalId: existing.externalId,
+		status: existing.status,
+		hasToken: set.accessToken !== undefined || existing.accessToken !== null,
+		tokenExpiresAt: existing.tokenExpiresAt,
+		createdAt: existing.createdAt,
+		updatedAt: set.updatedAt ?? existing.updatedAt,
+	};
+}
+
+export async function deleteWhatsAppChannel(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireAdminAccess(db, workspaceId, actorUserId);
+	const channel = await db
+		.select({ id: channels.id })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.id, id),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "whatsapp_phone"),
+				ne(channels.status, "deleted"),
+			),
+		)
+		.get();
+	if (!channel) throw new ManageError("WhatsApp channel not found", 404);
+	await db.batch([
+		db.delete(inboxChannels).where(eq(inboxChannels.channelId, id)),
+		db
+			.update(channels)
+			.set({
+				accessToken: null,
+				refreshToken: null,
+				tokenExpiresAt: null,
+				metaAppId: null,
+				status: "deleted",
+				updatedAt: new Date().toISOString(),
+			})
+			.where(eq(channels.id, id)),
+	]);
+}
+
 export async function connectChannelToken(
 	env: Env,
 	workspaceId: string,
@@ -928,11 +1147,14 @@ export async function disconnectChannel(
 	const db = drizzle(env.DB);
 	await requireOwnerAccess(db, workspaceId, actorUserId);
 	const channel = await db
-		.select({ id: channels.id })
+		.select({ id: channels.id, type: channels.type })
 		.from(channels)
 		.where(and(eq(channels.id, id), eq(channels.workspaceId, workspaceId)))
 		.get();
 	if (!channel) throw new ManageError("channel not found", 404);
+	if (channel.type !== "facebook_page" && channel.type !== "whatsapp_phone") {
+		throw new ManageError("this channel type cannot be disconnected", 409);
+	}
 	await db
 		.update(channels)
 		.set({

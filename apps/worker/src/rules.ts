@@ -49,7 +49,7 @@ export interface RuleEvaluationContext {
 	inboxId: string;
 	assigneeId: string | null;
 	status: "open" | "archived";
-	channelType: "facebook_page" | "email";
+	channelType: "facebook_page" | "email" | "whatsapp_phone";
 	/** Email sender address; null on Facebook. */
 	senderEmail: string | null;
 	/** Email subject; null on Facebook. */

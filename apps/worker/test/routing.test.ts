@@ -46,10 +46,12 @@ import {
 	createInbox,
 	createRule,
 	createTag,
+	createWhatsAppChannel,
 	deleteFacebookChannel,
 	deleteInbox,
 	deleteRule,
 	deleteTag,
+	deleteWhatsAppChannel,
 	disconnectChannel,
 	linkChannelToInbox,
 	listCannedReplies,
@@ -64,6 +66,7 @@ import {
 	updateCannedReply,
 	updateInbox,
 	updateTag,
+	updateWhatsAppChannel,
 } from "../src/manage";
 import { getConversation, listConversations } from "../src/queries";
 import { evaluateRules, type RuleEvaluationContext } from "../src/rules";
@@ -142,7 +145,7 @@ function baseContext(
 
 async function insertChannel(
 	workspaceId: string,
-	type: "email" | "facebook_page" = "email",
+	type: "email" | "facebook_page" | "whatsapp_phone" = "email",
 	label = "channel",
 ): Promise<string> {
 	const channelId = crypto.randomUUID();
@@ -531,6 +534,45 @@ describe("legacy management workspace RBAC", () => {
 });
 
 describe("workspace-scoped management route boundaries", () => {
+	test("registers authenticated WhatsApp channel management and scoped webhook ingress", () => {
+		const source = readFileSync(
+			new URL("../src/index.ts", import.meta.url),
+			"utf8",
+		);
+		const route = (start: string, end: string) =>
+			source.slice(source.indexOf(start), source.indexOf(end));
+		const create = route(
+			'app.post("/api/workspaces/:workspaceId/whatsapp-channels",',
+			'app.patch("/api/workspaces/:workspaceId/whatsapp-channels/:id",',
+		);
+		const update = route(
+			'app.patch("/api/workspaces/:workspaceId/whatsapp-channels/:id",',
+			'app.delete("/api/workspaces/:workspaceId/whatsapp-channels/:id",',
+		);
+		const remove = route(
+			'app.delete("/api/workspaces/:workspaceId/whatsapp-channels/:id",',
+			'app.get("/api/workspaces/:workspaceId/meta-apps",',
+		);
+		for (const [handler, schema, service] of [
+			[create, "WhatsAppChannelCreateRequestSchema", "createWhatsAppChannel("],
+			[update, "WhatsAppChannelUpdateRequestSchema", "updateWhatsAppChannel("],
+			[remove, "", "deleteWhatsAppChannel("],
+		]) {
+			expect(handler).toContain("requireWorkspaceAccess");
+			expect(handler).toContain(service);
+			if (schema) expect(handler).toContain(schema);
+		}
+		const webhook = route(
+			'app.get("/webhooks/whatsapp/:metaAppId",',
+			"export default {",
+		);
+		expect(webhook).toContain("hashWebhookVerifyToken");
+		expect(webhook).toContain("verifyWhatsAppSignature");
+		expect(webhook).toContain("normalizeWhatsAppWebhook");
+		expect(webhook).toContain("routeInbound(c.env, message)");
+		expect(source).toContain("async function verifyWhatsAppSignature(");
+	});
+
 	test("registers every management route canonically and authorizes before resource access", () => {
 		const source = readFileSync(
 			new URL("../src/index.ts", import.meta.url),
@@ -1031,6 +1073,222 @@ describe("inbox CRUD", () => {
 				.bind(original.id)
 				.first<{ count: number }>(),
 		).toEqual({ count: 1 });
+	});
+
+	test("creates, updates, disconnects, deletes, and revives a WhatsApp phone", async () => {
+		const { workspaceId } = await setup();
+		ctx.env.CHANNEL_TOKEN_ENCRYPTION_KEY =
+			"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+		const inbox = await createInbox(
+			ctx.env,
+			workspaceId,
+			{ name: "WhatsApp" },
+			ADMIN,
+		);
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(metaApps)
+			.values({
+				id: "whatsapp-meta-app",
+				workspaceId,
+				displayName: "Meta",
+				appId: "wa-app",
+				appSecret: "enc:v1:test",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		restoreFetch = globalThis.fetch;
+		const validations: {
+			url: string;
+			authorization: string | null;
+			timeout: number | undefined;
+		}[] = [];
+		globalThis.fetch = (async (input, init) => {
+			validations.push({
+				url: String(input),
+				authorization: new Headers(init?.headers).get("authorization"),
+				timeout: (init?.signal as AbortSignal & { timeout?: number })?.timeout,
+			});
+			return Response.json({
+				id: "phone-123",
+				display_phone_number: "+1 555 123 4567",
+				verified_name: "Acme Support",
+			});
+		}) as typeof fetch;
+		const created = await createWhatsAppChannel(
+			ctx.env,
+			workspaceId,
+			{
+				phoneNumberId: "phone-123",
+				displayName: "Ignored client label",
+				accessToken: "provider-token",
+				inboxId: inbox.id,
+				metaAppId: "whatsapp-meta-app",
+			},
+			ADMIN,
+		);
+		expect(created).toMatchObject({
+			type: "whatsapp_phone",
+			externalId: "phone-123",
+			displayName: "Acme Support",
+			status: "active",
+			hasToken: true,
+		});
+		expect(validations).toEqual([
+			expect.objectContaining({
+				url: expect.stringContaining(
+					"/phone-123?fields=id%2Cdisplay_phone_number%2Cverified_name",
+				),
+				authorization: "Bearer provider-token",
+			}),
+		]);
+		expect(
+			await ctx.env.DB.prepare("SELECT access_token FROM channels WHERE id=?")
+				.bind(created.id)
+				.first(),
+		).toEqual({ access_token: expect.stringMatching(/^enc:v1:/) });
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT is_default FROM inbox_channels WHERE channel_id=?",
+			)
+				.bind(created.id)
+				.first(),
+		).toEqual({ is_default: 1 });
+		await updateWhatsAppChannel(
+			ctx.env,
+			workspaceId,
+			created.id,
+			{ displayName: "Renamed", accessToken: "rotated-token" },
+			ADMIN,
+		);
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT display_name,external_id,meta_app_id,access_token FROM channels WHERE id=?",
+			)
+				.bind(created.id)
+				.first(),
+		).toEqual({
+			display_name: "Renamed",
+			external_id: "phone-123",
+			meta_app_id: "whatsapp-meta-app",
+			access_token: expect.stringMatching(/^enc:v1:/),
+		});
+		await expect(
+			updateWhatsAppChannel(ctx.env, workspaceId, created.id, {}, ADMIN),
+		).rejects.toMatchObject({ status: 400 });
+		await disconnectChannel(ctx.env, workspaceId, created.id, ADMIN);
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT access_token,status FROM channels WHERE id=?",
+			)
+				.bind(created.id)
+				.first(),
+		).toEqual({ access_token: null, status: "disconnected" });
+		const email = await insertChannel(workspaceId, "email");
+		await expect(
+			disconnectChannel(ctx.env, workspaceId, email, ADMIN),
+		).rejects.toMatchObject({ status: 409 });
+		const contact = await insertContact(workspaceId);
+		await insertConversation(
+			workspaceId,
+			created.id,
+			inbox.id,
+			contact,
+			"whatsapp-history",
+		);
+		await deleteWhatsAppChannel(ctx.env, workspaceId, created.id, ADMIN);
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT access_token,meta_app_id,status FROM channels WHERE id=?",
+			)
+				.bind(created.id)
+				.first(),
+		).toEqual({ access_token: null, meta_app_id: null, status: "deleted" });
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT count(*) AS count FROM inbox_channels WHERE channel_id=?",
+			)
+				.bind(created.id)
+				.first(),
+		).toEqual({ count: 0 });
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT id FROM conversations WHERE id='whatsapp-history'",
+			).first(),
+		).toEqual({ id: "whatsapp-history" });
+		const revived = await createWhatsAppChannel(
+			ctx.env,
+			workspaceId,
+			{
+				phoneNumberId: "phone-123",
+				displayName: "anything",
+				accessToken: "new-token",
+				inboxId: inbox.id,
+				metaAppId: "whatsapp-meta-app",
+			},
+			ADMIN,
+		);
+		expect(revived.id).toBe(created.id);
+		const foreignWorkspaceId = crypto.randomUUID();
+		await ctx.db
+			.insert(workspaces)
+			.values({
+				id: foreignWorkspaceId,
+				name: "Foreign WhatsApp",
+				slug: `foreign-wa-${foreignWorkspaceId}`,
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await addMember(foreignWorkspaceId, ADMIN, "owner");
+		const foreignInbox = await createInbox(
+			ctx.env,
+			foreignWorkspaceId,
+			{ name: "Foreign inbox" },
+			ADMIN,
+		);
+		await ctx.db
+			.insert(metaApps)
+			.values({
+				id: "foreign-whatsapp-meta-app",
+				workspaceId: foreignWorkspaceId,
+				displayName: "Foreign Meta",
+				appId: "foreign-wa-app",
+				appSecret: "enc:v1:test",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await expect(
+			createWhatsAppChannel(
+				ctx.env,
+				foreignWorkspaceId,
+				{
+					phoneNumberId: "phone-123",
+					displayName: "Collision",
+					accessToken: "foreign-token",
+					inboxId: foreignInbox.id,
+					metaAppId: "foreign-whatsapp-meta-app",
+				},
+				ADMIN,
+			),
+		).rejects.toMatchObject({ status: 409 });
+		await addMember(workspaceId, MEMBER);
+		await expect(
+			createWhatsAppChannel(
+				ctx.env,
+				workspaceId,
+				{
+					phoneNumberId: "phone-member",
+					displayName: "No",
+					accessToken: "no",
+					inboxId: inbox.id,
+					metaAppId: "whatsapp-meta-app",
+				},
+				MEMBER,
+			),
+		).rejects.toMatchObject({ status: 403 });
 	});
 
 	test("admin creates an inbox with the full settings surface", async () => {
@@ -1882,10 +2140,15 @@ describe("sidebar + preferences", () => {
 			"Facebook B",
 		);
 		const email = await insertChannel(workspaceId, "email", "Email");
+		const whatsapp = await insertChannel(
+			workspaceId,
+			"whatsapp_phone",
+			"WhatsApp",
+		);
 		await ctx.db
 			.insert(inboxChannels)
 			.values(
-				[facebookA, facebookB, email].map((channelId) => ({
+				[facebookA, facebookB, email, whatsapp].map((channelId) => ({
 					id: crypto.randomUUID(),
 					inboxId: inbox,
 					channelId,
@@ -1897,6 +2160,7 @@ describe("sidebar + preferences", () => {
 			[facebookA, "facebook-a"],
 			[facebookB, "facebook-b"],
 			[email, "email"],
+			[whatsapp, "whatsapp"],
 		] as const) {
 			await insertConversation(
 				workspaceId,
@@ -1915,11 +2179,30 @@ describe("sidebar + preferences", () => {
 		const emailGroup = channelsSection?.children.find(
 			(node) => node.id === "channel-group:email",
 		);
+		const whatsappGroup = channelsSection?.children.find(
+			(node) => node.id === "channel-group:whatsapp",
+		);
 		expect(facebook?.count).toBe(2);
 		expect(facebook?.children.map((node) => node.count).sort()).toEqual([1, 1]);
 		expect(emailGroup).toMatchObject({ count: 1 });
 		expect(emailGroup?.children).toEqual([
 			expect.objectContaining({ id: `channel:${email}`, count: 1 }),
+		]);
+		expect(whatsappGroup).toMatchObject({
+			label: "WhatsApp",
+			count: 1,
+			filter: { status: "open", channel: "whatsapp" },
+		});
+		expect(whatsappGroup?.children).toEqual([
+			expect.objectContaining({
+				id: `channel:${whatsapp}`,
+				count: 1,
+				filter: {
+					status: "open",
+					channel: "whatsapp",
+					channelId: whatsapp,
+				},
+			}),
 		]);
 	});
 
@@ -2127,6 +2410,18 @@ describe("sidebar + preferences", () => {
 			filters: { status: "open", q: "urgent" },
 		});
 		expect(view.name).toBe("Urgent");
+		const whatsappView = await createSavedFilter(ctx.env, workspaceId, ADMIN, {
+			name: "WhatsApp",
+			filters: { channel: "whatsapp" },
+		});
+		expect(
+			await resolveSavedViewFilters(
+				ctx.env,
+				workspaceId,
+				ADMIN,
+				whatsappView.id,
+			),
+		).toEqual({ channel: "whatsapp" });
 		const sidebar = await getSidebar(ctx.env, workspaceId, ADMIN);
 		const views = sidebar.sections.find((s) => s.id === "section:saved-views");
 		expect(views?.children.some((item) => item.id === `view:${view.id}`)).toBe(
@@ -2178,6 +2473,60 @@ describe("sidebar + preferences", () => {
 		await expect(
 			resolveSavedViewFilters(ctx.env, workspaceId, ADMIN, view.id),
 		).rejects.toMatchObject({ status: 404 });
+	});
+
+	test("filters Facebook, email, and WhatsApp conversations by channel facet", async () => {
+		const { workspaceId } = await setup();
+		const inbox = (
+			await createInbox(ctx.env, workspaceId, { name: "Channels" }, ADMIN)
+		).id;
+		const facebookChannel = await insertChannel(
+			workspaceId,
+			"facebook_page",
+			"Facebook",
+		);
+		const emailChannel = await insertChannel(workspaceId, "email", "Email");
+		const whatsappChannel = await insertChannel(
+			workspaceId,
+			"whatsapp_phone",
+			"WhatsApp",
+		);
+		await Promise.all([
+			insertConversation(
+				workspaceId,
+				facebookChannel,
+				inbox,
+				await insertContact(workspaceId),
+				"facebook-conversation",
+			),
+			insertConversation(
+				workspaceId,
+				emailChannel,
+				inbox,
+				await insertContact(workspaceId),
+				"email-conversation",
+			),
+			insertConversation(
+				workspaceId,
+				whatsappChannel,
+				inbox,
+				await insertContact(workspaceId),
+				"whatsapp-conversation",
+			),
+		]);
+
+		const summaries = async (
+			channel: NonNullable<Parameters<typeof listConversations>[2]>["channel"],
+		) => listConversations(ctx.env, ADMIN, { channel }, workspaceId);
+		await expect(summaries("facebook")).resolves.toMatchObject([
+			{ id: "facebook-conversation", channel: "facebook" },
+		]);
+		await expect(summaries("email")).resolves.toMatchObject([
+			{ id: "email-conversation", channel: "email" },
+		]);
+		await expect(summaries("whatsapp")).resolves.toMatchObject([
+			{ id: "whatsapp-conversation", channel: "whatsapp" },
+		]);
 	});
 
 	test("a member cannot delete another member's saved filter", async () => {

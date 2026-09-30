@@ -36,6 +36,31 @@ export type FacebookChannelCreateRequest = Schema.Schema.Type<
 	typeof FacebookChannelCreateRequestSchema
 >;
 
+/** Initial WhatsApp Cloud API channel setup; identity and ownership are immutable after creation. */
+export const WhatsAppChannelCreateRequestSchema = Schema.Struct({
+	phoneNumberId: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
+	displayName: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
+	accessToken: ChannelAccessToken,
+	inboxId: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
+	metaAppId: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
+});
+
+export type WhatsAppChannelCreateRequest = Schema.Schema.Type<
+	typeof WhatsAppChannelCreateRequestSchema
+>;
+
+/** Phone number, Meta App, workspace, status, and inbox cannot be updated here. */
+export const WhatsAppChannelUpdateRequestSchema = Schema.Struct({
+	displayName: Schema.optional(
+		Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),
+	),
+	accessToken: Schema.optional(ChannelAccessToken),
+});
+
+export type WhatsAppChannelUpdateRequest = Schema.Schema.Type<
+	typeof WhatsAppChannelUpdateRequestSchema
+>;
+
 /** Installation-level Meta App credential supplied by a verified Owner/Admin. */
 export const MetaAppCreateRequestSchema = Schema.Struct({
 	displayName: Schema.Trim.pipe(Schema.minLength(1), Schema.maxLength(128)),

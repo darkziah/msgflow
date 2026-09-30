@@ -2,7 +2,7 @@
 
 import type { InboxAssignmentStrategy, InboxIconKey } from "../inbox-schema";
 
-export type Channel = "facebook" | "email";
+export type Channel = "facebook" | "email" | "whatsapp";
 
 export type MessageKind = "inbound" | "outbound";
 
@@ -322,7 +322,7 @@ export interface UserSummary {
 // state. Access tokens never leave the Worker; only hasToken is exposed.
 export interface ChannelSummary {
 	id: string;
-	type: "facebook_page" | "email";
+	type: "facebook_page" | "email" | "whatsapp_phone";
 	displayName: string;
 	externalId: string;
 	status: "active" | "disconnected" | "error" | "deleted";
@@ -392,7 +392,7 @@ export interface InboxSummary {
 export interface InboxChannelLink {
 	channelId: string;
 	channelDisplayName: string;
-	channelType: "facebook_page" | "email";
+	channelType: "facebook_page" | "email" | "whatsapp_phone";
 	/** True when this channel's default inbox is this inbox. */
 	isDefault: boolean;
 }
@@ -442,6 +442,7 @@ export interface InboxChannelRequest {
 }
 
 // Conversation ID scheme: fb:{page_id}:{sender_psid} | email:{mailbox}:{thread_key}
+// | wa:{phone_number_id}:{customer_whatsapp_id}
 export function facebookConversationId(
 	pageId: string,
 	senderPsid: string,
@@ -456,15 +457,23 @@ export function emailConversationId(
 	return `email:${mailbox}:${threadKey}`;
 }
 
+/** Canonical WhatsApp conversation identity: receiving number plus customer wa_id. */
+export function whatsappConversationId(
+	phoneNumberId: string,
+	waId: string,
+): string {
+	return `wa:${phoneNumberId}:${waId}`;
+}
+
 // Parse a conversation ID into { channel, left, right }:
 //   fb:     left = page_id,  right = sender_psid
 //   email:  left = mailbox,  right = thread_key (RFC 822 Message-ID, may contain colons)
+//   wa:     left = phone_number_id, right = customer WhatsApp ID
 // Split on the FIRST colon after the channel prefix so colons inside the
 // thread key never break parsing.
 //
-// The canonical facebook prefix is "fb" (facebookConversationId); the longer
-// "facebook" form is also accepted for compat with ids minted before the
-// scheme was tightened.
+// The canonical prefixes are "fb" and "wa". The longer "facebook" form
+// remains accepted for IDs minted before the scheme was tightened.
 export function parseConversationId(
 	id: string,
 ): { channel: Channel; left: string; right: string } | null {
@@ -474,19 +483,24 @@ export function parseConversationId(
 	if (
 		rawChannel !== "facebook" &&
 		rawChannel !== "fb" &&
-		rawChannel !== "email"
+		rawChannel !== "email" &&
+		rawChannel !== "wa"
 	) {
 		return null;
 	}
-	const channel: Channel = rawChannel === "fb" ? "facebook" : rawChannel;
+	const channel: Channel =
+		rawChannel === "fb"
+			? "facebook"
+			: rawChannel === "wa"
+				? "whatsapp"
+				: rawChannel;
 	const rest = id.slice(sep + 1);
 	const restSep = rest.indexOf(":");
 	if (restSep === -1) return null;
-	return {
-		channel,
-		left: rest.slice(0, restSep),
-		right: rest.slice(restSep + 1),
-	};
+	const left = rest.slice(0, restSep);
+	const right = rest.slice(restSep + 1);
+	if (!left || !right) return null;
+	return { channel, left, right };
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +592,7 @@ export interface SavedFilterFilters {
 	assigneeId?: string;
 	unassigned?: boolean;
 	snoozed?: boolean;
-	channel?: "facebook" | "email";
+	channel?: "facebook" | "email" | "whatsapp";
 	/** Exact authorized channel selection from a sidebar leaf. */
 	channelId?: string;
 	tagId?: string;

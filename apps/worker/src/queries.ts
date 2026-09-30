@@ -55,7 +55,7 @@ const conversationColumns = {
 interface ConversationRow {
 	id: string;
 	channelId: string;
-	channelType: "facebook_page" | "email";
+	channelType: "facebook_page" | "email" | "whatsapp_phone";
 	channelDisplayName: string;
 	channelExternalId: string;
 	inboxId: string;
@@ -81,7 +81,12 @@ function toSummary(
 ): ConversationSummary {
 	return {
 		id: row.id,
-		channel: row.channelType === "facebook_page" ? "facebook" : "email",
+		channel:
+			row.channelType === "facebook_page"
+				? "facebook"
+				: row.channelType === "whatsapp_phone"
+					? "whatsapp"
+					: "email",
 		channelId: row.channelId,
 		channelDisplayName: row.channelDisplayName,
 		inboxId: row.inboxId,
@@ -119,7 +124,7 @@ export interface ConversationListOptions {
 	unassigned?: boolean;
 	/** Open conversations snoozed until the future (sidebar "Snoozed" queue). */
 	snoozed?: boolean;
-	channel?: "facebook" | "email";
+	channel?: "facebook" | "email" | "whatsapp";
 	channelId?: string;
 	tagId?: string;
 	savedViewId?: string;
@@ -190,7 +195,11 @@ export async function listConversations(
 		opts.channel
 			? eq(
 					channels.type,
-					opts.channel === "facebook" ? "facebook_page" : "email",
+					({
+						facebook: "facebook_page",
+						email: "email",
+						whatsapp: "whatsapp_phone",
+					} as const)[opts.channel],
 				)
 			: undefined,
 		opts.channelId

@@ -24,7 +24,7 @@ import { useQuery } from "@tanstack/react-query";
 export interface SearchFilters {
 	q?: string;
 	assigneeId?: string;
-	channel?: "facebook" | "email";
+	channel?: "facebook" | "email" | "whatsapp";
 	tagId?: string;
 	dateFrom?: string;
 	dateTo?: string;
@@ -139,7 +139,12 @@ export function SearchBar({
 							<Select
 								value={filters.channel ?? "all"}
 								onValueChange={(value) =>
-									set("channel", value === "all" ? undefined : (value as "facebook" | "email"))
+									set(
+										"channel",
+										value === "all"
+											? undefined
+											: (value as "facebook" | "email" | "whatsapp"),
+									)
 								}
 							>
 								<SelectTrigger id="channel-filter" className="w-full">
@@ -150,6 +155,7 @@ export function SearchBar({
 										<SelectItem value="all">Any channel</SelectItem>
 										<SelectItem value="facebook">Facebook</SelectItem>
 										<SelectItem value="email">Email</SelectItem>
+										<SelectItem value="whatsapp">WhatsApp</SelectItem>
 									</SelectGroup>
 								</SelectContent>
 							</Select>

@@ -132,9 +132,11 @@ export const channels = sqliteTable(
 		workspaceId: text("workspace_id")
 			.notNull()
 			.references(() => workspaces.id, { onDelete: "cascade" }),
-		type: text("type", { enum: ["facebook_page", "email"] }).notNull(),
+		type: text("type", {
+			enum: ["facebook_page", "email", "whatsapp_phone"],
+		}).notNull(),
 		displayName: text("display_name").notNull(),
-		// Facebook: Page ID. Email: the mailbox address (From/To), e.g. support@yehey.com.
+		// Facebook: Page ID. Email: mailbox address. WhatsApp: immutable Meta Phone Number ID.
 		externalId: text("external_id").notNull(),
 		// Encrypted at rest; only the Worker/channel layer reads these.
 		accessToken: text("access_token"),
@@ -165,6 +167,13 @@ export const channels = sqliteTable(
 			.on(table.externalId)
 			.where(
 				sql`${table.type} = 'facebook_page' AND ${table.status} <> 'deleted'`,
+			),
+		// Meta identifies WhatsApp deliveries only by Phone Number ID. Keep it
+		// globally unambiguous while retaining deleted historical channel rows.
+		uniqueIndex("idx_channels_whatsapp_phone_identity")
+			.on(table.externalId)
+			.where(
+				sql`${table.type} = 'whatsapp_phone' AND ${table.status} <> 'deleted'`,
 			),
 	],
 );
@@ -321,9 +330,9 @@ export const contactIdentities = sqliteTable(
 			.notNull()
 			.references(() => channels.id, { onDelete: "cascade" }),
 		channelType: text("channel_type", {
-			enum: ["facebook_page", "email"],
+			enum: ["facebook_page", "email", "whatsapp_phone"],
 		}).notNull(),
-		// Facebook: PSID. Email: the sender's address.
+		// Facebook: PSID. Email: sender address. WhatsApp: customer WhatsApp ID.
 		externalUserId: text("external_user_id").notNull(),
 		createdAt: text("created_at").notNull(),
 	},

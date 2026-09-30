@@ -1,5 +1,9 @@
 import type { OutboundMessage, ProviderSendResult } from "@msgflow/channel";
-import { emailAdapter, facebookAdapter } from "@msgflow/channel";
+import {
+	emailAdapter,
+	facebookAdapter,
+	whatsappAdapter,
+} from "@msgflow/channel";
 import type { Message } from "@msgflow/contracts";
 import { parseConversationId } from "@msgflow/contracts";
 import {
@@ -66,6 +70,12 @@ export async function sendOutbound(
 	const attachments = params.attachments ?? [];
 	if (!text && attachments.length === 0)
 		return { ok: false, error: "empty message", retryable: false };
+	if (parsed.channel === "whatsapp" && attachments.length > 0)
+		return {
+			ok: false,
+			error: "WhatsApp attachments are not supported",
+			retryable: false,
+		};
 	// The From address is derived from the durable conversation/channel mapping,
 	// never supplied by the client. Email sends are gated before an intent is
 	// persisted so private/delegated and team permissions cannot be bypassed by
@@ -276,6 +286,8 @@ export async function scheduleOutbound(
 ): Promise<string> {
 	const parsed = parseConversationId(params.conversationId);
 	if (!parsed) throw new Error("invalid conversation id");
+	if (parsed.channel === "whatsapp" && (params.attachments?.length ?? 0) > 0)
+		throw new Error("WhatsApp attachments are not supported");
 	const emailMeta =
 		parsed.channel === "email"
 			? await resolveEmailReplyMetadata(
@@ -472,6 +484,35 @@ async function resolveProviderContext(
 				to: identity.externalUserId,
 				send: (message) =>
 					facebookAdapter.sendOutbound({ pageAccessToken }, message),
+			};
+		} catch {
+			return { ok: false, error: "channel access token cannot be decrypted" };
+		}
+	}
+	if (channel.type === "whatsapp_phone") {
+		const parsed = parseConversationId(conversationId);
+		if (
+			parsed?.channel !== "whatsapp" ||
+			parsed.left !== channel.externalId ||
+			channel.status !== "active"
+		) {
+			return { ok: false, error: "WhatsApp channel is unavailable" };
+		}
+		if (!channel.accessToken)
+			return { ok: false, error: "WhatsApp access token missing" };
+		try {
+			const accessToken = await decryptChannelToken(
+				channel.accessToken,
+				env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+			);
+			return {
+				ok: true,
+				to: identity.externalUserId,
+				send: (message) =>
+					whatsappAdapter.sendOutbound(
+						{ whatsapp: { accessToken, phoneNumberId: channel.externalId } },
+						message,
+					),
 			};
 		} catch {
 			return { ok: false, error: "channel access token cannot be decrypted" };

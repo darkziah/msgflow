@@ -307,7 +307,7 @@ export async function getSidebar(
 				}>,
 				[] as Array<{
 					channelId: string;
-					type: "facebook_page" | "email";
+					type: "facebook_page" | "email" | "whatsapp_phone";
 					count: number;
 				}>,
 			];
@@ -322,7 +322,7 @@ export async function getSidebar(
 	const channelCountById = new Map(
 		channelCountRows.map((row) => [row.channelId, row.count]),
 	);
-	const channelGroups = (["facebook_page", "email"] as const)
+	const channelGroups = (["facebook_page", "email", "whatsapp_phone"] as const)
 		.map((type) => {
 			const linked = links.filter((link) => link.type === type);
 			if (!linked.length) return null;
@@ -332,10 +332,15 @@ export async function getSidebar(
 				...new Set(linked.map((link) => link.channelId)),
 			].reduce((sum, id) => sum + (channelCountById.get(id) ?? 0), 0);
 			const group = make({
-				id: `channel-group:${type === "facebook_page" ? "facebook" : "email"}`,
+				id: `channel-group:${type === "facebook_page" ? "facebook" : type === "email" ? "email" : "whatsapp"}`,
 				type: "channel-group",
 				parentId: "section:channels",
-				label: type === "facebook_page" ? "Facebook" : "Email",
+				label:
+					type === "facebook_page"
+						? "Facebook"
+						: type === "email"
+							? "Email"
+							: "WhatsApp",
 				icon: null,
 				color: null,
 				count: groupCount,
@@ -344,7 +349,12 @@ export async function getSidebar(
 				permissionState: "allowed",
 				filter: {
 					status: "open",
-					channel: type === "facebook_page" ? "facebook" : "email",
+					channel:
+						type === "facebook_page"
+							? "facebook"
+							: type === "email"
+								? "email"
+								: "whatsapp",
 				},
 			});
 			group.children = [
@@ -363,7 +373,12 @@ export async function getSidebar(
 					permissionState: "allowed",
 					filter: {
 						status: "open",
-						channel: type === "facebook_page" ? "facebook" : "email",
+						channel:
+							type === "facebook_page"
+								? "facebook"
+								: type === "email"
+									? "email"
+									: "whatsapp",
 						channelId: link.channelId,
 					},
 				}),
@@ -981,8 +996,8 @@ async function validateFilters(
 				out.status = value;
 				break;
 			case "channel":
-				if (value !== "facebook" && value !== "email") {
-					throw new ManageError("channel must be facebook or email");
+				if (value !== "facebook" && value !== "email" && value !== "whatsapp") {
+					throw new ManageError("channel must be facebook, email or whatsapp");
 				}
 				out.channel = value;
 				break;

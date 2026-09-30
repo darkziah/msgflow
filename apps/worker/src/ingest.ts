@@ -84,13 +84,15 @@ export async function routeInbound(
 	emailRoute?: AuthorizedEmailInboundRoute,
 	emailIngressId?: string,
 ): Promise<void> {
-	// Provider-hosted Messenger media is copied before the canonical message is
-	// created. Broken/unsupported provider URLs are ignored by the copier, while
-	// a text-less image remains valid when at least one copy succeeds.
-	const attachments = [
-		...inbound.attachments,
-		...(await copyProviderImages(env, inbound.providerAttachments)),
-	];
+	// WhatsApp Task 6 is text-only. Do not copy provider media or allow a
+	// malformed normalized payload to introduce attachments into its timeline.
+	const attachments =
+		inbound.channel === "whatsapp"
+			? []
+			: [
+					...inbound.attachments,
+					...(await copyProviderImages(env, inbound.providerAttachments)),
+				];
 	if (!inbound.text && attachments.length === 0 && inbound.channel !== "email")
 		return;
 	const db = drizzle(env.DB);
@@ -99,7 +101,12 @@ export async function routeInbound(
 	// Conversation IDs embed the channel instance: fb:{page_id}:{psid} | email:{mailbox}:{thread_key}.
 	const parsed = parseConversationId(inbound.conversationId);
 	if (!parsed) return;
-	const channelType = parsed.channel === "facebook" ? "facebook_page" : "email";
+	const channelType =
+		parsed.channel === "facebook"
+			? "facebook_page"
+			: parsed.channel === "whatsapp"
+				? "whatsapp_phone"
+				: "email";
 
 	// Email ingress is authorization-first. Messenger likewise resolves an
 	// explicit Page Channel; neither transport may bootstrap configuration.
@@ -138,18 +145,23 @@ export async function routeInbound(
 		channel = resolvedChannel;
 		inbox = resolvedInbox;
 	} else {
+		const expectedType =
+			channelType === "whatsapp_phone" ? "whatsapp_phone" : "facebook_page";
+		const channelLabel =
+			channelType === "whatsapp_phone" ? "WhatsApp phone" : "Facebook Page";
 		const resolvedChannel = await db
 			.select()
 			.from(channels)
 			.where(
 				and(
-					eq(channels.type, "facebook_page"),
+					eq(channels.type, expectedType),
 					eq(channels.externalId, parsed.left),
 					eq(channels.status, "active"),
 				),
 			)
 			.get();
-		if (!resolvedChannel) throw new Error("Facebook Page channel is not configured");
+		if (!resolvedChannel)
+			throw new Error(`${channelLabel} channel is not configured`);
 		const resolvedInbox = await db
 			.select()
 			.from(inboxChannels)
@@ -163,7 +175,8 @@ export async function routeInbound(
 				),
 			)
 			.get();
-		if (!resolvedInbox) throw new Error("Facebook Page channel has no active default Inbox");
+		if (!resolvedInbox)
+			throw new Error(`${channelLabel} channel has no active default Inbox`);
 		workspaceId = resolvedChannel.workspaceId;
 		channel = resolvedChannel;
 		inbox = resolvedInbox.inboxes;
@@ -185,6 +198,13 @@ export async function routeInbound(
 		} catch {
 			// Profile resolution is best-effort. Ingest remains available while a
 			// credential is missing, legacy plaintext, or cannot be decrypted.
+		}
+	}
+	if (channelType === "whatsapp_phone") {
+		const profileName = (inbound.payload as { profileName?: unknown } | null)
+			?.profileName;
+		if (typeof profileName === "string" && profileName.trim()) {
+			profile = { displayName: profileName.trim(), avatarUrl: null };
 		}
 	}
 	const contact = await getOrCreateContact(
@@ -438,7 +458,7 @@ async function getOrCreateContact(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
 	channelId: string,
-	channelType: "facebook_page" | "email",
+	channelType: "facebook_page" | "email" | "whatsapp_phone",
 	externalUserId: string,
 	now: string,
 	profile?: FacebookProfile | null,
@@ -460,13 +480,14 @@ async function getOrCreateContact(
 			.where(eq(contacts.id, identity.contactId))
 			.get();
 		if (contact) {
-			// Fill only missing provider fields when a channel gains a token after
-			// the contact was created. A partial Graph response must never erase
-			// an already-resolved name or avatar.
+			// Fill only missing Facebook provider fields when a channel gains a token.
+			// WhatsApp profile names are creation-only webhook metadata and never
+			// overwrite or backfill an existing contact.
 			const displayName = contact.displayName ?? profile?.displayName ?? null;
 			const avatarUrl = contact.avatarUrl ?? profile?.avatarUrl ?? null;
 			if (
 				profile &&
+				channelType !== "whatsapp_phone" &&
 				(displayName !== contact.displayName || avatarUrl !== contact.avatarUrl)
 			) {
 				await db
@@ -491,7 +512,7 @@ async function getOrCreateContact(
 			id: contactId,
 			workspaceId,
 			displayName:
-				channelType === "facebook_page" ? (profile?.displayName ?? null) : null,
+				channelType === "email" ? null : (profile?.displayName ?? null),
 			avatarUrl:
 				channelType === "facebook_page" ? (profile?.avatarUrl ?? null) : null,
 			primaryEmail: channelType === "email" ? externalUserId : null,

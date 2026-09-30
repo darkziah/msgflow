@@ -1,14 +1,22 @@
 import type {
+	CannedReplySummary,
 	Comment,
 	SendMessageRequest,
 	UserSummary,
 } from "@msgflow/contracts";
 import { useQuery } from "@tanstack/react-query";
-import { Paperclip } from "lucide-react";
+import { MessageSquareText, Paperclip } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
@@ -31,6 +39,7 @@ import { emailApi } from "@/lib/email-api";
 
 interface Props {
 	noteOnly?: boolean;
+	attachmentUnavailable?: boolean;
 	conversationId: string;
 	workspaceId: string;
 	showSubject?: boolean;
@@ -52,6 +61,7 @@ export function Composer({
 	onSent,
 	onCommentCreated,
 	noteOnly,
+	attachmentUnavailable = false,
 }: Props) {
 	const [mode, setMode] = useState<"reply" | "note">(
 		noteOnly ? "note" : "reply",
@@ -65,13 +75,17 @@ export function Composer({
 	const [hydrated, setHydrated] = useState(!showSubject);
 	const [accepted, setAccepted] = useState(false);
 	const [showEmailSubject, setShowEmailSubject] = useState(false);
+	const [cannedReplyDialogOpen, setCannedReplyDialogOpen] = useState(false);
+	const [cannedReplySearch, setCannedReplySearch] = useState("");
 	const dirty = useRef(false);
 	const attachmentInputRef = useRef<HTMLInputElement>(null);
+	const replyInputRef = useRef<HTMLTextAreaElement>(null);
 	const busyRef = useRef(false);
 	const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
 	const revision = useRef(0);
 	const serverRevision = useRef(0);
 	const isNote = mode === "note";
+	const attachmentsUnavailable = !isNote && attachmentUnavailable;
 	const locked = showSubject && !!draft.clientMessageId;
 	const context = useQuery({
 		queryKey: ["email-context", workspaceId, conversationId],
@@ -83,6 +97,18 @@ export function Composer({
 		queryKey: ["users", workspaceId],
 		queryFn: () => api.listUsers(workspaceId),
 	});
+	const { data: cannedRepliesData } = useQuery({
+		queryKey: ["canned-replies", workspaceId],
+		queryFn: () => api.listCannedReplies(workspaceId),
+	});
+	const cannedReplies = cannedRepliesData?.cannedReplies ?? [];
+	const normalizedCannedReplySearch = cannedReplySearch.trim().toLowerCase();
+	const filteredCannedReplies = cannedReplies.filter(
+		(reply) =>
+			!normalizedCannedReplySearch ||
+			reply.name.toLowerCase().includes(normalizedCannedReplySearch) ||
+			reply.body.toLowerCase().includes(normalizedCannedReplySearch),
+	);
 	const mailboxId = draft.mailboxId || context.data?.receivingMailboxId || "";
 	const from = context.data?.mailboxes.find((m) => m.id === mailboxId);
 	const privateOverride =
@@ -143,11 +169,19 @@ export function Composer({
 					const request = { ...payload, draftRevision: serverRevision.current };
 					let result: Awaited<ReturnType<typeof emailApi.saveDraft>>;
 					try {
-						result = await emailApi.saveDraft(conversationId, workspaceId, request);
+						result = await emailApi.saveDraft(
+							conversationId,
+							workspaceId,
+							request,
+						);
 					} catch (error) {
 						if (!request.clientMessageId) throw error;
 						// Retry only the identical persisted submission, never a fresh ID.
-						result = await emailApi.saveDraft(conversationId, workspaceId, request);
+						result = await emailApi.saveDraft(
+							conversationId,
+							workspaceId,
+							request,
+						);
 					}
 					serverRevision.current = result.draft.draftRevision ?? 0;
 					return result;
@@ -189,7 +223,8 @@ export function Composer({
 			await saveQueue.current.catch(() => {});
 			await emailApi.deleteDraft(conversationId, workspaceId, expectedId);
 			// Read back the exact target before claiming the durable draft was cleared.
-			const saved = (await emailApi.getDraft(conversationId, workspaceId)).draft;
+			const saved = (await emailApi.getDraft(conversationId, workspaceId))
+				.draft;
 			if (saved?.clientMessageId || saved?.text || saved?.attachments?.length)
 				throw new Error(
 					"Server draft was not cleared. Refresh before continuing.",
@@ -270,6 +305,18 @@ export function Composer({
 			current.includes(user.id) ? current : [...current, user.id],
 		);
 	}
+	function insertCannedReply(reply: CannedReplySummary) {
+		const input = replyInputRef.current;
+		const start = input?.selectionStart ?? draft.text.length;
+		const end = input?.selectionEnd ?? start;
+		const nextText = `${draft.text.slice(0, start)}${reply.body}${draft.text.slice(end)}`;
+		edit({ text: nextText });
+		requestAnimationFrame(() => {
+			input?.focus();
+			const cursor = start + reply.body.length;
+			input?.setSelectionRange(cursor, cursor);
+		});
+	}
 	async function submit(event: React.FormEvent) {
 		event.preventDefault();
 		if (
@@ -324,7 +371,11 @@ export function Composer({
 				await persist(payload);
 			}
 			submitted = true;
-			const result = await api.sendMessage(conversationId, workspaceId, payload);
+			const result = await api.sendMessage(
+				conversationId,
+				workspaceId,
+				payload,
+			);
 			if (!result.success || !result.sent)
 				throw new Error(
 					!result.success
@@ -362,27 +413,99 @@ export function Composer({
 	return (
 		<form onSubmit={submit} className="flex flex-col gap-2">
 			<FieldGroup className="gap-2">
-				<ToggleGroup
-					type="single"
-					value={mode}
-					disabled={busy}
-					aria-label="Composer mode"
-					onValueChange={(value) => {
-						if (value === "reply" || value === "note") setMode(value);
-					}}
-				>
-					<ToggleGroupItem
-						value="reply"
-						variant="outline"
-						size="sm"
-						disabled={noteOnly}
+				<div className="flex items-center justify-between gap-2">
+					<ToggleGroup
+						type="single"
+						value={mode}
+						disabled={busy}
+						aria-label="Composer mode"
+						onValueChange={(value) => {
+							if (value === "reply" || value === "note") setMode(value);
+						}}
 					>
-						Reply
-					</ToggleGroupItem>
-					<ToggleGroupItem value="note" variant="outline" size="sm">
-						Comment
-					</ToggleGroupItem>
-				</ToggleGroup>
+						<ToggleGroupItem
+							value="reply"
+							variant="outline"
+							size="sm"
+							disabled={noteOnly}
+						>
+							Reply
+						</ToggleGroupItem>
+						<ToggleGroupItem value="note" variant="outline" size="sm">
+							Comment
+						</ToggleGroupItem>
+					</ToggleGroup>
+					{!isNote && cannedReplies.length ? (
+						<Dialog
+							open={cannedReplyDialogOpen}
+							onOpenChange={(open) => {
+								setCannedReplyDialogOpen(open);
+								if (!open) setCannedReplySearch("");
+							}}
+						>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Button
+										type="button"
+										variant="outline"
+										size="icon"
+										aria-label="Saved replies"
+										disabled={busy || locked || attachmentsUnavailable}
+										onClick={() => setCannedReplyDialogOpen(true)}
+									>
+										<MessageSquareText />
+									</Button>
+								</TooltipTrigger>
+								<TooltipContent>Saved replies</TooltipContent>
+							</Tooltip>
+							<DialogContent className="max-w-md p-4">
+								<DialogHeader>
+									<DialogTitle>Saved replies</DialogTitle>
+									<DialogDescription>
+										Choose a reply to insert into this message.
+									</DialogDescription>
+								</DialogHeader>
+								<Input
+									autoFocus
+									aria-label="Search saved replies"
+									value={cannedReplySearch}
+									onChange={(event) => setCannedReplySearch(event.target.value)}
+									placeholder="Search saved replies…"
+								/>
+								<div className="max-h-72 overflow-y-auto">
+									{filteredCannedReplies.length ? (
+										<div className="flex flex-col gap-1">
+											{filteredCannedReplies.map((reply) => (
+												<Button
+													key={reply.id}
+													type="button"
+													variant="ghost"
+													className="h-auto w-full justify-start px-3 py-2 text-left"
+													onClick={() => {
+														insertCannedReply(reply);
+														setCannedReplyDialogOpen(false);
+														setCannedReplySearch("");
+													}}
+												>
+													<span className="flex min-w-0 flex-col gap-0.5">
+														<span className="font-medium">{reply.name}</span>
+														<span className="line-clamp-2 text-xs text-muted-foreground whitespace-pre-wrap">
+															{reply.body}
+														</span>
+													</span>
+												</Button>
+											))}
+										</div>
+									) : (
+										<p className="px-3 py-6 text-center text-sm text-muted-foreground">
+											No saved replies match your search.
+										</p>
+									)}
+								</div>
+							</DialogContent>
+						</Dialog>
+					) : null}
+				</div>
 				{showSubject && !isNote ? (
 					<fieldset
 						disabled={busy || locked}
@@ -491,6 +614,11 @@ export function Composer({
 								: ""}
 					</p>
 				) : null}
+				{attachmentsUnavailable ? (
+					<p role="status" className="text-sm text-muted-foreground">
+						WhatsApp supports text replies only; attachments are unavailable.
+					</p>
+				) : null}
 				{!isNote ? (
 					<div className="flex flex-wrap gap-2">
 						{draft.attachments?.map((a) => (
@@ -499,7 +627,11 @@ export function Composer({
 								className="flex items-center gap-1 rounded border p-1 text-xs"
 							>
 								<a
-									href={showSubject ? emailApi.attachmentUrl(a.id, workspaceId) : a.url}
+									href={
+										showSubject
+											? emailApi.attachmentUrl(a.id, workspaceId)
+											: a.url
+									}
 									target="_blank"
 									rel="noopener noreferrer"
 									className="underline"
@@ -516,7 +648,7 @@ export function Composer({
 								</a>
 								<button
 									type="button"
-									disabled={busy || locked}
+									disabled={busy || locked || attachmentsUnavailable}
 									aria-label={`Remove ${a.name}`}
 									onClick={() =>
 										edit({
@@ -542,36 +674,37 @@ export function Composer({
 					{!isNote ? (
 						<>
 							<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									type="button"
-									variant="outline"
-									size="icon"
-									disabled={busy || locked}
-									aria-label="Add attachments"
-									onClick={() => attachmentInputRef.current?.click()}
-								>
-									<Paperclip />
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent>Add attachments</TooltipContent>
-						</Tooltip>
-						<input
-							ref={attachmentInputRef}
-							type="file"
-							accept={(showSubject ? EMAIL_TYPES : IMAGE_TYPES).join(",")}
-							multiple
-							className="sr-only"
-							disabled={busy || locked}
-							onChange={(e) => {
-								void upload(e.target.files);
-								e.currentTarget.value = "";
-							}}
-						/>
+								<TooltipTrigger asChild>
+									<Button
+										type="button"
+										variant="outline"
+										size="icon"
+										disabled={busy || locked || attachmentsUnavailable}
+										aria-label="Add attachments"
+										onClick={() => attachmentInputRef.current?.click()}
+									>
+										<Paperclip />
+									</Button>
+								</TooltipTrigger>
+								<TooltipContent>Add attachments</TooltipContent>
+							</Tooltip>
+							<input
+								ref={attachmentInputRef}
+								type="file"
+								accept={(showSubject ? EMAIL_TYPES : IMAGE_TYPES).join(",")}
+								multiple
+								className="sr-only"
+								disabled={busy || locked || attachmentsUnavailable}
+								onChange={(e) => {
+									void upload(e.target.files);
+									e.currentTarget.value = "";
+								}}
+							/>
 						</>
 					) : null}
 					<div className="relative flex-1">
 						<Textarea
+							ref={replyInputRef}
 							aria-label={isNote ? "Comment text" : "Reply text"}
 							value={text}
 							disabled={busy || (!isNote && locked)}

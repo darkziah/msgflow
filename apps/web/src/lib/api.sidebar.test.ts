@@ -43,4 +43,18 @@ describe("sidebar tree API", () => {
 		});
 		expect(fetch.mock.calls[0]?.[0]).toContain("inboxScope=descendants");
 	});
+
+	test("passes the WhatsApp channel facet through to the conversation endpoint", async () => {
+		const fetch = vi
+			.fn()
+			.mockResolvedValue(
+				new Response(JSON.stringify({ conversations: [] }), { status: 200 }),
+			);
+		vi.stubGlobal("fetch", fetch);
+		await api.listConversations({
+			workspaceId: "workspace",
+			channel: "whatsapp",
+		});
+		expect(fetch.mock.calls[0]?.[0]).toContain("channel=whatsapp");
+	});
 });

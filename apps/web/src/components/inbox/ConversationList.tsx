@@ -1,5 +1,5 @@
 import type { ConversationSummary } from "@msgflow/contracts";
-import { Inbox, Mail, MessageCircle } from "lucide-react";
+import { Inbox, Mail, MessageCircle, MessageCircleMore } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
 	Empty,
@@ -19,6 +19,12 @@ interface Props {
 	selectedId?: string;
 	onSelect: (id: string) => void;
 }
+
+const channelPresentation = {
+	facebook: { Icon: MessageCircle, label: "Facebook" },
+	email: { Icon: Mail, label: "Email" },
+	whatsapp: { Icon: MessageCircleMore, label: "WhatsApp" },
+} satisfies Record<ConversationSummary["channel"], { Icon: typeof Mail; label: string }>;
 
 export function ConversationList({
 	conversations,
@@ -46,8 +52,8 @@ export function ConversationList({
 			{conversations.map((conversation) => {
 				const name = contactName(conversation.contact);
 				const selected = conversation.id === selectedId;
-				const ChannelIcon = conversation.channel === "email" ? Mail : MessageCircle;
-				const channelLabel = conversation.channel === "email" ? "Email" : "Facebook";
+				const { Icon: ChannelIcon, label: channelLabel } =
+					channelPresentation[conversation.channel];
 				return (
 					<li key={conversation.id}>
 						<button

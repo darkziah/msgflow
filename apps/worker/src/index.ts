@@ -22,6 +22,8 @@ import {
 	EmailDomainCreateRequestSchema,
 	EmailDomainStateUpdateRequestSchema,
 	FacebookChannelCreateRequestSchema,
+	WhatsAppChannelCreateRequestSchema,
+	WhatsAppChannelUpdateRequestSchema,
 	OwnerSetupRequestSchema,
 	MailboxDelegateRequestSchema,
 	MailboxStateUpdateRequestSchema,
@@ -50,6 +52,7 @@ import {
 	SidebarPreferencesUpdateSchema,
 	TagCreateRequestSchema,
 	TagUpdateRequestSchema,
+	WhatsAppWebhookEnvelopeSchema,
 } from "@msgflow/contracts";
 import { createAuth } from "@msgflow/auth";
 import { drizzle } from "drizzle-orm/d1";
@@ -65,7 +68,7 @@ import {
 	user,
 	workspaceMembers,
 } from "@msgflow/db";
-import { normalizeFacebookWebhook } from "@msgflow/channel";
+import { normalizeFacebookWebhook, normalizeWhatsAppWebhook } from "@msgflow/channel";
 import { ConversationDO } from "./conversation-do";
 import type { Env } from "./env";
 import { routeInbound } from "./ingest";
@@ -75,12 +78,14 @@ import {
 	archiveInbox,
 	connectChannelToken,
 	createFacebookChannel,
+	createWhatsAppChannel,
 	createCannedReply,
 	createInbox,
 	createRule,
 	createTag,
 	disconnectChannel,
 	deleteFacebookChannel,
+	deleteWhatsAppChannel,
 	deleteCannedReply,
 	deleteRule,
 	deleteTag,
@@ -95,6 +100,7 @@ import {
 	setDefaultInbox,
 	unlinkChannelFromInbox,
 	updateCannedReply,
+	updateWhatsAppChannel,
 	updateInbox,
 	updateRule,
 	updateTag,
@@ -440,8 +446,9 @@ app.get("/api/conversations", async (c) => {
 				channel:
 					savedViewFilters?.channel ??
 					((c.req.query("channel") === "facebook" ||
-						c.req.query("channel") === "email")
-						? (c.req.query("channel") as "facebook" | "email")
+						c.req.query("channel") === "email" ||
+						c.req.query("channel") === "whatsapp")
+						? (c.req.query("channel") as "facebook" | "email" | "whatsapp")
 						: undefined),
 				channelId: savedViewFilters?.channelId ?? c.req.query("channelId") ?? undefined,
 				tagId: savedViewFilters?.tagId ?? c.req.query("tagId") ?? undefined,
@@ -990,6 +997,78 @@ app.post("/api/workspaces/:workspaceId/facebook-channels", async (c) => {
 	}
 });
 
+app.post("/api/workspaces/:workspaceId/whatsapp-channels", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			WhatsAppChannelCreateRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		return c.json(
+			{
+				channel: await createWhatsAppChannel(
+					c.env,
+					workspaceId,
+					decoded.value,
+					session.user.id,
+				),
+			},
+			201,
+		);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.patch("/api/workspaces/:workspaceId/whatsapp-channels/:id", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			WhatsAppChannelUpdateRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		return c.json({
+			channel: await updateWhatsAppChannel(
+				c.env,
+				workspaceId,
+				c.req.param("id"),
+				decoded.value,
+				session.user.id,
+			),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.delete("/api/workspaces/:workspaceId/whatsapp-channels/:id", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		const workspaceId = c.req.param("workspaceId");
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await deleteWhatsAppChannel(
+			c.env,
+			workspaceId,
+			c.req.param("id"),
+			session.user.id,
+		);
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
 app.get("/api/workspaces/:workspaceId/meta-apps", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
@@ -1286,6 +1365,96 @@ async function verifyMessengerSignature(
 		(secret): secret is string => secret !== null,
 	);
 	return verifyFacebookSignatureForSecrets(rawBody, signature, usableSecrets);
+}
+
+/**
+ * WhatsApp identifies its receiving phone in each change metadata record. Only
+ * active phone channels on the path's Meta App may contribute a signing secret;
+ * this rejects mixed/foreign deliveries before any secret is decrypted.
+ */
+async function verifyWhatsAppSignature(
+	env: Env,
+	rawBody: string,
+	signature: string | null | undefined,
+	metaAppId: string,
+): Promise<boolean> {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(rawBody);
+	} catch {
+		return false;
+	}
+	if (
+		!payload ||
+		typeof payload !== "object" ||
+		(payload as { object?: unknown }).object !== "whatsapp_business_account" ||
+		!Array.isArray((payload as { entry?: unknown }).entry)
+	) {
+		return false;
+	}
+	const phoneNumberIds = [
+		...new Set(
+			(payload as { entry: unknown[] }).entry.flatMap((entry) =>
+				entry && typeof entry === "object" &&
+				Array.isArray((entry as { changes?: unknown }).changes)
+					? (entry as { changes: unknown[] }).changes.flatMap((change) => {
+						const value =
+							change && typeof change === "object"
+								? (change as { value?: unknown }).value
+								: null;
+						const metadata =
+							value && typeof value === "object"
+								? (value as { metadata?: unknown }).metadata
+								: null;
+						return metadata &&
+							typeof metadata === "object" &&
+							typeof (metadata as { phone_number_id?: unknown })
+								.phone_number_id === "string"
+							? [(metadata as { phone_number_id: string }).phone_number_id]
+							: [];
+					})
+					: [],
+			),
+		),
+	];
+	if (phoneNumberIds.length === 0) return false;
+
+	const matches = await drizzle(env.DB)
+		.select({ phoneNumberId: channels.externalId, appSecret: metaApps.appSecret })
+		.from(channels)
+		.innerJoin(metaApps, eq(channels.metaAppId, metaApps.id))
+		.where(
+			and(
+				eq(channels.type, "whatsapp_phone"),
+				eq(channels.status, "active"),
+				eq(channels.metaAppId, metaAppId),
+				inArray(channels.externalId, phoneNumberIds),
+			),
+		)
+		.all();
+	if (
+		new Set(matches.map((match) => match.phoneNumberId)).size !==
+		phoneNumberIds.length
+	) {
+		return false;
+	}
+	const secrets = await Promise.all(
+		[...new Set(matches.map((match) => match.appSecret))].map(async (ciphertext) => {
+			try {
+				return await decryptChannelToken(
+					ciphertext,
+					env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+				);
+			} catch {
+				return null;
+			}
+		}),
+	);
+	return verifyFacebookSignatureForSecrets(
+		rawBody,
+		signature,
+		secrets.filter((secret): secret is string => secret !== null),
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -2260,6 +2429,56 @@ app.post("/webhooks/messenger/:metaAppId", async (c) => {
 		await routeInbound(c.env, message);
 	}
 	// Always 200 so Meta doesn't retry; dedup happens in the DO.
+	return c.json({ status: "received" });
+});
+
+// WhatsApp shares Meta's HMAC format but scopes signing secrets to the active
+// receiving phone identities named by this delivery.
+app.get("/webhooks/whatsapp/:metaAppId", async (c) => {
+	if (!(await isInitialSetupComplete(c.env)))
+		return c.text("setup required", 503);
+	const verifyToken = c.req.query("hub.verify_token");
+	const challenge = c.req.query("hub.challenge");
+	if (!verifyToken || !challenge) return c.text("forbidden", 403);
+	const match = await drizzle(c.env.DB)
+		.select({ webhookVerifyTokenHash: metaApps.webhookVerifyTokenHash })
+		.from(metaApps)
+		.where(eq(metaApps.id, c.req.param("metaAppId")))
+		.get();
+	if (
+		match?.webhookVerifyTokenHash ===
+		(await hashWebhookVerifyToken(verifyToken))
+	) {
+		return c.text(challenge);
+	}
+	// Do not distinguish an unknown App from a bad token.
+	return c.text("forbidden", 403);
+});
+
+app.post("/webhooks/whatsapp/:metaAppId", async (c) => {
+	if (!(await isInitialSetupComplete(c.env)))
+		return c.text("setup required", 503);
+	const rawBody = await c.req.text();
+	let raw: unknown;
+	try {
+		raw = JSON.parse(rawBody);
+	} catch {
+		return c.text("invalid json", 400);
+	}
+	const decoded = Schema.decodeUnknownEither(WhatsAppWebhookEnvelopeSchema)(raw);
+	if (Either.isLeft(decoded)) return c.text("invalid json", 400);
+	const ok = await verifyWhatsAppSignature(
+		c.env,
+		rawBody,
+		c.req.header("X-Hub-Signature-256"),
+		c.req.param("metaAppId"),
+	);
+	if (!ok) return c.text("invalid signature", 403);
+
+	for (const message of normalizeWhatsAppWebhook(decoded.right)) {
+		await routeInbound(c.env, message);
+	}
+	// Status-only updates are authentic but do not produce inbound messages.
 	return c.json({ status: "received" });
 });
 

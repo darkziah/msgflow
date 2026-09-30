@@ -47,6 +47,11 @@ export interface OutboundMessage {
 export interface OutboundContext {
 	/** Facebook: the Page access token for the conversation's Page. */
 	pageAccessToken?: string;
+	/** WhatsApp Cloud API credentials for the conversation's receiving number. */
+	whatsapp?: {
+		accessToken: string;
+		phoneNumberId: string;
+	};
 	/** Email: the conversation's own mailbox (From address, e.g. support@yehey.com). */
 	from?: string;
 	/** Email: root thread key (RFC 822 Message-ID) for In-Reply-To/References. */

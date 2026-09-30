@@ -42,6 +42,7 @@ vi.mock("@/lib/api", () => ({
 		getConversation: vi.fn(),
 		getMessages: vi.fn(),
 		listConversations: vi.fn(),
+		listCannedReplies: vi.fn(),
 		workspaceListInboxes: vi.fn(),
 		listTags: vi.fn(),
 		listUsers: vi.fn(),
@@ -169,6 +170,7 @@ describe("inbox UI contracts", () => {
 			],
 		});
 		vi.mocked(api.listTags).mockResolvedValue({ tags: [] });
+		vi.mocked(api.listCannedReplies).mockResolvedValue({ cannedReplies: [] });
 		vi.mocked(api.addConversationTag).mockResolvedValue({} as never);
 		vi.mocked(api.removeConversationTag).mockResolvedValue({} as never);
 		vi.mocked(api.listWorkspaces).mockResolvedValue({
@@ -221,6 +223,26 @@ describe("inbox UI contracts", () => {
 		).toBeInTheDocument();
 	});
 
+	it("renders WhatsApp with explicit WhatsApp text and icon semantics", () => {
+		const whatsappConversation: ConversationSummary = {
+			...conversation,
+			id: "wa:phone-1:customer-1",
+			channel: "whatsapp",
+			channelDisplayName: "WhatsApp Support",
+		};
+		render(
+			<ConversationList
+				conversations={[whatsappConversation]}
+				onSelect={vi.fn()}
+			/>,
+		);
+
+		const row = screen.getByRole("button", { name: /avery chen/i });
+		expect(within(row).getByRole("img", { name: "WhatsApp" })).toBeInTheDocument();
+		expect(row.querySelector('[title="WhatsApp"]')).toBeInTheDocument();
+		expect(row.querySelector("svg.lucide-message-circle-more")).toBeInTheDocument();
+	});
+
 	it("renders an empty state when no conversations match", () => {
 		render(<ConversationList conversations={[]} onSelect={vi.fn()} />);
 
@@ -229,7 +251,12 @@ describe("inbox UI contracts", () => {
 	});
 
 	it("archives an open conversation through the API", async () => {
-		renderWithQueryClient(<ConversationActions conversation={conversation} workspaceId="workspace-1" />);
+		renderWithQueryClient(
+			<ConversationActions
+				conversation={conversation}
+				workspaceId="workspace-1"
+			/>,
+		);
 
 		fireEvent.click(
 			screen.getByRole("button", { name: "Archive conversation" }),
@@ -264,7 +291,12 @@ describe("inbox UI contracts", () => {
 	});
 
 	it("keeps detail actions compact and exposes their purpose", () => {
-		renderWithQueryClient(<ConversationActions conversation={conversation} workspaceId="workspace-1" />);
+		renderWithQueryClient(
+			<ConversationActions
+				conversation={conversation}
+				workspaceId="workspace-1"
+			/>,
+		);
 
 		expect(
 			screen.getByRole("button", { name: "Archive conversation" }),
@@ -284,7 +316,10 @@ describe("inbox UI contracts", () => {
 		vi.mocked(api.getConversation).mockReturnValue(new Promise(() => {}));
 		vi.mocked(api.getMessages).mockReturnValue(new Promise(() => {}));
 		renderWithQueryClient(
-			<ConversationThread conversationId={conversation.id} workspaceId="workspace-1" />,
+			<ConversationThread
+				conversationId={conversation.id}
+				workspaceId="workspace-1"
+			/>,
 		);
 		expect(screen.getByLabelText("Loading conversation")).toBeInTheDocument();
 	});
@@ -297,7 +332,10 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread conversationId={conversation.id} workspaceId="workspace-1" />,
+			<ConversationThread
+				conversationId={conversation.id}
+				workspaceId="workspace-1"
+			/>,
 		);
 
 		expect(
@@ -333,16 +371,18 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread conversationId={conversation.id} workspaceId="workspace-1" />,
+			<ConversationThread
+				conversationId={conversation.id}
+				workspaceId="workspace-1"
+			/>,
 		);
 
 		const earlierEmail = await screen.findByText("Earlier email body");
 		expect(earlierEmail).not.toBeVisible();
 		expect(screen.getByText("Latest email body")).toBeVisible();
-		expect(screen.getByText("Incoming email").closest("article")).toHaveAttribute(
-			"data-email-direction",
-			"received",
-		);
+		expect(
+			screen.getByText("Incoming email").closest("article"),
+		).toHaveAttribute("data-email-direction", "received");
 		expect(screen.getByText("Sent email").closest("article")).toHaveAttribute(
 			"data-email-direction",
 			"sent",
@@ -350,7 +390,9 @@ describe("inbox UI contracts", () => {
 
 		fireEvent.click(screen.getByRole("button", { name: "Show email" }));
 		expect(earlierEmail).toBeVisible();
-		expect(screen.getAllByRole("button", { name: "Hide email" })).toHaveLength(2);
+		expect(screen.getAllByRole("button", { name: "Hide email" })).toHaveLength(
+			2,
+		);
 	});
 
 	it("disables an empty reply and sends the preserved message payload", async () => {
@@ -359,7 +401,9 @@ describe("inbox UI contracts", () => {
 			sent: true,
 			message: {},
 		} as never);
-		renderWithQueryClient(<Composer conversationId={conversation.id} workspaceId="workspace-1" />);
+		renderWithQueryClient(
+			<Composer conversationId={conversation.id} workspaceId="workspace-1" />,
+		);
 
 		const send = screen.getByRole("button", { name: "Send" });
 		expect(send).toBeDisabled();
@@ -377,9 +421,57 @@ describe("inbox UI contracts", () => {
 		});
 	});
 
+	it("inserts a saved reply into the composer without sending it", async () => {
+		vi.mocked(api.listCannedReplies).mockResolvedValue({
+			cannedReplies: [
+				{
+					id: "reply_billing",
+					name: "Billing follow-up",
+					body: "I will send your invoice today.",
+					createdAt: "2026-09-26T12:00:00.000Z",
+					updatedAt: "2026-09-26T12:00:00.000Z",
+				},
+				{
+					id: "reply_shipping",
+					name: "Shipping follow-up",
+					body: "I will check your delivery status.",
+					createdAt: "2026-09-26T12:00:00.000Z",
+					updatedAt: "2026-09-26T12:00:00.000Z",
+				},
+			],
+		});
+		renderWithQueryClient(
+			<Composer conversationId={conversation.id} workspaceId="workspace-1" />,
+		);
+
+		fireEvent.click(
+			await screen.findByRole("button", { name: "Saved replies" }),
+		);
+		expect(
+			await screen.findByRole("dialog", { name: "Saved replies" }),
+		).toBeInTheDocument();
+		fireEvent.change(
+			screen.getByRole("textbox", { name: "Search saved replies" }),
+			{
+				target: { value: "invoice" },
+			},
+		);
+		fireEvent.click(screen.getByRole("button", { name: /billing follow-up/i }));
+
+		expect(screen.getByRole("textbox", { name: "Reply text" })).toHaveValue(
+			"I will send your invoice today.",
+		);
+		expect(
+			screen.queryByRole("dialog", { name: "Saved replies" }),
+		).not.toBeInTheDocument();
+		expect(api.sendMessage).not.toHaveBeenCalled();
+	});
+
 	it("prevents a second send while the first request is pending", async () => {
 		vi.mocked(api.sendMessage).mockImplementation(() => new Promise(() => {}));
-		renderWithQueryClient(<Composer conversationId={conversation.id} workspaceId="workspace-1" />);
+		renderWithQueryClient(
+			<Composer conversationId={conversation.id} workspaceId="workspace-1" />,
+		);
 
 		fireEvent.change(screen.getByRole("textbox", { name: "Reply text" }), {
 			target: { value: "I can help with that." },
@@ -391,9 +483,12 @@ describe("inbox UI contracts", () => {
 	});
 
 	it("uses a focusable attachment button to open the hidden file input", () => {
-		renderWithQueryClient(<Composer conversationId={conversation.id} workspaceId="workspace-1" />);
+		renderWithQueryClient(
+			<Composer conversationId={conversation.id} workspaceId="workspace-1" />,
+		);
 
-		const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+		const input =
+			document.querySelector<HTMLInputElement>('input[type="file"]');
 		if (!input) throw new Error("Expected attachment input");
 		const click = vi.spyOn(input, "click");
 		fireEvent.click(screen.getByRole("button", { name: "Add attachments" }));
@@ -410,7 +505,11 @@ describe("inbox UI contracts", () => {
 			tags: [...conversation.tags, availableTag],
 		});
 		renderWithQueryClient(
-			<TagPicker conversationId={conversation.id} workspaceId="workspace-1" tags={conversation.tags} />,
+			<TagPicker
+				conversationId={conversation.id}
+				workspaceId="workspace-1"
+				tags={conversation.tags}
+			/>,
 		);
 
 		await waitFor(() => expect(api.listTags).toHaveBeenCalled());
@@ -438,7 +537,9 @@ describe("inbox UI contracts", () => {
 	});
 
 	it("uses exclusive toggle semantics for Reply and Comment", () => {
-		renderWithQueryClient(<Composer conversationId={conversation.id} workspaceId="workspace-1" />);
+		renderWithQueryClient(
+			<Composer conversationId={conversation.id} workspaceId="workspace-1" />,
+		);
 
 		const reply = screen.getByRole("radio", { name: "Reply" });
 		const comment = screen.getByRole("radio", { name: "Comment" });
@@ -455,14 +556,40 @@ describe("inbox UI contracts", () => {
 
 	it("disables email sending when the required email context is absent", async () => {
 		renderWithQueryClient(
-			<Composer conversationId={conversation.id} workspaceId="workspace-1" showSubject />,
+			<Composer
+				conversationId={conversation.id}
+				workspaceId="workspace-1"
+				showSubject
+			/>,
 		);
 
 		const reply = await screen.findByRole("textbox", { name: "Reply text" });
 		fireEvent.change(reply, { target: { value: "I can help with that." } });
 		expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
-		expect(emailApi.context).toHaveBeenCalledWith(conversation.id, "workspace-1");
-		expect(emailApi.getDraft).toHaveBeenCalledWith(conversation.id, "workspace-1");
+		expect(emailApi.context).toHaveBeenCalledWith(
+			conversation.id,
+			"workspace-1",
+		);
+		expect(emailApi.getDraft).toHaveBeenCalledWith(
+			conversation.id,
+			"workspace-1",
+		);
+	});
+
+	it("enables WhatsApp text replies while keeping attachments unavailable", () => {
+		renderWithQueryClient(
+			<Composer
+				conversationId="wa:phone-1:customer-1"
+				workspaceId="workspace-1"
+				attachmentUnavailable
+			/>,
+		);
+
+		expect(screen.getByRole("textbox", { name: "Reply text" })).toBeEnabled();
+		expect(screen.getByRole("button", { name: "Add attachments" })).toBeDisabled();
+		expect(screen.getByRole("status")).toHaveTextContent(
+			"WhatsApp supports text replies only; attachments are unavailable.",
+		);
 	});
 
 	it("opens the activity dialog with its accessible name", async () => {
@@ -473,7 +600,10 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread conversationId={conversation.id} workspaceId="workspace-1" />,
+			<ConversationThread
+				conversationId={conversation.id}
+				workspaceId="workspace-1"
+			/>,
 		);
 
 		fireEvent.click(await screen.findByRole("button", { name: "Activity" }));
@@ -484,7 +614,9 @@ describe("inbox UI contracts", () => {
 
 	it("submits an entered search query only on Enter", () => {
 		const onChange = vi.fn();
-		renderWithQueryClient(<SearchBar filters={{}} workspaceId="workspace-1" onChange={onChange} />);
+		renderWithQueryClient(
+			<SearchBar filters={{}} workspaceId="workspace-1" onChange={onChange} />,
+		);
 
 		const input = screen.getByPlaceholderText("Search conversations… (Enter)");
 		fireEvent.change(input, { target: { value: " invoice  " } });
@@ -551,6 +683,22 @@ describe("inbox UI contracts", () => {
 		await waitFor(() => {
 			expect(api.listConversations).toHaveBeenLastCalledWith(
 				expect.objectContaining({ channel: undefined }),
+			);
+		});
+	});
+
+	it("applies the WhatsApp channel facet from advanced filters", async () => {
+		vi.spyOn(Route, "useSearch").mockReturnValue({});
+		renderWithQueryClient(<Inbox />);
+
+		await screen.findAllByRole("button", { name: /filters/i });
+		fireEvent.click(screen.getAllByRole("button", { name: /filters/i })[0]);
+		fireEvent.click(screen.getByLabelText("Channel"));
+		fireEvent.click(await screen.findByRole("option", { name: "WhatsApp" }));
+
+		await waitFor(() => {
+			expect(api.listConversations).toHaveBeenLastCalledWith(
+				expect.objectContaining({ channel: "whatsapp" }),
 			);
 		});
 	});

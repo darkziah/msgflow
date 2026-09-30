@@ -139,7 +139,7 @@ export const api = {
 		assigneeId?: string;
 		unassigned?: boolean;
 		snoozed?: boolean;
-		channel?: "facebook" | "email";
+		channel?: "facebook" | "email" | "whatsapp";
 		channelId?: string;
 		tagId?: string;
 		savedViewId?: string;
