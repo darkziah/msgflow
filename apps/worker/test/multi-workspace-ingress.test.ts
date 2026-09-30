@@ -13,7 +13,7 @@ import {
 } from "@msgflow/db";
 import { and, eq } from "drizzle-orm";
 import { routeInbound } from "../src/ingest";
-import { createMetaApp } from "../src/meta-apps";
+import { createMetaApp, recreateMetaAppWebhookToken } from "../src/meta-apps";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
 
 let ctx: TestCtx;
@@ -150,6 +150,17 @@ describe("multi-workspace provider identity fences", () => {
 				})
 				.run(),
 		).rejects.toThrow();
+	});
+
+	test("recreates a Meta App verify token without changing its App identity", async () => {
+		const { workspaceA } = await setupWorkspaces();
+		const created = await createMetaApp(ctx.env, workspaceA, { displayName: "App A", appId: "meta-app-a", appSecret: "secret-a" }, OWNER);
+		const recreated = await recreateMetaAppWebhookToken(ctx.env, workspaceA, created.metaApp.id, OWNER);
+		expect(recreated.metaApp).toMatchObject({ id: created.metaApp.id, appId: "meta-app-a" });
+		expect(recreated.webhookVerifyToken).not.toBe(created.webhookVerifyToken);
+		const row = await ctx.db.select().from(metaApps).where(eq(metaApps.id, created.metaApp.id)).get();
+		expect(row?.webhookVerifyTokenHash).not.toBeNull();
+		expect(row?.webhookVerifyTokenHash).not.toBe(recreated.webhookVerifyToken);
 	});
 
 	test("rejects the same configured Facebook Page identity in another workspace", async () => {

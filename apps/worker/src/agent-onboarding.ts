@@ -152,8 +152,12 @@ export async function createAgentInvitation(
 	};
 }
 
-/** Revocation is available only before acceptance; the reservation cools down for one day. */
-export async function revokeAgentInvitation(
+/**
+ * Removes an unclaimed invitation, or an account that was created from it but
+ * has not verified email or joined any Workspace. A claimed account that has
+ * progressed further must be handled through normal Workspace offboarding.
+ */
+export async function deleteAgentInvitation(
 	env: AuthEnv,
 	actorId: string,
 	workspaceId: string,
@@ -167,17 +171,74 @@ export async function revokeAgentInvitation(
 			403,
 		);
 	}
-	const now = Date.now();
-	const result = await env.DB.prepare(
-		`UPDATE agent_invitations SET revoked_at=?, cooldown_until=?
- WHERE id=? AND workspace_id=? AND accepted_at IS NULL AND revoked_at IS NULL
- RETURNING id,cooldown_until`,
+	const invitation = await env.DB.prepare(
+		`SELECT invitation.user_id AS user_id, user.email_verified AS email_verified
+		 FROM agent_invitations invitation
+		 LEFT JOIN user ON user.id=invitation.user_id
+		 WHERE invitation.id=? AND invitation.workspace_id=? AND invitation.accepted_at IS NULL`,
 	)
-		.bind(now, now + 24 * 60 * 60 * 1000, invitationId, workspaceId)
-		.first<{ id: string; cooldown_until: number }>();
-	if (!result)
-		throw new OnboardingError("Invitation is already accepted, revoked, or unavailable", 409);
-	return { id: result.id, cooldownUntil: result.cooldown_until };
+		.bind(invitationId, workspaceId)
+		.first<{ user_id: string | null; email_verified: number | null }>();
+	if (!invitation)
+		throw new OnboardingError("Invitation is accepted or unavailable", 409);
+
+	if (!invitation.user_id) {
+		const result = await env.DB.prepare(
+			`DELETE FROM agent_invitations
+			 WHERE id=? AND workspace_id=? AND accepted_at IS NULL AND claimed_at IS NULL AND user_id IS NULL
+			 RETURNING id`,
+		)
+			.bind(invitationId, workspaceId)
+			.first<{ id: string }>();
+		if (!result) throw new OnboardingError("Invitation is claimed or unavailable", 409);
+		return { id: result.id };
+	}
+
+	if (invitation.email_verified) {
+		throw new OnboardingError("Account is verified and must be offboarded from its workspace", 409);
+	}
+	await env.DB.batch([
+		env.DB.prepare(
+			"UPDATE agent_invitations SET user_id=NULL WHERE id=? AND workspace_id=? AND accepted_at IS NULL AND user_id=?",
+		).bind(invitationId, workspaceId, invitation.user_id),
+		env.DB.prepare(
+			"DELETE FROM user WHERE id=? AND email_verified=0 AND NOT EXISTS (SELECT 1 FROM workspace_members WHERE user_id=?)",
+		).bind(invitation.user_id, invitation.user_id),
+		env.DB.prepare(
+			"DELETE FROM agent_invitations WHERE id=? AND workspace_id=? AND accepted_at IS NULL AND user_id IS NULL",
+		).bind(invitationId, workspaceId),
+	]);
+	const remaining = await env.DB.prepare(
+		"SELECT (SELECT count(*) FROM user WHERE id=?) AS users, (SELECT count(*) FROM agent_invitations WHERE id=? AND workspace_id=?) AS invitations",
+	)
+		.bind(invitation.user_id, invitationId, workspaceId)
+		.first<{ users: number; invitations: number }>();
+	if (remaining?.users !== 0 || remaining?.invitations !== 0)
+		throw new OnboardingError("Account is no longer eligible for deletion", 409);
+	return { id: invitationId };
+}
+
+/** Reissues an unclaimed active invitation because the original capability is not recoverable. */
+export async function resendAgentInvitation(
+	env: AuthEnv,
+	actorId: string,
+	workspaceId: string,
+	invitationId: string,
+) {
+	try {
+		await requireOwnerAccess(drizzle(env.DB), workspaceId, actorId);
+	} catch {
+		throw new OnboardingError("A verified Workspace Owner or Administrator is required", 403);
+	}
+	const invitation = await env.DB.prepare(
+		`DELETE FROM agent_invitations
+ WHERE id=? AND workspace_id=? AND accepted_at IS NULL AND claimed_at IS NULL AND user_id IS NULL AND revoked_at IS NULL AND expires_at>?
+ RETURNING email,reserved_username`,
+	)
+		.bind(invitationId, workspaceId, Date.now())
+		.first<{ email: string; reserved_username: string }>();
+	if (!invitation) throw new OnboardingError("Invitation is claimed, expired, or unavailable", 409);
+	return createAgentInvitation(env, actorId, workspaceId, invitation.email, invitation.reserved_username);
 }
 
 /** Reserves the capability before credential creation. Never accepts caller email/workspace/role. */

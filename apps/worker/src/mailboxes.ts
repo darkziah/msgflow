@@ -618,6 +618,27 @@ export async function listEmailDomains(
 		.all();
 }
 
+/** Permanently removes an unused domain configuration. Mailbox history must be removed separately. */
+export async function deleteEmailDomain(
+	env: Env,
+	workspaceId: string,
+	domainId: string,
+	actorUserId: string,
+): Promise<{ success: true }> {
+	const db = dbFor(env);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	await getDomainInWorkspace(db, workspaceId, domainId);
+	const mailbox = await db
+		.select({ id: mailboxes.id })
+		.from(mailboxes)
+		.where(and(eq(mailboxes.workspaceId, workspaceId), eq(mailboxes.emailDomainId, domainId)))
+		.limit(1)
+		.get();
+	if (mailbox) throw new ManageError("remove this domain's mailboxes before deleting the domain", 409);
+	await db.delete(emailDomains).where(and(eq(emailDomains.id, domainId), eq(emailDomains.workspaceId, workspaceId))).run();
+	return { success: true };
+}
+
 export async function updateEmailDomainState(
 	env: Env,
 	workspaceId: string,

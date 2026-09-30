@@ -3,9 +3,10 @@ import { type AuthEnv, createAuth } from "@msgflow/auth";
 import {
 	acceptAgentInvitation,
 	createAgentInvitation,
+	deleteAgentInvitation,
 	registerInvitedAgent,
+	resendAgentInvitation,
 	requestAccountVerification,
-	revokeAgentInvitation,
 } from "../src/agent-onboarding";
 import { onboardingApi } from "../src/onboarding-api";
 import { setupInitialOwner } from "../src/setup";
@@ -361,7 +362,7 @@ describe("verified owner and invited agent onboarding", () => {
 			),
 		).rejects.toMatchObject({ status: 409 });
 	});
-	test("revocation blocks acceptance and keeps the username reserved for one day", async () => {
+	test("deleting an unclaimed invitation removes it and releases its username", async () => {
 		const { env, owner } = await verifiedFixture();
 		const invitation = await createAgentInvitation(
 			env,
@@ -370,25 +371,50 @@ describe("verified owner and invited agent onboarding", () => {
 			"revoked@example.test",
 			"revoked.agent",
 		);
-		const revoked = await revokeAgentInvitation(
+		const deleted = await deleteAgentInvitation(
 			env,
 			owner.userId,
 			owner.workspaceId,
 			invitation.id,
 		);
-		expect(revoked.cooldownUntil).toBeGreaterThan(Date.now());
-		await expect(
-			createAgentInvitation(
-				env,
-				owner.userId,
-				owner.workspaceId,
-				"other@example.test",
-				"revoked.agent",
-			),
-		).rejects.toMatchObject({ status: 409 });
+		expect(deleted.id).toBe(invitation.id);
+		expect(await env.DB.prepare("SELECT id FROM agent_invitations WHERE id=?").bind(invitation.id).first()).toBeNull();
+	await expect(createAgentInvitation(env, owner.userId, owner.workspaceId, "other@example.test", "revoked.agent")).resolves.toMatchObject({ username: "revoked.agent" });
 		await expect(
 			registerInvitedAgent(env, token(invitation.invitationUrl), ownerInput.password),
 		).rejects.toMatchObject({ status: 409 });
+	});
+	test("deleting an unverified claimed invitation also removes its incomplete account", async () => {
+		const { env, owner } = await verifiedFixture();
+		const invitation = await createAgentInvitation(
+			env,
+			owner.userId,
+			owner.workspaceId,
+			"incomplete@example.test",
+			"incomplete.agent",
+		);
+		await registerInvitedAgent(env, token(invitation.invitationUrl), ownerInput.password);
+		const created = await env.DB.prepare("SELECT user_id FROM agent_invitations WHERE id=?")
+			.bind(invitation.id)
+			.first<{ user_id: string }>();
+		expect(created?.user_id).toBeTruthy();
+
+		const deleted = await deleteAgentInvitation(env, owner.userId, owner.workspaceId, invitation.id);
+		expect(deleted).toMatchObject({ id: invitation.id });
+		expect(await env.DB.prepare("SELECT id FROM agent_invitations WHERE id=?").bind(invitation.id).first()).toBeNull();
+		expect(await env.DB.prepare("SELECT id FROM user WHERE id=?").bind(created?.user_id).first()).toBeNull();
+		await expect(
+			createAgentInvitation(env, owner.userId, owner.workspaceId, "incomplete@example.test", "incomplete.agent"),
+		).resolves.toMatchObject({ username: "incomplete.agent" });
+	});
+	test("resending replaces an unclaimed invitation with a fresh capability", async () => {
+		const { env, owner } = await verifiedFixture();
+		const invitation = await createAgentInvitation(env, owner.userId, owner.workspaceId, "resend@example.test", "resend.agent");
+		const replacement = await resendAgentInvitation(env, owner.userId, owner.workspaceId, invitation.id);
+		expect(replacement.id).not.toBe(invitation.id);
+		expect(await env.DB.prepare("SELECT id FROM agent_invitations WHERE id=?").bind(invitation.id).first()).toBeNull();
+		expect(await env.DB.prepare("SELECT id FROM agent_invitations WHERE id=?").bind(replacement.id).first()).toBeTruthy();
+		await expect(registerInvitedAgent(env, token(invitation.invitationUrl), ownerInput.password)).rejects.toMatchObject({ status: 409 });
 	});
 	test("HTTP routes deny unauthenticated owners, foreign origins and malformed capabilities", async () => {
 		const { env, owner } = await fixture(false);

@@ -4,9 +4,10 @@ import { Hono } from "hono";
 import {
 	acceptAgentInvitation,
 	createAgentInvitation,
+	resendAgentInvitation,
 	OnboardingError,
 	registerInvitedAgent,
-	revokeAgentInvitation,
+	deleteAgentInvitation,
 } from "./agent-onboarding";
 import { decodeJsonBody } from "./validation";
 
@@ -93,13 +94,18 @@ onboardingApi.delete("/workspaces/:workspaceId/invitations/:invitationId", async
 		return c.json({ success: false, error: "Authentication required" }, 401);
 	return c.json({
 		success: true,
-		data: await revokeAgentInvitation(
+		data: await deleteAgentInvitation(
 			c.env,
 			session.user.id,
 			c.req.param("workspaceId"),
 			c.req.param("invitationId"),
 		),
 	});
+});
+onboardingApi.post("/workspaces/:workspaceId/invitations/:invitationId/resend", async (c) => {
+	const session = await createAuth(c.env).api.getSession({ headers: c.req.raw.headers });
+	if (!session) return c.json({ success: false, error: "Authentication required" }, 401);
+	return c.json({ success: true, data: await resendAgentInvitation(c.env, session.user.id, c.req.param("workspaceId"), c.req.param("invitationId")) });
 });
 onboardingApi.post("/invitations/accept", async (c) => {
 	const session = await createAuth(c.env).api.getSession({

@@ -47,7 +47,8 @@ export interface TeamInvitationSummary {
 	createdAt: number;
 	expiresAt: number;
 	lifecycle: InvitationLifecycle;
-	canRevoke: boolean;
+	canDelete: boolean;
+	canResend: boolean;
 }
 
 export interface TeamManagementSummary {

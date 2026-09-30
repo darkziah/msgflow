@@ -141,6 +141,41 @@ export async function updateMetaApp(
 	};
 }
 
+/** Replaces an unrecoverable hashed token and returns the new plaintext once. */
+export async function recreateMetaAppWebhookToken(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<MetaAppWebhookSetup> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const existing = await db
+		.select({ id: metaApps.id, displayName: metaApps.displayName, appId: metaApps.appId, appSecret: metaApps.appSecret, createdAt: metaApps.createdAt })
+		.from(metaApps)
+		.where(and(eq(metaApps.id, id), eq(metaApps.workspaceId, workspaceId)))
+		.get();
+	if (!existing) throw new ManageError("Meta App not found", 404);
+	const webhookVerifyToken = generateWebhookVerifyToken();
+	const updatedAt = new Date().toISOString();
+	await db
+		.update(metaApps)
+		.set({ webhookVerifyTokenHash: await sha256Hex(webhookVerifyToken), updatedAt })
+		.where(eq(metaApps.id, id))
+		.run();
+	return {
+		metaApp: {
+			id: existing.id,
+			displayName: existing.displayName,
+			appId: existing.appId,
+			hasSecret: existing.appSecret.length > 0,
+			createdAt: existing.createdAt,
+			updatedAt,
+		},
+		webhookVerifyToken,
+	};
+}
+
 /** Page history is retained: disconnect/remove Page Channels before deleting. */
 export async function deleteMetaApp(
 	env: Env,

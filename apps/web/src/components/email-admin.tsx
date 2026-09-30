@@ -488,6 +488,9 @@ function DomainControls({
 						>
 							Suspend domain
 						</Button>
+						<Button size="sm" variant="destructive" disabled={mutation.isPending} onClick={() => { if (confirm(`Delete ${domain.canonicalDomain}? This is only available when the domain has no mailboxes.`)) mutation.mutate(() => emailApi.deleteDomain(workspaceId, domain.id)); }}>
+							Delete domain
+						</Button>
 					</div>
 				</>
 			) : (

@@ -117,6 +117,7 @@ import {
 	createEmailDomain,
 	createPrivateMailbox,
 	createSharedMailbox,
+	deleteEmailDomain,
 	listEmailDomains,
 	listMailboxes,
 	removePrivateMailboxDelegate,
@@ -129,6 +130,7 @@ import {
 	createMetaApp,
 	deleteMetaApp,
 	listMetaApps,
+	recreateMetaAppWebhookToken,
 	updateMetaApp,
 } from "./meta-apps";
 import {
@@ -1091,17 +1093,17 @@ app.post("/api/workspaces/:workspaceId/meta-apps", async (c) => {
 	const decoded = await decodeJsonBody(c.req.raw, MetaAppCreateRequestSchema);
 	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
 	try {
-		return c.json(
-			{
-				metaApp: await createMetaApp(
-					c.env,
-					c.req.param("workspaceId"),
-					decoded.value,
-					session.user.id,
-				),
-			},
-			201,
-		);
+		return c.json(await createMetaApp(c.env, c.req.param("workspaceId"), decoded.value, session.user.id), 201);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.post("/api/workspaces/:workspaceId/meta-apps/:metaAppId/webhook-token", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		return c.json(await recreateMetaAppWebhookToken(c.env, c.req.param("workspaceId"), c.req.param("metaAppId"), session.user.id));
 	} catch (err) {
 		return manageError(c, err);
 	}
@@ -1547,6 +1549,22 @@ app.patch(
 		}
 	},
 );
+
+app.delete("/api/workspaces/:workspaceId/email-domains/:domainId", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		await deleteEmailDomain(
+			c.env,
+			c.req.param("workspaceId"),
+			c.req.param("domainId"),
+			session.user.id,
+		);
+		return c.json({ success: true });
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
 
 app.get("/api/workspaces/:workspaceId/mailboxes", async (c) => {
 	const session = await getSession(c);

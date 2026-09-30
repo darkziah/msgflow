@@ -110,6 +110,21 @@ export const api = {
 			{ method: "POST", body: JSON.stringify(body) },
 		);
 	},
+	createWhatsAppChannel(
+		workspaceId: string,
+		body: {
+			phoneNumberId: string;
+			displayName: string;
+			accessToken: string;
+			inboxId: string;
+			metaAppId: string;
+		},
+	) {
+		return request<{ channel: ChannelSummary }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp-channels`,
+			{ method: "POST", body: JSON.stringify(body) },
+		);
+	},
 	startMetaOAuth(
 		workspaceId: string,
 		body: { metaAppId: string; inboxId: string },
@@ -402,6 +417,12 @@ export const api = {
 		return request<MetaAppWebhookSetup>(
 			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-apps`,
 			{ method: "POST", body: JSON.stringify(body) },
+		);
+	},
+	recreateMetaAppWebhookToken(workspaceId: string, metaAppId: string) {
+		return request<MetaAppWebhookSetup>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/meta-apps/${encodeURIComponent(metaAppId)}/webhook-token`,
+			{ method: "POST" },
 		);
 	},
 	updateMetaApp(

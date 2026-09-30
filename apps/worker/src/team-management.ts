@@ -73,7 +73,8 @@ export async function getTeamManagement(
 	const invitations = canManage ? await db.select({
 		id: agentInvitations.id, email: agentInvitations.email, username: agentInvitations.reservedUsername,
 		invitedByName: user.name, createdAt: agentInvitations.createdAt, expiresAt: agentInvitations.expiresAt,
-		revokedAt: agentInvitations.revokedAt, userId: agentInvitations.userId,
+		revokedAt: agentInvitations.revokedAt, claimedAt: agentInvitations.claimedAt,
+		acceptedAt: agentInvitations.acceptedAt, userId: agentInvitations.userId,
 	}).from(agentInvitations).innerJoin(user, eq(agentInvitations.invitedBy, user.id))
 		.where(eq(agentInvitations.workspaceId, workspaceId)).orderBy(asc(agentInvitations.createdAt), asc(agentInvitations.id)).all() : [];
 	const inviteeIds = invitations.flatMap((invitation) => invitation.userId ? [invitation.userId] : []);
@@ -101,7 +102,8 @@ export async function getTeamManagement(
 				id: invitation.id, email: invitation.email, username: invitation.username,
 				invitedByName: invitation.invitedByName, createdAt: invitation.createdAt, expiresAt: invitation.expiresAt,
 				lifecycle,
-				canRevoke: access.isAdmin && lifecycle === "awaiting_activation",
+				canDelete: access.isAdmin && invitation.acceptedAt === null && ((invitation.userId === null && invitation.claimedAt === null) || lifecycle === "awaiting_email_verification"),
+				canResend: access.isAdmin && invitation.userId === null && invitation.claimedAt === null && invitation.acceptedAt === null && lifecycle === "awaiting_activation",
 			};
 		}),
 	};

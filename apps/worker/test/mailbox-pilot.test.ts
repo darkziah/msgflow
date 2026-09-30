@@ -23,6 +23,7 @@ import {
 	createEmailDomain,
 	createPrivateMailbox,
 	createSharedMailbox,
+	deleteEmailDomain,
 	listReadableMailboxes,
 	previewBulkPrivateMailboxes,
 	repairMailboxTransport,
@@ -94,6 +95,15 @@ test("strict IDNA parser rejects URL syntax and malformed labels", () => {
 		`${"a".repeat(64)}.com`,
 	])
 		expect(() => normalizeEmailDomain(value)).toThrow();
+});
+
+test("an owner can permanently delete an unused domain but not one with mailboxes", async () => {
+	const { workspaceId, domain } = await setup();
+	await deleteEmailDomain(ctx.env, workspaceId, domain.id, "owner");
+	expect(await ctx.db.select().from(emailDomains).where(eq(emailDomains.id, domain.id)).get()).toBeUndefined();
+	const replacement = await createEmailDomain(ctx.env, workspaceId, { canonicalDomain: "replacement.example.com" }, "owner");
+	await createPrivateMailbox(ctx.env, workspaceId, { emailDomainId: replacement.id, ownerUserId: "alice" }, "owner");
+	await expect(deleteEmailDomain(ctx.env, workspaceId, replacement.id, "owner")).rejects.toMatchObject({ status: 409 });
 });
 
 test("DNS readiness requires fresh evidence, separate confirmations and sending selector", async () => {

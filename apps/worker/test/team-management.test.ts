@@ -79,7 +79,7 @@ describe("team management lifecycle", () => {
 		const ownerSummary = await listWorkspaceTeam(ctx.env, "owner", "a");
 		expect(ownerSummary.invitations).toEqual(
 			expect.arrayContaining([
-				expect.objectContaining({ id: "pending-invitation", canRevoke: true }),
+				expect.objectContaining({ id: "pending-invitation", canDelete: true }),
 			]),
 		);
 	});
@@ -91,11 +91,25 @@ describe("team management lifecycle", () => {
 		expect(summary.invitations[0]).toEqual({
 			id: "invite-a", email: "invitee@example.test", username: "invitee",
 			invitedByName: "owner", createdAt: expect.any(Number), expiresAt: expect.any(Number),
-			lifecycle: "awaiting_activation", canRevoke: true,
+			lifecycle: "awaiting_activation", canDelete: true, canResend: true,
 		});
 		expect(Object.keys(summary.invitations[0])).not.toEqual(
 			expect.arrayContaining(["token", "tokenHash", "token_hash", "cooldownUntil"]),
 		);
+	});
+
+	test("does not offer deletion for an invitation that has been claimed", async () => {
+		await seedLifecycleFixture();
+		await ctx.env.DB
+			.prepare("UPDATE agent_invitations SET claimed_at=? WHERE id=?")
+			.bind(Date.now(), "invite-a")
+			.run();
+		const summary = await listWorkspaceTeam(ctx.env, "owner", "a");
+		expect(summary.invitations[0]).toMatchObject({
+			id: "invite-a",
+			canDelete: false,
+			canResend: false,
+		});
 	});
 
 	test("registers canonical typed team lifecycle routes", () => {

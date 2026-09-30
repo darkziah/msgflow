@@ -21,10 +21,11 @@ export type InvitationCreateResponse = {
 		delivery: "copy_link" | "email_sent" | "email_delivery_failed";
 	};
 };
-export type RevokeInvitationResponse = {
+export type DeleteInvitationResponse = {
 	success: true;
-	data: { id: string; cooldownUntil: number };
+	data: { id: string };
 };
+export type ResendInvitationResponse = InvitationCreateResponse;
 export type UpdateMemberRoleResponse = {
 	success: true;
 	data: { member: TeamMemberSummary };
@@ -45,11 +46,14 @@ export const teamApi = {
 			body: JSON.stringify({ email, username }),
 		});
 	},
-	revokeInvitation(workspaceId: string, invitationId: string) {
-		return request<RevokeInvitationResponse>(
+	deleteInvitation(workspaceId: string, invitationId: string) {
+		return request<DeleteInvitationResponse>(
 			`${workspacePath(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`,
 			{ method: "DELETE" },
 		);
+	},
+	resendInvitation(workspaceId: string, invitationId: string) {
+		return request<ResendInvitationResponse>(`${workspacePath(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/resend`, { method: "POST" });
 	},
 	updateMemberRole(
 		workspaceId: string,

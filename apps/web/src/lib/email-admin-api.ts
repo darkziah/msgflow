@@ -105,6 +105,8 @@ export const emailAdminApi = {
 			"PATCH",
 			body,
 		),
+	deleteDomain: (w: string, id: string) =>
+		request<{ success: true }>(`${ws(w)}/email-domains/${enc(id)}`, "DELETE"),
 	mailboxState: (
 		w: string,
 		id: string,

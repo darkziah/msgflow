@@ -137,21 +137,28 @@ describe("settings UI contracts", () => {
 		});
 	});
 
-	it("loads Page-channel configuration from the selected workspace", async () => {
+	it("loads channel data from the selected workspace and opens the add-channel wizard", async () => {
 		renderSettings();
 		fireEvent.click(screen.getByRole("tab", { name: "Channels" }));
 
 		await waitFor(() => {
 			expect(api.listChannels).toHaveBeenCalledWith("workspace-1");
-			expect(api.workspaceListInboxes).toHaveBeenCalledWith("workspace-1");
 			expect(api.listMetaApps).toHaveBeenCalledWith("workspace-1");
 		});
+		fireEvent.click(screen.getByRole("button", { name: "Add channel" }));
+		expect(screen.getByRole("dialog", { name: "Add channel" })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /Facebook Messenger/ })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /WhatsApp/ })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /Shared Email/ })).toBeInTheDocument();
 	});
 
-	it("offers shared email creation from Channels, not Mailboxes", async () => {
+	it("provisions shared email through the add-channel wizard", async () => {
 		renderSettings();
 		fireEvent.click(screen.getByRole("tab", { name: "Channels" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Add channel" }));
+		fireEvent.click(screen.getByRole("button", { name: /Shared Email/ }));
 
-		expect(await screen.findByRole("button", { name: "Add email channel" })).toBeEnabled();
+		expect(await screen.findByLabelText("Email address")).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Add email channel" })).not.toBeInTheDocument();
 	});
 });
