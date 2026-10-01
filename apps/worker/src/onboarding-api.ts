@@ -4,21 +4,23 @@ import { Hono } from "hono";
 import {
 	acceptAgentInvitation,
 	createAgentInvitation,
-	resendAgentInvitation,
-	OnboardingError,
-	registerInvitedAgent,
 	deleteAgentInvitation,
+	OnboardingError,
+	previewAgentInvitation,
+	registerInvitedAgent,
+	resendAgentInvitation,
 } from "./agent-onboarding";
 import { decodeJsonBody } from "./validation";
 
 const token = Schema.String.pipe(Schema.pattern(/^[a-f0-9]{64}$/));
 const signup = Schema.Struct({
 	token,
-	password: Schema.String.pipe(Schema.maxLength(128)),
+	username: Schema.String.pipe(Schema.maxLength(30)),
+	password: Schema.String.pipe(Schema.minLength(8), Schema.maxLength(128)),
+	confirmation: Schema.String.pipe(Schema.minLength(8), Schema.maxLength(128)),
 });
 const invite = Schema.Struct({
 	email: Schema.String.pipe(Schema.maxLength(254)),
-	username: Schema.String.pipe(Schema.maxLength(30)),
 });
 const accept = Schema.Struct({ token });
 
@@ -49,6 +51,18 @@ onboardingApi.onError((error, c) =>
 		error instanceof OnboardingError ? error.status : 500,
 	),
 );
+onboardingApi.get("/invitations/preview", async (c) => {
+	const raw = c.req.query("token");
+	if (!raw || !/^[a-f0-9]{64}$/.test(raw))
+		return c.json(
+			{ success: false, error: "Invitation is invalid or expired" },
+			404,
+		);
+	return c.json({
+		success: true,
+		data: await previewAgentInvitation(c.env, raw),
+	});
+});
 onboardingApi.post("/workspaces/:workspaceId/invitations", async (c) => {
 	const session = await createAuth(c.env).api.getSession({
 		headers: c.req.raw.headers,
@@ -65,7 +79,6 @@ onboardingApi.post("/workspaces/:workspaceId/invitations", async (c) => {
 				session.user.id,
 				c.req.param("workspaceId"),
 				body.value.email,
-				body.value.username,
 			),
 		},
 		201,
@@ -74,39 +87,59 @@ onboardingApi.post("/workspaces/:workspaceId/invitations", async (c) => {
 onboardingApi.post("/invitations/register", async (c) => {
 	const body = await decodeJsonBody(c.req.raw, signup);
 	if (!body.ok) return c.json({ success: false, error: body.error }, 400);
+	if (body.value.password !== body.value.confirmation)
+		return c.json({ success: false, error: "Passwords do not match" }, 400);
 	return c.json(
 		{
 			success: true,
 			data: await registerInvitedAgent(
 				c.env,
 				body.value.token,
+				body.value.username,
 				body.value.password,
 			),
 		},
 		201,
 	);
 });
-onboardingApi.delete("/workspaces/:workspaceId/invitations/:invitationId", async (c) => {
-	const session = await createAuth(c.env).api.getSession({
-		headers: c.req.raw.headers,
-	});
-	if (!session)
-		return c.json({ success: false, error: "Authentication required" }, 401);
-	return c.json({
-		success: true,
-		data: await deleteAgentInvitation(
-			c.env,
-			session.user.id,
-			c.req.param("workspaceId"),
-			c.req.param("invitationId"),
-		),
-	});
-});
-onboardingApi.post("/workspaces/:workspaceId/invitations/:invitationId/resend", async (c) => {
-	const session = await createAuth(c.env).api.getSession({ headers: c.req.raw.headers });
-	if (!session) return c.json({ success: false, error: "Authentication required" }, 401);
-	return c.json({ success: true, data: await resendAgentInvitation(c.env, session.user.id, c.req.param("workspaceId"), c.req.param("invitationId")) });
-});
+onboardingApi.delete(
+	"/workspaces/:workspaceId/invitations/:invitationId",
+	async (c) => {
+		const session = await createAuth(c.env).api.getSession({
+			headers: c.req.raw.headers,
+		});
+		if (!session)
+			return c.json({ success: false, error: "Authentication required" }, 401);
+		return c.json({
+			success: true,
+			data: await deleteAgentInvitation(
+				c.env,
+				session.user.id,
+				c.req.param("workspaceId"),
+				c.req.param("invitationId"),
+			),
+		});
+	},
+);
+onboardingApi.post(
+	"/workspaces/:workspaceId/invitations/:invitationId/resend",
+	async (c) => {
+		const session = await createAuth(c.env).api.getSession({
+			headers: c.req.raw.headers,
+		});
+		if (!session)
+			return c.json({ success: false, error: "Authentication required" }, 401);
+		return c.json({
+			success: true,
+			data: await resendAgentInvitation(
+				c.env,
+				session.user.id,
+				c.req.param("workspaceId"),
+				c.req.param("invitationId"),
+			),
+		});
+	},
+);
 onboardingApi.post("/invitations/accept", async (c) => {
 	const session = await createAuth(c.env).api.getSession({
 		headers: c.req.raw.headers,

@@ -16,9 +16,8 @@ export type TeamResponse = { team: TeamManagementSummary };
 export type InvitationCreateResponse = {
 	success: true;
 	data: {
-		invitationUrl: string;
 		expiresAt: number;
-		delivery: "copy_link" | "email_sent" | "email_delivery_failed";
+		delivery: "email_sent" | "email_delivery_failed";
 	};
 };
 export type DeleteInvitationResponse = {
@@ -40,11 +39,14 @@ export const teamApi = {
 	get(workspaceId: string) {
 		return request<TeamResponse>(`${workspacePath(workspaceId)}/team`);
 	},
-	createInvitation(workspaceId: string, email: string, username: string) {
-		return request<InvitationCreateResponse>(`${workspacePath(workspaceId)}/invitations`, {
-			method: "POST",
-			body: JSON.stringify({ email, username }),
-		});
+	createInvitation(workspaceId: string, email: string) {
+		return request<InvitationCreateResponse>(
+			`${workspacePath(workspaceId)}/invitations`,
+			{
+				method: "POST",
+				body: JSON.stringify({ email }),
+			},
+		);
 	},
 	deleteInvitation(workspaceId: string, invitationId: string) {
 		return request<DeleteInvitationResponse>(
@@ -53,17 +55,23 @@ export const teamApi = {
 		);
 	},
 	resendInvitation(workspaceId: string, invitationId: string) {
-		return request<ResendInvitationResponse>(`${workspacePath(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/resend`, { method: "POST" });
+		return request<ResendInvitationResponse>(
+			`${workspacePath(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/resend`,
+			{ method: "POST" },
+		);
 	},
 	updateMemberRole(
 		workspaceId: string,
 		userId: string,
 		body: UpdateWorkspaceMemberRoleRequest,
 	) {
-		return request<UpdateMemberRoleResponse>(`${memberPath(workspaceId, userId)}/role`, {
-			method: "PATCH",
-			body: JSON.stringify(body),
-		});
+		return request<UpdateMemberRoleResponse>(
+			`${memberPath(workspaceId, userId)}/role`,
+			{
+				method: "PATCH",
+				body: JSON.stringify(body),
+			},
+		);
 	},
 	offboardMember(
 		workspaceId: string,

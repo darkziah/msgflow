@@ -49,7 +49,7 @@ An isolated tenant within one MsgFlow installation. It owns its Agent membership
 _Avoid_: account, organization
 
 **Workspace Owner**:
-The Agent who completes the installation's sole first-use setup for a Workspace, creates a later Workspace, or is promoted to the owner role. A Workspace may have multiple Workspace Owners. First-use setup creates the initial Team and Shared Inbox before any Email Domain can be onboarded. Only a Workspace Owner may create another Workspace or promote/demote an Owner; every role change must preserve at least one Owner. Until first-use setup completes, only the owner-setup endpoint is available: normal API/authentication paths, Messenger verification/ingest, and inbound email are rejected server-side; a partial setup enters operator recovery rather than allowing another claimant. Recovery is a local authenticated operator procedure that repairs the existing claim without deleting or reassigning it. Alongside Workspace Administrators, a Workspace Owner may administer domain and Mailbox lifecycle; ownership does not grant private Mailbox content access.
+The Agent who completes the installation's sole first-use setup for a Workspace, creates a later Workspace, or is promoted to the owner role. A Workspace may have multiple Workspace Owners. First-use setup creates the initial Team and Shared Inbox before any Email Domain can be onboarded. Its first Owner remains unverified until they complete the separate recovery-email verification link; password setup alone does not verify that Owner. Only a verified Workspace Owner may invite Agents, create another Workspace, or promote/demote an Owner; every role change must preserve at least one Owner. Until first-use setup completes, only the owner-setup endpoint is available: normal API/authentication paths, Messenger verification/ingest, and inbound email are rejected server-side; a partial setup enters operator recovery rather than allowing another claimant. Recovery is a local authenticated operator procedure that repairs the existing claim without deleting or reassigning it. Alongside Workspace Administrators, a Workspace Owner may administer domain and Mailbox lifecycle; ownership does not grant private Mailbox content access.
 _Avoid_: mailbox owner
 
 **Workspace Administrator**:
@@ -57,11 +57,11 @@ An Agent granted the Workspace `admin` role. A Workspace Administrator with a ve
 _Avoid_: Private Mailbox delegate, mailbox owner
 
 **Username**:
-An immutable, globally unique, normalized application login identifier selected and reserved by a Workspace Owner when inviting an Agent. It is an alternative to verified email/password sign-in and derives eligible private Mailbox local-parts; it is not a mail authorization credential.
+An immutable, globally unique, normalized application login identifier selected by a new Agent while accepting their invitation. It is an alternative to verified email/password sign-in and derives eligible private Mailbox local-parts; it is not a mail authorization credential.
 _Avoid_: Google identity, mailbox credential
 
 **Agent Invitation**:
-A 48-hour, revocable capability issued by a Workspace Owner or Workspace Administrator to one recovery email and one reserved Username. Only one active Agent Invitation may exist for a recovery email or a Username across MsgFlow. The recipient uses it to create or connect a verified Agent account, verify the recovery email, and sign in. Acceptance is allowed only for an account with no Username and no membership in the invited Workspace; it atomically assigns the reserved Username and joins the Agent to that Workspace as a member. It does not itself provision a Private Mailbox. Revocation applies only before acceptance; later removal uses an auditable offboarding action. An expired or revoked reservation enters a one-day cooldown before the Username is available for reuse. Issuance and revocation are auditable lifecycle actions.
+A 7-day, single-use, revocable capability issued by a Workspace Owner or Workspace Administrator to one recovery email. Only one active Agent Invitation may exist for a recovery email in a given Workspace, while the same recovery email may hold invitations to different Workspaces. Resending replaces its capability and expiry, immediately invalidating the prior link. The recipient proves control of the recovery email by opening the capability delivered to that address. A recipient without an Agent account sets their password and selects an available immutable Username. An unavailable Username leaves the invitation active so the new Agent can choose another. For a new Agent, this one acceptance transaction creates a verified Agent account, assigns the selected Username, joins the Agent to the Workspace as a member, and establishes a session in that Workspace. Invitations never assign a privileged role. An existing Agent sees only sign-in and an explicit join confirmation for the same recovery email; the accepted invitation verifies that recovery email but never changes the Agent's Username or password. An Agent who is already a member sees that they already have access; viewing the stale invitation does not consume or modify it. It does not itself provision a Private Mailbox. Revocation applies only before acceptance; later removal uses an auditable offboarding action. Issuance, resend, and revocation are auditable lifecycle actions.
 _Avoid_: user account, mailbox grant
 
 **Contact**:
@@ -127,7 +127,7 @@ _Avoid_: Google Workspace domain, shared DNS zone
 - An **Inbox** groups many **Conversations**.
 - An **Agent** replies to **Messages** and posts **Comments** in **Conversations**.
 - An **Agent** has exactly one stable **Username**.
-- An **Agent Invitation** reserves one **Username** for one recovery email until it is accepted, expires, or is revoked; expired or revoked reservations remain unavailable for one day before reuse.
+- An **Agent Invitation** is bound to one recovery email until it is accepted, expires, or is revoked; a new Agent selects an available **Username** only while accepting it.
 - A **Workspace Owner** administers one **Workspace** without implicit access to its **Private Mailboxes**.
 
 ## Runtime boundary contracts

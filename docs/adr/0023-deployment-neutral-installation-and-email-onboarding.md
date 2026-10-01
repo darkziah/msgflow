@@ -69,18 +69,22 @@ internal workspace scope used for authorization.
 
 ### Invitations and Agent identity
 
-- An invitation contains one canonical recovery email and one Owner/Admin
-  selected reserved Username. It lasts 48 hours and grants `member` on
-  acceptance.
-- There is at most one active invitation for a recovery email or Username
-  across MsgFlow.
-- The recipient creates or connects their account, verifies the recovery email,
-  and signs in. Invitation acceptance atomically assigns the reserved Username
-  and workspace membership only if the account has no Username and no existing
-  membership in that Workspace.
-- Username reservation remains on the invitation until acceptance. An expired
-  or revoked invitation enters a one-day cooldown before the Username can be
-  reused.
+- An invitation contains one canonical recovery email. It lasts seven days and
+  grants only the `member` role on acceptance; role assignment is not part of
+  the invitation flow.
+- There is at most one active invitation for a recovery email in one Workspace;
+  the same recovery email may hold invitations to different Workspaces.
+- Resending replaces the invitation capability and its expiry, so every prior
+  invitation link becomes invalid immediately.
+- The recipient opens the invitation capability delivered to their recovery
+  email. A new recipient sets a password; that capability serves as the
+  recovery-email proof and the same acceptance transaction creates a verified
+  account, validates and assigns the new Agent's selected available Username,
+  and grants Workspace membership. An existing Agent signs in with the
+  matching recovery email and explicitly confirms joining; acceptance verifies
+  that recovery email but never changes their Username or password.
+  Acceptance is allowed only when the account has no existing membership in
+  that Workspace.
 - Revocation is only for unaccepted invitations. Later removal is auditable
   offboarding that preserves history and disables private Mailboxes.
 - An Agent has one unique immutable verified recovery email and one immutable

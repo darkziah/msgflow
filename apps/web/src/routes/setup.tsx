@@ -35,6 +35,7 @@ export const Route = createFileRoute("/setup")({ component: Setup });
 const initialForm = {
 	email: "",
 	password: "",
+	confirmation: "",
 	username: "",
 	workspaceName: "",
 	workspaceSlug: "",
@@ -80,6 +81,7 @@ export function Setup() {
 				return "Use a password with at least 8 characters.";
 			if (form.password.length > 128)
 				return "Use a password with no more than 128 characters.";
+			if (form.password !== form.confirmation) return "Passwords do not match.";
 		}
 		if (currentStep === 1) {
 			if (!form.workspaceName.trim() || !form.workspaceSlug.trim())
@@ -142,7 +144,7 @@ export function Setup() {
 				inboxId: result.setup.inboxId,
 			});
 			setVerification(result.setup.verification);
-			setForm((current) => ({ ...current, password: "" }));
+			setForm((current) => ({ ...current, password: "", confirmation: "" }));
 		} catch (err) {
 			setError(
 				err instanceof Error ? err.message : "Unable to create the workspace.",
@@ -375,6 +377,20 @@ function AccountStep({
 					/>
 					<FieldDescription>At least 8 characters.</FieldDescription>
 				</Field>
+				<Field>
+					<FieldLabel htmlFor="confirm-password">Confirm password</FieldLabel>
+					<Input
+						id="confirm-password"
+						type="password"
+						required
+						minLength={8}
+						maxLength={128}
+						autoComplete="new-password"
+						value={form.confirmation}
+						onChange={(event) => update("confirmation", event.target.value)}
+						placeholder="Repeat your password"
+					/>
+				</Field>
 			</div>
 		</FieldGroup>
 	);
@@ -516,10 +532,10 @@ function SetupComplete({
 						<Alert className="mt-4 text-left">
 							<AlertTitle>Recovery email verification is pending</AlertTitle>
 							<AlertDescription>
-								Workspace created; recovery email verification is pending. Ask your
-								operator to configure EMAIL and AUTH_EMAIL_FROM, then use Resend
-								verification on the sign-in page. Invites and private mailbox
-								provisioning require verification.
+								Workspace created; recovery email verification is pending. Ask
+								your operator to configure EMAIL and AUTH_EMAIL_FROM, then use
+								Resend verification on the sign-in page. Invites and private
+								mailbox provisioning require verification.
 							</AlertDescription>
 						</Alert>
 					) : null}
