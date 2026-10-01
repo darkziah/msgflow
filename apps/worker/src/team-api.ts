@@ -1,6 +1,7 @@
 import { createAuth } from "@msgflow/auth";
 import {
 	OffboardWorkspaceMemberRequestSchema,
+	UpdateWorkspaceMemberAccessRequestSchema,
 	UpdateWorkspaceMemberRoleRequestSchema,
 } from "@msgflow/contracts";
 import type { Context } from "hono";
@@ -11,6 +12,7 @@ import {
 	getTeamManagement,
 	listWorkspaceTeam,
 	offboardWorkspaceMember,
+	updateWorkspaceMemberAccess,
 	updateWorkspaceMemberRole,
 } from "./team-management";
 import { decodeJsonBody } from "./validation";
@@ -59,6 +61,30 @@ teamApi.patch("/workspaces/:workspaceId/members/:userId/role", async (c) => {
 			session.user.id,
 			c.req.param("userId"),
 			decoded.value.role,
+		);
+		return c.json({ success: true, data: { member } });
+	} catch (error) {
+		return teamError(c, error);
+	}
+});
+
+teamApi.put("/workspaces/:workspaceId/members/:userId/access", async (c) => {
+	const session = await createAuth(c.env).api.getSession({
+		headers: c.req.raw.headers,
+	});
+	if (!session) return c.json({ success: false, error: "unauthorized" }, 401);
+	const decoded = await decodeJsonBody(
+		c.req.raw,
+		UpdateWorkspaceMemberAccessRequestSchema,
+	);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		const { member } = await updateWorkspaceMemberAccess(
+			c.env,
+			c.req.param("workspaceId"),
+			session.user.id,
+			c.req.param("userId"),
+			decoded.value,
 		);
 		return c.json({ success: true, data: { member } });
 	} catch (error) {

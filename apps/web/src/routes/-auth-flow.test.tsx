@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -63,7 +63,7 @@ describe("auth flow UI contracts", () => {
 		).not.toBeInTheDocument();
 	});
 
-	it("uses the invitation preview and creates a new account with username and confirmation", async () => {
+	it("uses the invitation preview for password-only registration and returns to normal login", async () => {
 		window.history.replaceState(
 			null,
 			"",
@@ -73,33 +73,25 @@ describe("auth flow UI contracts", () => {
 			data: {
 				workspaceName: "Acme Support",
 				maskedEmail: "a***@example.com",
-				authEmail: "agent@example.com",
 				expiresAt: 1767225600000,
-				existingAccount: false,
 			},
 		});
-		mocks.signInEmail.mockResolvedValue({ error: null });
 		render(<Login />);
 		expect(await screen.findByText("Acme Support")).toBeInTheDocument();
 		expect(screen.getAllByText(/a\*\*\*@example.com/)).not.toHaveLength(0);
-		fireEvent.change(screen.getByLabelText("Username"), {
-			target: { value: "agent" },
-		});
+		expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
 		fireEvent.change(screen.getByLabelText("Create password"), {
 			target: { value: "correct horse battery staple" },
 		});
 		fireEvent.change(screen.getByLabelText("Confirm password"), {
 			target: { value: "correct horse battery staple" },
 		});
-		fireEvent.click(
-			screen.getByRole("button", { name: "Create account and join" }),
-		);
+		fireEvent.click(screen.getByRole("button", { name: "Create account" }));
 		expect(await vi.mocked(fetch)).toHaveBeenLastCalledWith(
 			"/api/invitations/register",
 			expect.objectContaining({
 				body: JSON.stringify({
 					token: "private-invitation-token",
-					username: "agent",
 					password: "correct horse battery staple",
 					confirmation: "correct horse battery staple",
 				}),
@@ -108,34 +100,14 @@ describe("auth flow UI contracts", () => {
 		expect(
 			screen.queryByText("private-invitation-token"),
 		).not.toBeInTheDocument();
-	});
-
-	it("locks an existing invitation to its invited email before explicit workspace confirmation", async () => {
-		window.history.replaceState(
-			null,
-			"",
-			"/login?invite=private-invitation-token",
+		expect(mocks.signInEmail).not.toHaveBeenCalled();
+		await waitFor(() => {
+			expect(window.location.pathname).toBe("/login");
+			expect(window.location.search).toBe("");
+		});
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"Account created. Sign in with your email and password.",
 		);
-		mockFetch({
-			data: {
-				workspaceName: "Acme Support",
-				maskedEmail: "a***@example.com",
-				authEmail: "agent@example.com",
-				expiresAt: 1767225600000,
-				existingAccount: true,
-			},
-		});
-		mocks.signInEmail.mockResolvedValue({ error: null });
-		render(<Login />);
-		const invitedEmail = await screen.findByLabelText("Invited email");
-		expect(invitedEmail).toBeDisabled();
-		fireEvent.change(screen.getByLabelText("Password"), {
-			target: { value: "correct horse battery staple" },
-		});
-		fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-		expect(
-			await screen.findByRole("button", { name: "Join Acme Support" }),
-		).toBeInTheDocument();
 	});
 
 	it("requires matching password confirmation during initial setup", () => {

@@ -60,7 +60,8 @@ export async function previewAgentInvitation(env: AuthEnv, token: string) {
 	if (!invitation)
 		throw new OnboardingError("Invitation is invalid or expired", 404);
 	const [local = "", domain = ""] = invitation.email.split("@");
-	if (!local || !domain) throw new OnboardingError("Invitation is invalid or expired", 404);
+	if (!local || !domain)
+		throw new OnboardingError("Invitation is invalid or expired", 404);
 	return {
 		workspaceName: invitation.workspace_name,
 		email: `${local.slice(0, 1)}${"•".repeat(Math.max(2, local.length - 1))}@${domain}`,
@@ -74,6 +75,7 @@ export async function createAgentInvitation(
 	actorId: string,
 	workspaceId: string,
 	rawEmail: string,
+	rawUsername: string,
 ) {
 	try {
 		await requireOwnerAccess(drizzle(env.DB), workspaceId, actorId);
@@ -86,6 +88,10 @@ export async function createAgentInvitation(
 	const email = rawEmail.trim().toLowerCase();
 	if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
 		throw new OnboardingError("Invalid recovery email");
+	const username = rawUsername.trim();
+	if (!isValidUsername(username)) throw new OnboardingError("Invalid username");
+	if (await env.DB.prepare("SELECT id FROM user WHERE username=?").bind(username).first())
+		throw new OnboardingError("Username is unavailable", 409);
 	if (!env.BETTER_AUTH_URL)
 		throw new OnboardingError(
 			"Configure BETTER_AUTH_URL before inviting agents",
@@ -105,13 +111,14 @@ export async function createAgentInvitation(
 		.run();
 	try {
 		await env.DB.prepare(
-			`INSERT INTO agent_invitations (id,token_hash,workspace_id,email,invited_by,expires_at,created_at) VALUES (?,?,?,?,?,?,?)`,
+			`INSERT INTO agent_invitations (id,token_hash,workspace_id,email,reserved_username,invited_by,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?)`,
 		)
 			.bind(
 				id,
 				await hashToken(token),
 				workspaceId,
 				email,
+				username,
 				actorId,
 				expiresAt,
 				now,
@@ -125,8 +132,10 @@ export async function createAgentInvitation(
 	}
 	const url = new URL("/login", env.BETTER_AUTH_URL);
 	url.searchParams.set("invite", token);
-	let delivery: "pending_sender_configuration" | "email_sent" | "email_delivery_failed" =
-		"pending_sender_configuration";
+	let delivery:
+		| "pending_sender_configuration"
+		| "email_sent"
+		| "email_delivery_failed" = "pending_sender_configuration";
 	if (hasAuthEmailSender(env)) {
 		try {
 			await sendAuthEmail(
@@ -143,6 +152,7 @@ export async function createAgentInvitation(
 	return {
 		id,
 		email,
+		username,
 		workspaceId,
 		expiresAt,
 		delivery,
@@ -263,43 +273,67 @@ export async function resendAgentInvitation(
 		 WHERE id=? AND workspace_id=? AND accepted_at IS NULL AND claimed_at IS NULL AND user_id IS NULL AND revoked_at IS NULL AND expires_at>?
 		 RETURNING id,email,workspace_id`,
 	)
-		.bind(await hashToken(token), expiresAt, actorId, now, invitationId, workspaceId, now)
+		.bind(
+			await hashToken(token),
+			expiresAt,
+			actorId,
+			now,
+			invitationId,
+			workspaceId,
+			now,
+		)
 		.first<{ id: string; email: string; workspace_id: string }>();
 	if (!replaced)
-		throw new OnboardingError("Invitation is claimed, expired, or unavailable", 409);
+		throw new OnboardingError(
+			"Invitation is claimed, expired, or unavailable",
+			409,
+		);
 	const url = new URL("/login", env.BETTER_AUTH_URL);
 	url.searchParams.set("invite", token);
-	let delivery: "pending_sender_configuration" | "email_sent" | "email_delivery_failed" = "pending_sender_configuration";
+	let delivery:
+		| "pending_sender_configuration"
+		| "email_sent"
+		| "email_delivery_failed" = "pending_sender_configuration";
 	if (hasAuthEmailSender(env)) {
 		try {
-			await sendAuthEmail(env, replaced.email, "Your MsgFlow workspace invitation", url.href);
+			await sendAuthEmail(
+				env,
+				replaced.email,
+				"Your MsgFlow workspace invitation",
+				url.href,
+			);
 			delivery = "email_sent";
 		} catch {
 			delivery = "email_delivery_failed";
 		}
 	}
-	return { id: replaced.id, email: replaced.email, workspaceId: replaced.workspace_id, expiresAt, delivery };
+	return {
+		id: replaced.id,
+		email: replaced.email,
+		workspaceId: replaced.workspace_id,
+		expiresAt,
+		delivery,
+	};
 }
 
 /** Reserves the capability before credential creation. Never accepts caller email/workspace/role. */
 export async function registerInvitedAgent(
 	env: AuthEnv,
 	token: string,
-	username: string,
 	password: string,
 ) {
 	if (password.length < 8 || password.length > 128)
 		throw new OnboardingError("Password must contain 8–128 characters");
-	if (!isValidUsername(username))
-		throw new OnboardingError("Invalid username");
 	const hash = await hashToken(token);
 	const invite = await env.DB.prepare(
-		`SELECT email FROM agent_invitations WHERE token_hash=? AND claimed_at IS NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?`,
+		`SELECT email,reserved_username FROM agent_invitations WHERE token_hash=? AND claimed_at IS NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?`,
 	)
 		.bind(hash, Date.now())
-		.first<{ email: string }>();
+		.first<{ email: string; reserved_username: string | null }>();
 	if (!invite)
 		throw new OnboardingError("Invitation expired or already claimed", 409);
+	if (!invite.reserved_username)
+		throw new OnboardingError("Invitation does not reserve a username", 409);
 	// Existing accounts must sign in and use accept; never reset their credentials through an invite.
 	if (
 		await env.DB.prepare("SELECT id FROM user WHERE lower(email)=?")
@@ -320,7 +354,12 @@ export async function registerInvitedAgent(
 	let userId: string;
 	try {
 		const result = await createSetupAuth(env).api.signUpEmail({
-			body: { email: invite.email, name: username, username, password },
+			body: {
+				email: invite.email,
+				name: invite.reserved_username,
+				username: invite.reserved_username,
+				password,
+			},
 		});
 		userId = result.user.id;
 		// Better Auth intentionally returns a synthetic user for duplicate signup. Do not trust it.
@@ -370,15 +409,7 @@ export async function acceptAgentInvitation(
  AND EXISTS (SELECT 1 FROM user WHERE id=? AND lower(email)=agent_invitations.email AND email_verified=1)
  AND NOT EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id=agent_invitations.workspace_id AND user_id=?)
  RETURNING workspace_id`)
-			.bind(
-				actorId,
-				Date.now(),
-				hash,
-				Date.now(),
-				actorId,
-				actorId,
-				actorId,
-			)
+			.bind(actorId, Date.now(), hash, Date.now(), actorId, actorId, actorId)
 			.first<{ workspace_id: string }>();
 	if (!result)
 		throw new OnboardingError(

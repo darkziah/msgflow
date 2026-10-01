@@ -18,19 +18,11 @@ import { request } from "@/lib/api";
 
 export const Route = createFileRoute("/login")({ component: Login });
 
-type Mode =
-	| "sign-in"
-	| "invitation-new"
-	| "invitation-existing"
-	| "invitation-confirm"
-	| "recovery"
-	| "reset";
+type Mode = "sign-in" | "invitation-new" | "recovery" | "reset";
 type InvitationPreview = {
 	workspaceName: string;
 	maskedEmail: string;
 	expiresAt: string | number;
-	existingAccount: boolean;
-	email?: string;
 };
 
 function initialMode(
@@ -49,15 +41,6 @@ function previewInvitation(raw: Record<string, unknown>): InvitationPreview {
 			raw.maskedEmail ?? raw.emailMasked ?? raw.email ?? "your invited email",
 		),
 		expiresAt: (raw.expiresAt ?? raw.expiry ?? "") as string | number,
-		existingAccount: Boolean(
-			raw.existingAccount ?? raw.accountExists ?? raw.state === "existing_account",
-		),
-		email:
-			typeof raw.authEmail === "string"
-				? raw.authEmail
-				: typeof raw.invitedEmail === "string"
-					? raw.invitedEmail
-					: undefined,
 	};
 }
 
@@ -69,7 +52,6 @@ export function Login() {
 	const next = search.get("next");
 	const [mode, setMode] = useState(() => initialMode(resetToken, invitation));
 	const [identifier, setIdentifier] = useState("");
-	const [username, setUsername] = useState("");
 	const [password, setPassword] = useState("");
 	const [confirmation, setConfirmation] = useState("");
 	const [preview, setPreview] = useState<InvitationPreview | null>(null);
@@ -90,11 +72,7 @@ export function Login() {
 				if (cancelled) return;
 				const nextPreview = previewInvitation(response.data);
 				setPreview(nextPreview);
-				setMode(
-					nextPreview.existingAccount
-						? "invitation-existing"
-						: "invitation-new",
-				);
+				setMode("invitation-new");
 			})
 			.catch((error: unknown) => {
 				if (!cancelled)
@@ -156,40 +134,6 @@ export function Login() {
 		});
 	}
 
-	async function submitExistingInvitation(event: React.FormEvent) {
-		event.preventDefault();
-		const invitedEmail = preview?.email;
-		if (!invitedEmail) {
-			setMessage(
-				"The invited account could not be identified. Request a new invitation.",
-			);
-			return;
-		}
-		await action(async () => {
-			const result = await authClient.signIn.email({
-				email: invitedEmail,
-				password,
-			});
-			if (result.error) throw new Error(result.error.message);
-			setPassword("");
-			setMode("invitation-confirm");
-		});
-	}
-
-	async function acceptInvitation() {
-		if (!invitation) return;
-		await action(async () => {
-			const response = await request<{
-				success: true;
-				data: { workspaceId: string };
-			}>("/api/invitations/accept", {
-				method: "POST",
-				body: JSON.stringify({ token: invitation }),
-			});
-			await redirectToWorkspace(response.data.workspaceId);
-		});
-	}
-
 	async function submitInvitationRegistration(event: React.FormEvent) {
 		event.preventDefault();
 		if (!invitation) return;
@@ -198,28 +142,22 @@ export function Login() {
 			return;
 		}
 		await action(async () => {
-			const response = await request<{
-				success: true;
-				data: { workspaceId: string };
-			}>("/api/invitations/register", {
-				method: "POST",
-				body: JSON.stringify({
-					token: invitation,
-					username: username.trim(),
-					password,
-					confirmation,
-				}),
-			});
-			if (!preview?.email)
-				throw new Error(
-					"Account created. Sign in with your invited email to join the workspace.",
-				);
-			const signIn = await authClient.signIn.email({
-				email: preview.email,
-				password,
-			});
-			if (signIn.error) throw new Error(signIn.error.message);
-			await redirectToWorkspace(response.data.workspaceId);
+			await request<{ success: true; data: { membership: "joined" } }>(
+				"/api/invitations/register",
+				{
+					method: "POST",
+					body: JSON.stringify({
+						token: invitation,
+						password,
+						confirmation,
+					}),
+				},
+			);
+			window.history.replaceState(null, "", "/login");
+			setPassword("");
+			setConfirmation("");
+			setMessage("Account created. Sign in with your email and password.");
+			setMode("sign-in");
 		});
 	}
 
@@ -256,17 +194,10 @@ export function Login() {
 	}
 
 	const copy =
-		mode === "invitation-new" ||
-		mode === "invitation-existing" ||
-		mode === "invitation-confirm"
+		mode === "invitation-new"
 			? {
 					eyebrow: "Workspace invitation",
-					title:
-						mode === "invitation-confirm"
-							? "Join workspace"
-							: mode === "invitation-existing"
-								? "Sign in to join"
-								: "Create your account",
+					title: "Create your account",
 					description: preview
 						? `${preview.workspaceName} invited ${preview.maskedEmail}. Invitation expires ${formatDate(preview.expiresAt)}.`
 						: "Checking your invitation…",
@@ -331,18 +262,6 @@ export function Login() {
 					>
 						<InvitationDetails preview={preview} />
 						<FieldGroup>
-							<Field>
-								<FieldLabel htmlFor="username">Username</FieldLabel>
-								<Input
-									id="username"
-									required
-									minLength={3}
-									maxLength={30}
-									value={username}
-									onChange={(event) => setUsername(event.target.value)}
-									autoComplete="username"
-								/>
-							</Field>
 							<PasswordField
 								value={password}
 								onChange={setPassword}
@@ -357,68 +276,11 @@ export function Login() {
 								id="confirmation"
 							/>
 						</FieldGroup>
-						<Button
-							className="w-full"
-							disabled={busy || !username.trim()}
-							type="submit"
-						>
-							Create account and join
-							<ArrowRight data-icon="inline-end" />
-						</Button>
-					</form>
-				) : null}
-				{mode === "invitation-existing" && preview ? (
-					<form
-						className="flex flex-col gap-6"
-						onSubmit={submitExistingInvitation}
-					>
-						<InvitationDetails preview={preview} />
-						<FieldGroup>
-							<Field>
-								<FieldLabel htmlFor="invited-email">Invited email</FieldLabel>
-								<Input
-									id="invited-email"
-									value={preview.maskedEmail}
-									readOnly
-									disabled
-									aria-describedby="invited-email-description"
-								/>
-								<FieldDescription id="invited-email-description">
-									Use the account invited to this workspace.
-								</FieldDescription>
-							</Field>
-							<PasswordField
-								value={password}
-								onChange={setPassword}
-								autoComplete="current-password"
-								label="Password"
-							/>
-						</FieldGroup>
 						<Button className="w-full" disabled={busy} type="submit">
-							Sign in
+							Create account
 							<ArrowRight data-icon="inline-end" />
 						</Button>
 					</form>
-				) : null}
-				{mode === "invitation-confirm" && preview ? (
-					<div className="flex flex-col gap-6">
-						<InvitationDetails preview={preview} />
-						<Alert>
-							<MailCheck />
-							<AlertTitle>Ready to join</AlertTitle>
-							<AlertDescription>
-								Confirm to add your account to this workspace.
-							</AlertDescription>
-						</Alert>
-						<Button
-							className="w-full"
-							disabled={busy}
-							onClick={acceptInvitation}
-						>
-							Join {preview.workspaceName}
-							<ArrowRight data-icon="inline-end" />
-						</Button>
-					</div>
 				) : null}
 				{mode === "recovery" ? (
 					<form className="flex flex-col gap-6" onSubmit={submitRecovery}>

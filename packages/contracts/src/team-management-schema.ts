@@ -3,9 +3,20 @@ import { Schema } from "effect";
 const Id = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(255));
 const Role = Schema.Literal("owner", "admin", "member");
 
-export const UpdateWorkspaceMemberRoleRequestSchema = Schema.Struct({ role: Role });
+export const UpdateWorkspaceMemberRoleRequestSchema = Schema.Struct({
+	role: Role,
+});
 export type UpdateWorkspaceMemberRoleRequest = Schema.Schema.Type<
 	typeof UpdateWorkspaceMemberRoleRequestSchema
+>;
+
+/** Replaces the member's workspace-scoped Team and direct shared-Inbox grants. */
+export const UpdateWorkspaceMemberAccessRequestSchema = Schema.Struct({
+	teamIds: Schema.Array(Id).pipe(Schema.maxItems(100)),
+	inboxIds: Schema.Array(Id).pipe(Schema.maxItems(100)),
+});
+export type UpdateWorkspaceMemberAccessRequest = Schema.Schema.Type<
+	typeof UpdateWorkspaceMemberAccessRequestSchema
 >;
 
 export const OffboardWorkspaceMemberRequestSchema = Schema.Struct({
@@ -23,7 +34,9 @@ export interface TeamMemberSummary {
 	emailVerified: boolean;
 	role: "owner" | "admin" | "member";
 	joinedAt: string;
+	teamIds: string[];
 	teamNames: string[];
+	directInboxIds: string[];
 	privateMailboxes: Array<{
 		canonicalAddress: string;
 		isEnabled: boolean;
@@ -54,6 +67,10 @@ export interface TeamInvitationSummary {
 export interface TeamManagementSummary {
 	canManage: boolean;
 	canManageOwners: boolean;
+	accessOptions: {
+		teams: Array<{ id: string; name: string }>;
+		directGrantInboxes: Array<{ id: string; name: string }>;
+	};
 	members: TeamMemberSummary[];
 	invitations: TeamInvitationSummary[];
 }

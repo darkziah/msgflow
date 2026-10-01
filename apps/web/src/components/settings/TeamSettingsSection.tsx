@@ -1,5 +1,6 @@
 import type {
 	TeamInvitationSummary,
+	TeamManagementSummary,
 	TeamMemberSummary,
 } from "@msgflow/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -10,6 +11,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Dialog,
 	DialogClose,
@@ -113,6 +115,7 @@ export function TeamSettingsSection({ workspaceId }: { workspaceId: string }) {
 					members={team.members}
 					canManage={team.canManage}
 					canManageOwners={team.canManageOwners}
+					accessOptions={team.accessOptions}
 				/>
 			) : (
 				<TeamInvitationsPanel
@@ -129,11 +132,13 @@ function TeamMembersPanel({
 	members,
 	canManage,
 	canManageOwners,
+	accessOptions,
 }: {
 	workspaceId: string;
 	members: TeamMemberSummary[];
 	canManage: boolean;
 	canManageOwners: boolean;
+	accessOptions: TeamManagementSummary["accessOptions"];
 }) {
 	if (!members.length)
 		return (
@@ -155,6 +160,7 @@ function TeamMembersPanel({
 					member={member}
 					canManage={canManage}
 					canManageOwners={canManageOwners}
+					accessOptions={accessOptions}
 				/>
 			))}
 		</div>
@@ -166,11 +172,13 @@ function TeamMemberRow({
 	member,
 	canManage,
 	canManageOwners,
+	accessOptions,
 }: {
 	workspaceId: string;
 	member: TeamMemberSummary;
 	canManage: boolean;
 	canManageOwners: boolean;
+	accessOptions: TeamManagementSummary["accessOptions"];
 }) {
 	const displayName = member.name || member.username || member.email;
 	const initials = displayName
@@ -220,6 +228,7 @@ function TeamMemberRow({
 						member={member}
 						canManage={canManage}
 						canManageOwners={canManageOwners}
+						accessOptions={accessOptions}
 					/>
 				) : null}
 			</CardContent>
@@ -232,15 +241,18 @@ function MemberActions({
 	member,
 	canManage,
 	canManageOwners,
+	accessOptions,
 }: {
 	workspaceId: string;
 	member: TeamMemberSummary;
 	canManage: boolean;
 	canManageOwners: boolean;
+	accessOptions: TeamManagementSummary["accessOptions"];
 }) {
 	const [roleOpen, setRoleOpen] = useState(false);
 	const [removeOpen, setRemoveOpen] = useState(false);
 	const [emailOpen, setEmailOpen] = useState(false);
+	const [accessOpen, setAccessOpen] = useState(false);
 	return (
 		<>
 			<DropdownMenu>
@@ -269,6 +281,11 @@ function MemberActions({
 							Change role
 						</DropdownMenuItem>
 					) : null}
+					{canManage ? (
+						<DropdownMenuItem onSelect={() => setAccessOpen(true)}>
+							Manage access
+						</DropdownMenuItem>
+					) : null}
 					{member.canRemove ? (
 						<DropdownMenuItem
 							variant="destructive"
@@ -286,6 +303,13 @@ function MemberActions({
 				open={roleOpen}
 				onOpenChange={setRoleOpen}
 			/>
+			<ManageMemberAccessDialog
+				workspaceId={workspaceId}
+				member={member}
+				accessOptions={accessOptions}
+				open={accessOpen}
+				onOpenChange={setAccessOpen}
+			/>
 			<RemoveMemberDialog
 				workspaceId={workspaceId}
 				member={member}
@@ -299,6 +323,123 @@ function MemberActions({
 				onOpenChange={setEmailOpen}
 			/>
 		</>
+	);
+}
+
+function ManageMemberAccessDialog({
+	workspaceId,
+	member,
+	accessOptions,
+	open,
+	onOpenChange,
+}: {
+	workspaceId: string;
+	member: TeamMemberSummary;
+	accessOptions: TeamManagementSummary["accessOptions"];
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+}) {
+	const cache = useQueryClient();
+	const [teamIds, setTeamIds] = useState(member.teamIds);
+	const [inboxIds, setInboxIds] = useState(member.directInboxIds);
+	const toggle = (ids: string[], id: string) =>
+		ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id];
+	const close = (next: boolean) => {
+		if (next) {
+			setTeamIds(member.teamIds);
+			setInboxIds(member.directInboxIds);
+		}
+		onOpenChange(next);
+	};
+	const mutation = useMutation({
+		mutationFn: () =>
+			teamApi.updateMemberAccess(workspaceId, member.id, { teamIds, inboxIds }),
+		onSuccess: () => {
+			onOpenChange(false);
+			void cache.invalidateQueries({ queryKey: teamKey(workspaceId) });
+			void cache.invalidateQueries({ queryKey: ["sidebar", workspaceId] });
+			void cache.invalidateQueries({ queryKey: ["inboxes", workspaceId] });
+		},
+	});
+	return (
+		<Dialog open={open} onOpenChange={close}>
+			<DialogContent>
+				<DialogHeader>
+					<DialogTitle>
+						Manage access for {member.name || member.username || member.email}
+					</DialogTitle>
+					<DialogDescription>
+						Teams grant team inboxes and team-linked channels. Direct inbox
+						access applies only to shared inboxes; private mailbox access
+						remains explicit.
+					</DialogDescription>
+				</DialogHeader>
+				<div className="space-y-5">
+					<AccessChecklist
+						title="Teams"
+						items={accessOptions.teams}
+						selectedIds={teamIds}
+						onToggle={(id) => setTeamIds(toggle(teamIds, id))}
+						empty="No teams are configured."
+					/>
+					<AccessChecklist
+						title="Direct shared inboxes"
+						items={accessOptions.directGrantInboxes}
+						selectedIds={inboxIds}
+						onToggle={(id) => setInboxIds(toggle(inboxIds, id))}
+						empty="No shared inboxes need direct grants."
+					/>
+				</div>
+				{mutation.isError ? <p role="alert">{mutation.error.message}</p> : null}
+				<DialogFooter>
+					<DialogClose asChild>
+						<Button variant="outline">Cancel</Button>
+					</DialogClose>
+					<Button
+						onClick={() => mutation.mutate()}
+						disabled={mutation.isPending}
+					>
+						{mutation.isPending ? "Saving…" : "Save access"}
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+function AccessChecklist({
+	title,
+	items,
+	selectedIds,
+	onToggle,
+	empty,
+}: {
+	title: string;
+	items: Array<{ id: string; name: string }>;
+	selectedIds: string[];
+	onToggle: (id: string) => void;
+	empty: string;
+}) {
+	return (
+		<FieldGroup>
+			<FieldLabel>{title}</FieldLabel>
+			{items.length ? (
+				items.map((item) => (
+					<Field key={item.id} orientation="horizontal">
+						<Checkbox
+							id={`${title}-${item.id}`}
+							checked={selectedIds.includes(item.id)}
+							onCheckedChange={() => onToggle(item.id)}
+						/>
+						<FieldLabel htmlFor={`${title}-${item.id}`} className="font-normal">
+							{item.name}
+						</FieldLabel>
+					</Field>
+				))
+			) : (
+				<FieldDescription>{empty}</FieldDescription>
+			)}
+		</FieldGroup>
 	);
 }
 
@@ -707,19 +848,22 @@ function InviteTeammateDialog({ workspaceId }: { workspaceId: string }) {
 	const cache = useQueryClient();
 	const [open, setOpen] = useState(false);
 	const [email, setEmail] = useState("");
+	const [username, setUsername] = useState("");
 	const [result, setResult] = useState<InvitationCreateResponse["data"] | null>(
 		null,
 	);
 	const close = (next: boolean) => {
 		if (!next) {
 			setEmail("");
+			setUsername("");
 			setResult(null);
 			mutation.reset();
 		}
 		setOpen(next);
 	};
 	const mutation = useMutation({
-		mutationFn: () => teamApi.createInvitation(workspaceId, email.trim()),
+		mutationFn: () =>
+			teamApi.createInvitation(workspaceId, email.trim(), username.trim()),
 		onSuccess: (response) => {
 			setResult(response.data);
 			void cache.invalidateQueries({ queryKey: teamKey(workspaceId) });
@@ -732,8 +876,8 @@ function InviteTeammateDialog({ workspaceId }: { workspaceId: string }) {
 				<DialogHeader>
 					<DialogTitle>Invite teammate</DialogTitle>
 					<DialogDescription>
-						We’ll email an invitation to this teammate. They choose their
-						username and password when they join.
+						Choose the teammate’s immutable username, then we’ll email them a
+						link to set their password.
 					</DialogDescription>
 				</DialogHeader>
 				{result ? (
@@ -747,6 +891,18 @@ function InviteTeammateDialog({ workspaceId }: { workspaceId: string }) {
 						}}
 					>
 						<FieldGroup>
+							<Field>
+								<FieldLabel htmlFor="invite-username">Username</FieldLabel>
+								<Input
+									id="invite-username"
+									autoComplete="username"
+									minLength={3}
+									maxLength={30}
+									value={username}
+									onChange={(event) => setUsername(event.target.value)}
+									required
+								/>
+							</Field>
 							<Field>
 								<FieldLabel htmlFor="invite-email">Email</FieldLabel>
 								<Input
@@ -768,7 +924,9 @@ function InviteTeammateDialog({ workspaceId }: { workspaceId: string }) {
 							</DialogClose>
 							<Button
 								type="submit"
-								disabled={mutation.isPending || !email.trim()}
+								disabled={
+									mutation.isPending || !email.trim() || !username.trim()
+								}
 							>
 								{mutation.isPending ? "Sending…" : "Send invitation"}
 							</Button>

@@ -15,12 +15,12 @@ import { decodeJsonBody } from "./validation";
 const token = Schema.String.pipe(Schema.pattern(/^[a-f0-9]{64}$/));
 const signup = Schema.Struct({
 	token,
-	username: Schema.String.pipe(Schema.maxLength(30)),
 	password: Schema.String.pipe(Schema.minLength(8), Schema.maxLength(128)),
 	confirmation: Schema.String.pipe(Schema.minLength(8), Schema.maxLength(128)),
 });
 const invite = Schema.Struct({
 	email: Schema.String.pipe(Schema.maxLength(254)),
+	username: Schema.String.pipe(Schema.maxLength(30)),
 });
 const accept = Schema.Struct({ token });
 
@@ -79,6 +79,7 @@ onboardingApi.post("/workspaces/:workspaceId/invitations", async (c) => {
 				session.user.id,
 				c.req.param("workspaceId"),
 				body.value.email,
+				body.value.username,
 			),
 		},
 		201,
@@ -95,7 +96,6 @@ onboardingApi.post("/invitations/register", async (c) => {
 			data: await registerInvitedAgent(
 				c.env,
 				body.value.token,
-				body.value.username,
 				body.value.password,
 			),
 		},

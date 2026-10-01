@@ -6,6 +6,10 @@ import { TeamSettingsSection } from "./TeamSettingsSection";
 const team = {
 	canManage: true,
 	canManageOwners: true,
+	accessOptions: {
+		teams: [{ id: "support", name: "Support" }],
+		directGrantInboxes: [{ id: "sales", name: "Sales" }],
+	},
 	members: [
 		{
 			id: "alex-id",
@@ -15,7 +19,9 @@ const team = {
 			emailVerified: true,
 			role: "member" as const,
 			joinedAt: "2026-01-01T00:00:00.000Z",
+			teamIds: ["support"],
 			teamNames: ["Support"],
+			directInboxIds: [],
 			privateMailboxes: [],
 			canChangeRole: true,
 			canRemove: true,
@@ -31,6 +37,7 @@ vi.mock("@/lib/team-api", () => ({
 		deleteInvitation: vi.fn(),
 		resendInvitation: vi.fn(),
 		updateMemberRole: vi.fn(),
+		updateMemberAccess: vi.fn(),
 		offboardMember: vi.fn(),
 	},
 }));
@@ -53,7 +60,7 @@ describe("TeamSettingsSection", () => {
 	});
 	afterEach(() => vi.clearAllMocks());
 
-	it("creates email-only invitations and clears the delivery result when closed", async () => {
+	it("creates invitations with an owner-selected username and clears the delivery result when closed", async () => {
 		vi.mocked(teamApi.createInvitation).mockResolvedValue({
 			success: true,
 			data: { delivery: "email_sent", expiresAt: 1767225600000 },
@@ -61,6 +68,9 @@ describe("TeamSettingsSection", () => {
 		renderTeam();
 		await screen.findByRole("button", { name: "Invite teammate" });
 		fireEvent.click(screen.getByRole("button", { name: "Invite teammate" }));
+		fireEvent.change(screen.getByLabelText("Username"), {
+			target: { value: "new.teammate" },
+		});
 		fireEvent.change(screen.getByLabelText("Email"), {
 			target: { value: "new@example.com" },
 		});
@@ -71,6 +81,7 @@ describe("TeamSettingsSection", () => {
 			expect(teamApi.createInvitation).toHaveBeenCalledWith(
 				"workspace-a",
 				"new@example.com",
+				"new.teammate",
 			),
 		);
 		expect(await screen.findByRole("status")).toHaveTextContent(

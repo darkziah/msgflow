@@ -3,6 +3,7 @@ import type {
 	TeamInvitationSummary,
 	TeamManagementSummary,
 	TeamMemberSummary,
+	UpdateWorkspaceMemberAccessRequest,
 	UpdateWorkspaceMemberRoleRequest,
 } from "@msgflow/contracts";
 import { request } from "./api";
@@ -29,6 +30,7 @@ export type UpdateMemberRoleResponse = {
 	success: true;
 	data: { member: TeamMemberSummary };
 };
+export type UpdateMemberAccessResponse = UpdateMemberRoleResponse;
 export type OffboardMemberResponse = {
 	success: true;
 	data: { success: true };
@@ -39,12 +41,12 @@ export const teamApi = {
 	get(workspaceId: string) {
 		return request<TeamResponse>(`${workspacePath(workspaceId)}/team`);
 	},
-	createInvitation(workspaceId: string, email: string) {
+	createInvitation(workspaceId: string, email: string, username: string) {
 		return request<InvitationCreateResponse>(
 			`${workspacePath(workspaceId)}/invitations`,
 			{
 				method: "POST",
-				body: JSON.stringify({ email }),
+				body: JSON.stringify({ email, username }),
 			},
 		);
 	},
@@ -71,6 +73,16 @@ export const teamApi = {
 				method: "PATCH",
 				body: JSON.stringify(body),
 			},
+		);
+	},
+	updateMemberAccess(
+		workspaceId: string,
+		userId: string,
+		body: UpdateWorkspaceMemberAccessRequest,
+	) {
+		return request<UpdateMemberAccessResponse>(
+			`${memberPath(workspaceId, userId)}/access`,
+			{ method: "PUT", body: JSON.stringify(body) },
 		);
 	},
 	offboardMember(
