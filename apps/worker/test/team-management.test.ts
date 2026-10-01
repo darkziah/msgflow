@@ -25,6 +25,7 @@ async function seedLifecycleFixture() {
 		seedUser(ctx, "owner-2", "owner-2@example.test"),
 		seedUser(ctx, "admin", "admin@example.test"),
 		seedUser(ctx, "member", "Member@Example.Test"),
+		seedUser(ctx, "accepted", "accepted@example.test"),
 		seedUser(ctx, "foreign", "foreign@example.test"),
 	]);
 	await ctx.env.DB.batch([
@@ -110,6 +111,16 @@ describe("team management lifecycle", () => {
 			canDelete: false,
 			canResend: false,
 		});
+	});
+
+	test("does not list an accepted invitation as pending", async () => {
+		await seedLifecycleFixture();
+		await ctx.env.DB
+			.prepare("UPDATE agent_invitations SET email=?, reserved_username=?, user_id=?, accepted_at=? WHERE id=?")
+			.bind("accepted@example.test", "accepted", "accepted", Date.now(), "invite-a")
+			.run();
+		const summary = await listWorkspaceTeam(ctx.env, "owner", "a");
+		expect(summary.invitations).toEqual([]);
 	});
 
 	test("registers canonical typed team lifecycle routes", () => {

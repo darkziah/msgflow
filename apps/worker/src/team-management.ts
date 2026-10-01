@@ -11,7 +11,7 @@ import {
 	user,
 	workspaceMembers,
 } from "@msgflow/db";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { requireWorkspaceAccess } from "./access";
 import { ManageError } from "./errors";
@@ -76,7 +76,10 @@ export async function getTeamManagement(
 		revokedAt: agentInvitations.revokedAt, claimedAt: agentInvitations.claimedAt,
 		acceptedAt: agentInvitations.acceptedAt, userId: agentInvitations.userId,
 	}).from(agentInvitations).innerJoin(user, eq(agentInvitations.invitedBy, user.id))
-		.where(eq(agentInvitations.workspaceId, workspaceId)).orderBy(asc(agentInvitations.createdAt), asc(agentInvitations.id)).all() : [];
+		.where(and(
+			eq(agentInvitations.workspaceId, workspaceId),
+			isNull(agentInvitations.acceptedAt),
+		)).orderBy(asc(agentInvitations.createdAt), asc(agentInvitations.id)).all() : [];
 	const inviteeIds = invitations.flatMap((invitation) => invitation.userId ? [invitation.userId] : []);
 	const inviteeRows = inviteeIds.length === 0 ? [] : await db.select({ id: user.id, emailVerified: user.emailVerified })
 		.from(user).where(inArray(user.id, inviteeIds)).all();
