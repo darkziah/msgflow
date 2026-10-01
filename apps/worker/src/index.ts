@@ -44,7 +44,6 @@ import {
 	InboxTreeMoveRequestSchema,
 	InboxUpdateRequestSchema,
 	MarkReadRequestSchema,
-	MessengerWebhookEnvelopeSchema,
 	RuleWriteRequestSchema,
 	SavedFilterCreateRequestSchema,
 	SendMessageRequestSchema,
@@ -53,6 +52,10 @@ import {
 	TagCreateRequestSchema,
 	TagUpdateRequestSchema,
 	WhatsAppWebhookEnvelopeSchema,
+	CallAcceptRequestSchema,
+	CallRejectRequestSchema,
+	CallTerminateRequestSchema,
+	CallMetricsRequestSchema,
 } from "@msgflow/contracts";
 import { createAuth } from "@msgflow/auth";
 import { drizzle } from "drizzle-orm/d1";
@@ -68,10 +71,17 @@ import {
 	user,
 	workspaceMembers,
 } from "@msgflow/db";
-import { normalizeFacebookWebhook, normalizeWhatsAppWebhook } from "@msgflow/channel";
+import {
+	normalizeFacebookWebhook,
+	normalizeFacebookCallingWebhook,
+	normalizeWhatsAppWebhook,
+} from "@msgflow/channel";
 import { ConversationDO } from "./conversation-do";
+import { CallDispatchDO, callDispatchInternalHeaders } from "./call-dispatch-do";
+import { CallSessionDO } from "./call-session-do";
 import type { Env } from "./env";
 import { routeInbound } from "./ingest";
+import { routeInboundFacebookCall } from "./calling-service";
 
 import {
 	ManageError,
@@ -126,6 +136,7 @@ import {
 	updateMailboxState,
 } from "./mailboxes";
 import {
+	confirmMetaAppWebhookSubscription,
 	hashWebhookVerifyToken,
 	createMetaApp,
 	deleteMetaApp,
@@ -171,8 +182,22 @@ import { emailApi, validatePrivateEmailAttachments } from "./email-api";
 import { onboardingApi } from "./onboarding-api";
 import { workspaceApi } from "./workspace-api-route";
 import { teamApi } from "./team-api";
+import {
+	CallQueueWriteSchema,
+	RingGroupWriteSchema,
+	createCallQueue,
+	createRingGroup,
+	deleteCallQueue,
+	deleteRingGroup,
+	disableCallQueue,
+	enableCallQueue,
+	listCallQueues,
+	listRingGroups,
+	updateCallQueue,
+	updateRingGroup,
+} from "./calling-config";
 
-export { ConversationDO };
+export { ConversationDO, CallDispatchDO, CallSessionDO };
 
 const app = new Hono<{ Bindings: Env }>();
 app.use("/api/*", async (c, next) => {
@@ -226,7 +251,11 @@ app.on(["GET", "PUT", "DELETE"], "/api/conversations/:id/draft", async (c) => {
 		const workspaceId = c.req.query("workspaceId");
 		if (!workspaceId)
 			return c.json({ success: false, error: "missing workspaceId" }, 400);
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const id = c.req.param("id");
 		if (c.req.method === "GET")
 			return c.json({
@@ -269,7 +298,11 @@ app.post("/api/attachments", async (c) => {
 		const workspaceId = form.get("workspaceId");
 		if (typeof workspaceId !== "string" || !workspaceId)
 			return c.json({ success: false, error: "missing workspaceId" }, 400);
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const files = form.getAll("files");
 		if (
 			files.length === 0 ||
@@ -314,7 +347,11 @@ app.post("/api/conversations/:id/messages", async (c) => {
 	const conversationId = c.req.param("id");
 	try {
 		const { workspaceId } = body;
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const conversation = await getConversation(
 			c.env,
 			session.user.id,
@@ -965,7 +1002,11 @@ app.get("/api/workspaces/:workspaceId/channels", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		return c.json({
 			channels: await listChannels(c.env, workspaceId, session.user.id),
 		});
@@ -1004,7 +1045,11 @@ app.post("/api/workspaces/:workspaceId/whatsapp-channels", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(
 			c.req.raw,
 			WhatsAppChannelCreateRequestSchema,
@@ -1032,7 +1077,11 @@ app.patch("/api/workspaces/:workspaceId/whatsapp-channels/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(
 			c.req.raw,
 			WhatsAppChannelUpdateRequestSchema,
@@ -1058,7 +1107,11 @@ app.delete("/api/workspaces/:workspaceId/whatsapp-channels/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		await deleteWhatsAppChannel(
 			c.env,
 			workspaceId,
@@ -1108,6 +1161,26 @@ app.post("/api/workspaces/:workspaceId/meta-apps/:metaAppId/webhook-token", asyn
 		return manageError(c, err);
 	}
 });
+
+// This is an explicit Owner attestation, not evidence inferred from an App ID.
+app.post(
+	"/api/workspaces/:workspaceId/meta-apps/:metaAppId/webhook-subscription-confirmation",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			await confirmMetaAppWebhookSubscription(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("metaAppId"),
+				session.user.id,
+			);
+			return c.json({ success: true });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
 
 app.patch("/api/workspaces/:workspaceId/meta-apps/:metaAppId", async (c) => {
 	const session = await getSession(c);
@@ -1226,7 +1299,11 @@ app.post("/api/workspaces/:workspaceId/channels/:id/token", async (c) => {
 
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(
 			c.req.raw,
 			ChannelConnectRequestSchema,
@@ -1253,7 +1330,11 @@ app.post("/api/workspaces/:workspaceId/channels/:id/disconnect", async (c) => {
 
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		await disconnectChannel(
 			c.env,
 			workspaceId,
@@ -1272,7 +1353,11 @@ app.delete("/api/workspaces/:workspaceId/channels/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		await deleteFacebookChannel(
 			c.env,
 			workspaceId,
@@ -1291,7 +1376,6 @@ app.delete("/api/workspaces/:workspaceId/channels/:id", async (c) => {
 // membership rules as the workspace-scoped routes below (the first caller
 // bootstraps as owner, so single-tenant demos keep working).
 // ---------------------------------------------------------------------------
-
 
 /**
  * A Messenger delivery identifies its Page in `entry[].id`. Resolve only the
@@ -1422,7 +1506,10 @@ async function verifyWhatsAppSignature(
 	if (phoneNumberIds.length === 0) return false;
 
 	const matches = await drizzle(env.DB)
-		.select({ phoneNumberId: channels.externalId, appSecret: metaApps.appSecret })
+		.select({
+			phoneNumberId: channels.externalId,
+			appSecret: metaApps.appSecret,
+		})
 		.from(channels)
 		.innerJoin(metaApps, eq(channels.metaAppId, metaApps.id))
 		.where(
@@ -1776,7 +1863,11 @@ app.post("/api/workspaces/:workspaceId/inboxes/:inboxId/move", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(c.req.raw, InboxTreeMoveRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -1834,7 +1925,9 @@ app.post("/api/workspaces/:workspaceId/inboxes/:inboxId/archive", async (c) => {
 });
 
 // POST /api/workspaces/:workspaceId/inboxes/:inboxId/channels — link (admin).
-app.post("/api/workspaces/:workspaceId/inboxes/:inboxId/channels", async (c) => {
+app.post(
+	"/api/workspaces/:workspaceId/inboxes/:inboxId/channels",
+	async (c) => {
 		const session = await getSession(c);
 		if (!session) return unauthorized(c);
 		try {
@@ -1864,7 +1957,9 @@ app.post("/api/workspaces/:workspaceId/inboxes/:inboxId/channels", async (c) => 
 );
 
 // DELETE /api/workspaces/:workspaceId/inboxes/:inboxId/channels/:channelId
-app.delete("/api/workspaces/:workspaceId/inboxes/:inboxId/channels/:channelId", async (c) => {
+app.delete(
+	"/api/workspaces/:workspaceId/inboxes/:inboxId/channels/:channelId",
+	async (c) => {
 		const session = await getSession(c);
 		if (!session) return unauthorized(c);
 		try {
@@ -2024,7 +2119,11 @@ app.get("/api/workspaces/:workspaceId/tags", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		return c.json({
 			tags: await listTags(c.env, workspaceId, session.user.id),
 		});
@@ -2038,7 +2137,11 @@ app.post("/api/workspaces/:workspaceId/tags", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(c.req.raw, TagCreateRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -2059,7 +2162,11 @@ app.patch("/api/workspaces/:workspaceId/tags/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(c.req.raw, TagUpdateRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -2081,7 +2188,11 @@ app.delete("/api/workspaces/:workspaceId/tags/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		await deleteTag(c.env, workspaceId, c.req.param("id"), session.user.id);
 		return c.json({ success: true });
 	} catch (err) {
@@ -2230,7 +2341,11 @@ app.get("/api/workspaces/:workspaceId/rules", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		return c.json({
 			rules: await listRules(c.env, workspaceId, session.user.id),
 		});
@@ -2244,7 +2359,11 @@ app.post("/api/workspaces/:workspaceId/rules", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(c.req.raw, RuleWriteRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -2267,7 +2386,11 @@ app.patch("/api/workspaces/:workspaceId/rules/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(c.req.raw, RuleWriteRequestSchema);
 		if (!decoded.ok)
 			return c.json({ success: false, error: decoded.error }, 400);
@@ -2296,7 +2419,11 @@ app.delete("/api/workspaces/:workspaceId/rules/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		await deleteRule(c.env, workspaceId, c.req.param("id"), session.user.id);
 		return c.json({ success: true });
 	} catch (err) {
@@ -2313,7 +2440,11 @@ app.get("/api/workspaces/:workspaceId/canned-replies", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		return c.json({
 			cannedReplies: await listCannedReplies(
 				c.env,
@@ -2331,7 +2462,11 @@ app.post("/api/workspaces/:workspaceId/canned-replies", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(
 			c.req.raw,
 			CannedReplyWriteRequestSchema,
@@ -2355,7 +2490,11 @@ app.patch("/api/workspaces/:workspaceId/canned-replies/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		const decoded = await decodeJsonBody(
 			c.req.raw,
 			CannedReplyWriteRequestSchema,
@@ -2380,7 +2519,11 @@ app.delete("/api/workspaces/:workspaceId/canned-replies/:id", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		await deleteCannedReply(
 			c.env,
 			workspaceId,
@@ -2437,14 +2580,15 @@ app.post("/webhooks/messenger/:metaAppId", async (c) => {
 	} catch {
 		return c.text("invalid json", 400);
 	}
-	const decoded = Schema.decodeUnknownEither(MessengerWebhookEnvelopeSchema)(
-		raw,
-	);
-	if (Either.isLeft(decoded)) return c.text("invalid json", 400);
-
-	const inbound = normalizeFacebookWebhook(decoded.right);
-	for (const message of inbound) {
+	// Keep the signed provider object intact. Message and call normalizers consume
+	// different extensions of the same delivery; decoding a message-only envelope
+	// here strips `entry[].calls` before the call normalizer can see it.
+	for (const message of normalizeFacebookWebhook(raw)) {
 		await routeInbound(c.env, message);
+	}
+	// Calls have a separate idempotency key and no Message timeline entry.
+	for (const call of normalizeFacebookCallingWebhook(raw)) {
+		await routeInboundFacebookCall(c.env, c.req.param("metaAppId"), call);
 	}
 	// Always 200 so Meta doesn't retry; dedup happens in the DO.
 	return c.json({ status: "received" });
@@ -2483,7 +2627,9 @@ app.post("/webhooks/whatsapp/:metaAppId", async (c) => {
 	} catch {
 		return c.text("invalid json", 400);
 	}
-	const decoded = Schema.decodeUnknownEither(WhatsAppWebhookEnvelopeSchema)(raw);
+	const decoded = Schema.decodeUnknownEither(WhatsAppWebhookEnvelopeSchema)(
+		raw,
+	);
 	if (Either.isLeft(decoded)) return c.text("invalid json", 400);
 	const ok = await verifyWhatsAppSignature(
 		c.env,
@@ -2507,6 +2653,9 @@ export default {
 		ctx: ExecutionContext,
 	): Promise<Response> {
 		const url = new URL(request.url);
+		if (url.pathname === "/ws/calling") {
+			return handleCallingWebSocket(request, env);
+		}
 		if (url.pathname === "/ws") {
 			return handleWebSocket(request, env);
 		}
@@ -2577,12 +2726,308 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 	return stub.fetch(upgraded);
 }
 
+async function handleCallingWebSocket(request: Request, env: Env): Promise<Response> {
+	const workspaceId = new URL(request.url).searchParams.get("workspaceId");
+	if (!workspaceId) return new Response("missing workspaceId", { status: 400 });
+	const session = await createAuth(env).api.getSession({ headers: request.headers });
+	if (!session) return new Response("unauthorized", { status: 401 });
+	try {
+		await requireWorkspaceAccess(drizzle(env.DB), workspaceId, session.user.id);
+	} catch (error) {
+		if (error instanceof ManageError) return new Response("forbidden", { status: 403 });
+		throw error;
+	}
+	const headers = await callDispatchInternalHeaders(env.BETTER_AUTH_SECRET, "GET", "/ws", workspaceId, session.user.id);
+	// Identity crosses this boundary only from the verified session, never query
+	// parameters or browser-provided user identifiers.
+	headers.set("x-authenticated-workspace-id", workspaceId);
+	headers.set("x-authenticated-user-id", session.user.id);
+	// Preserve the browser upgrade and give the DO its internal route, rather
+	// than forwarding the public /ws/calling URL it does not own.
+	headers.set("Upgrade", "websocket");
+	const dispatchUrl = new URL(request.url);
+	dispatchUrl.pathname = "/ws";
+	return env.CALL_DISPATCH_DO.get(env.CALL_DISPATCH_DO.idFromName(workspaceId)).fetch(
+		new Request(dispatchUrl.toString(), { method: "GET", headers }),
+	);
+}
+
+app.patch("/api/workspaces/:workspaceId/calling/presence", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	let body: unknown;
+	try { body = await c.req.json(); } catch { return c.json({ success: false, error: "invalid json" }, 400); }
+	if (!isExactRecord(body, ["status"])) return c.json({ success: false, error: "invalid presence" }, 400);
+	const status = typeof body === "object" && body !== null ? (body as { status?: unknown }).status : undefined;
+	if (status !== "available" && status !== "away") {
+		return c.json({ success: false, error: "status must be available or away" }, 400);
+	}
+	const workspaceId = c.req.param("workspaceId");
+	try {
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+	} catch (error) {
+		if (error instanceof ManageError) return c.json({ success: false, error: "forbidden" }, 403);
+		throw error;
+	}
+	const rawBody = JSON.stringify({ status });
+	const headers = await callDispatchInternalHeaders(c.env.BETTER_AUTH_SECRET, "PATCH", "/presence", workspaceId, session.user.id, rawBody);
+	headers.set("content-type", "application/json");
+	headers.set("x-authenticated-workspace-id", workspaceId);
+	headers.set("x-authenticated-user-id", session.user.id);
+	const response = await c.env.CALL_DISPATCH_DO.get(c.env.CALL_DISPATCH_DO.idFromName(workspaceId)).fetch(
+		new Request("https://call-dispatch/presence", { method: "PATCH", headers, body: rawBody }),
+	);
+	return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
+});
+
+// Call commands cross the browser boundary only after session + workspace checks.
+// The session DO is authoritative for offered/winner authorization and serializes races.
+app.post("/api/workspaces/:workspaceId/calling/calls/:callId/accept", async (c) => {
+	const session = await getSession(c); if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, CallAcceptRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	const result = await forwardCallCommand(c, session.user.id, "accept", { offerSdp: decoded.value.offerSdp });
+	return result;
+});
+app.post("/api/workspaces/:workspaceId/calling/calls/:callId/reject", async (c) => {
+	const session = await getSession(c); if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, CallRejectRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	return forwardCallCommand(c, session.user.id, "reject", { reason: decoded.value.reason });
+});
+app.post("/api/workspaces/:workspaceId/calling/calls/:callId/terminate", async (c) => {
+	const session = await getSession(c); if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, CallTerminateRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	return forwardCallCommand(c, session.user.id, "terminate", { reason: decoded.value.reason });
+});
+app.post("/api/workspaces/:workspaceId/calling/calls/:callId/metrics", async (c) => {
+	const session = await getSession(c); if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, CallMetricsRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	return forwardCallCommand(c, session.user.id, "metrics", decoded.value);
+});
+
+async function forwardCallCommand(c: Context<{ Bindings: Env }>, actorId: string, action: "accept" | "reject" | "terminate" | "metrics", body: Record<string, unknown>): Promise<Response> {
+	const workspaceId = c.req.param("workspaceId");
+	const callId = c.req.param("callId");
+	try { await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, actorId); } catch (error) {
+		if (error instanceof ManageError) return c.json({ success: false, error: "forbidden" }, 403);
+		throw error;
+	}
+	const owned = await c.env.DB.prepare("SELECT 1 FROM call_events WHERE workspace_id=? AND provider_call_id=? LIMIT 1").bind(workspaceId, callId).first();
+	if (!owned) return c.json({ success: false, error: "not found" }, 404);
+	const rawBody = JSON.stringify({ ...body, actorId });
+	const headers = await callDispatchInternalHeaders(c.env.BETTER_AUTH_SECRET, "POST", `/${action}`, workspaceId, actorId, rawBody);
+	headers.set("content-type", "application/json");
+	headers.set("x-authenticated-workspace-id", workspaceId);
+	headers.set("x-authenticated-user-id", actorId);
+	const response = await c.env.CALL_SESSION_DO.get(c.env.CALL_SESSION_DO.idFromName(`facebook-call:${callId}`)).fetch(new Request(`https://call-session/${action}`, { method: "POST", headers, body: rawBody }));
+	return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
+}
+
+// Facebook Page calling configuration is workspace-admin only. The service owns all
+// tenant/resource validation; these routes only authenticate and decode once.
+app.get("/api/workspaces/:workspaceId/calling/ring-groups", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		return c.json({
+			ringGroups: await listRingGroups(
+				c.env,
+				c.req.param("workspaceId"),
+				session.user.id,
+			),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+app.post("/api/workspaces/:workspaceId/calling/ring-groups", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, RingGroupWriteSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		return c.json(
+			{
+				ringGroup: await createRingGroup(
+					c.env,
+					c.req.param("workspaceId"),
+					decoded.value,
+					session.user.id,
+				),
+			},
+			201,
+		);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+app.patch(
+	"/api/workspaces/:workspaceId/calling/ring-groups/:ringGroupId",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		const decoded = await decodeJsonBody(c.req.raw, RingGroupWriteSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		try {
+			return c.json({
+				ringGroup: await updateRingGroup(
+					c.env,
+					c.req.param("workspaceId"),
+					c.req.param("ringGroupId"),
+					decoded.value,
+					session.user.id,
+				),
+			});
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+app.delete(
+	"/api/workspaces/:workspaceId/calling/ring-groups/:ringGroupId",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			await deleteRingGroup(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("ringGroupId"),
+				session.user.id,
+			);
+			return c.json({ success: true });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+app.get("/api/workspaces/:workspaceId/calling/queues", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	try {
+		return c.json({
+			queues: await listCallQueues(
+				c.env,
+				c.req.param("workspaceId"),
+				session.user.id,
+			),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+app.post("/api/workspaces/:workspaceId/calling/queues", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, CallQueueWriteSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		return c.json(
+			{
+				queue: await createCallQueue(
+					c.env,
+					c.req.param("workspaceId"),
+					decoded.value,
+					session.user.id,
+				),
+			},
+			201,
+		);
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+app.patch("/api/workspaces/:workspaceId/calling/queues/:queueId", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const decoded = await decodeJsonBody(c.req.raw, CallQueueWriteSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		return c.json({
+			queue: await updateCallQueue(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("queueId"),
+				decoded.value,
+				session.user.id,
+			),
+		});
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+app.post(
+	"/api/workspaces/:workspaceId/calling/queues/:queueId/enable",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			return c.json({
+				queue: await enableCallQueue(
+					c.env,
+					c.req.param("workspaceId"),
+					c.req.param("queueId"),
+					session.user.id,
+				),
+			});
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+app.post(
+	"/api/workspaces/:workspaceId/calling/queues/:queueId/disable",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			return c.json({
+				queue: await disableCallQueue(
+					c.env,
+					c.req.param("workspaceId"),
+					c.req.param("queueId"),
+					session.user.id,
+				),
+			});
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+app.delete(
+	"/api/workspaces/:workspaceId/calling/queues/:queueId",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			await deleteCallQueue(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("queueId"),
+				session.user.id,
+			);
+			return c.json({ success: true });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+
 async function getSession(c: Context<{ Bindings: Env }>) {
 	return createAuth(c.env).api.getSession({ headers: c.req.raw.headers });
 }
 
 function unauthorized(c: Context<{ Bindings: Env }>) {
 	return c.json({ success: false, error: "unauthorized" }, 401);
+}
+
+function isExactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value) &&
+		Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
 }
 
 /** Map a ManageError (validation/not-found) to a JSON error response. */

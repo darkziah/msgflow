@@ -10,15 +10,24 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as FacebookRouteImport } from './routes/facebook'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as RulesRouteImport } from './routes/rules'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as SetupRouteImport } from './routes/setup'
+import { Route as FacebookIndexRouteImport } from './routes/facebook/index'
+import { Route as FacebookPrivacyRouteImport } from './routes/facebook/privacy'
+import { Route as FacebookTermsRouteImport } from './routes/facebook/terms'
 import { Route as SetupChannelRouteImport } from './routes/setup/channel'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FacebookRoute = FacebookRouteImport.update({
+  id: '/facebook',
+  path: '/facebook',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -41,6 +50,21 @@ const SetupRoute = SetupRouteImport.update({
   path: '/setup',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FacebookIndexRoute = FacebookIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => FacebookRoute,
+} as any)
+const FacebookPrivacyRoute = FacebookPrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
+  getParentRoute: () => FacebookRoute,
+} as any)
+const FacebookTermsRoute = FacebookTermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
+  getParentRoute: () => FacebookRoute,
+} as any)
 const SetupChannelRoute = SetupChannelRouteImport.update({
   id: '/channel',
   path: '/channel',
@@ -49,11 +73,15 @@ const SetupChannelRoute = SetupChannelRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/facebook': typeof FacebookRouteWithChildren
   '/login': typeof LoginRoute
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/setup': typeof SetupRouteWithChildren
+  '/facebook/privacy': typeof FacebookPrivacyRoute
+  '/facebook/terms': typeof FacebookTermsRoute
   '/setup/channel': typeof SetupChannelRoute
+  '/facebook/': typeof FacebookIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -61,35 +89,65 @@ export interface FileRoutesByTo {
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/setup': typeof SetupRouteWithChildren
+  '/facebook/privacy': typeof FacebookPrivacyRoute
+  '/facebook/terms': typeof FacebookTermsRoute
   '/setup/channel': typeof SetupChannelRoute
+  '/facebook': typeof FacebookIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/facebook': typeof FacebookRouteWithChildren
   '/login': typeof LoginRoute
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/setup': typeof SetupRouteWithChildren
+  '/facebook/privacy': typeof FacebookPrivacyRoute
+  '/facebook/terms': typeof FacebookTermsRoute
   '/setup/channel': typeof SetupChannelRoute
+  '/facebook/': typeof FacebookIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/login' | '/rules' | '/settings' | '/setup' | '/setup/channel'
+    | '/'
+    | '/facebook'
+    | '/login'
+    | '/rules'
+    | '/settings'
+    | '/setup'
+    | '/facebook/privacy'
+    | '/facebook/terms'
+    | '/setup/channel'
+    | '/facebook/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login' | '/rules' | '/settings' | '/setup' | '/setup/channel'
-  id:
-    | '__root__'
+  to:
     | '/'
     | '/login'
     | '/rules'
     | '/settings'
     | '/setup'
+    | '/facebook/privacy'
+    | '/facebook/terms'
     | '/setup/channel'
+    | '/facebook'
+  id:
+    | '__root__'
+    | '/'
+    | '/facebook'
+    | '/login'
+    | '/rules'
+    | '/settings'
+    | '/setup'
+    | '/facebook/privacy'
+    | '/facebook/terms'
+    | '/setup/channel'
+    | '/facebook/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  FacebookRoute: typeof FacebookRouteWithChildren
   LoginRoute: typeof LoginRoute
   RulesRoute: typeof RulesRoute
   SettingsRoute: typeof SettingsRoute
@@ -103,6 +161,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/facebook': {
+      id: '/facebook'
+      path: '/facebook'
+      fullPath: '/facebook'
+      preLoaderRoute: typeof FacebookRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -133,6 +198,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SetupRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/facebook/': {
+      id: '/facebook/'
+      path: '/'
+      fullPath: '/facebook/'
+      preLoaderRoute: typeof FacebookIndexRouteImport
+      parentRoute: typeof FacebookRoute
+    }
+    '/facebook/privacy': {
+      id: '/facebook/privacy'
+      path: '/privacy'
+      fullPath: '/facebook/privacy'
+      preLoaderRoute: typeof FacebookPrivacyRouteImport
+      parentRoute: typeof FacebookRoute
+    }
+    '/facebook/terms': {
+      id: '/facebook/terms'
+      path: '/terms'
+      fullPath: '/facebook/terms'
+      preLoaderRoute: typeof FacebookTermsRouteImport
+      parentRoute: typeof FacebookRoute
+    }
     '/setup/channel': {
       id: '/setup/channel'
       path: '/channel'
@@ -142,6 +228,22 @@ declare module '@tanstack/react-router' {
     }
   }
 }
+
+interface FacebookRouteChildren {
+  FacebookPrivacyRoute: typeof FacebookPrivacyRoute
+  FacebookTermsRoute: typeof FacebookTermsRoute
+  FacebookIndexRoute: typeof FacebookIndexRoute
+}
+
+const FacebookRouteChildren: FacebookRouteChildren = {
+  FacebookPrivacyRoute: FacebookPrivacyRoute,
+  FacebookTermsRoute: FacebookTermsRoute,
+  FacebookIndexRoute: FacebookIndexRoute,
+}
+
+const FacebookRouteWithChildren = FacebookRoute._addFileChildren(
+  FacebookRouteChildren,
+)
 
 interface SetupRouteChildren {
   SetupChannelRoute: typeof SetupChannelRoute
@@ -155,6 +257,7 @@ const SetupRouteWithChildren = SetupRoute._addFileChildren(SetupRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  FacebookRoute: FacebookRouteWithChildren,
   LoginRoute: LoginRoute,
   RulesRoute: RulesRoute,
   SettingsRoute: SettingsRoute,

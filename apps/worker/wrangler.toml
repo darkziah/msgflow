@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat"]
 [assets]
 directory = "../web/dist"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/health", "/webhooks/*", "/ws"]
+run_worker_first = ["/api/*", "/health", "/webhooks/*", "/ws", "/ws/calling"]
 
 [observability]
 enabled = true
@@ -27,9 +27,17 @@ database_id = "00000000-0000-0000-0000-000000000000"
 name = "CONVERSATION_DO"
 class_name = "ConversationDO"
 
+[[durable_objects.bindings]]
+name = "CALL_DISPATCH_DO"
+class_name = "CallDispatchDO"
+
+[[durable_objects.bindings]]
+name = "CALL_SESSION_DO"
+class_name = "CallSessionDO"
+
 [[migrations]]
-tag = "v1"
-new_sqlite_classes = ["ConversationDO"]
+tag = "v3"
+new_sqlite_classes = ["CallSessionDO"]
 
 [[send_email]]
 name = "EMAIL"

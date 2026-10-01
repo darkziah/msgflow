@@ -56,21 +56,59 @@ export interface Comment {
 	createdAt: string;
 }
 
-/** A system-generated audit record for a Conversation metadata change. */
-export interface Activity {
+export type GenericActivityAction =
+	| "conversation.updated"
+	| "tag.added"
+	| "tag.removed"
+	| "snooze.expired";
+
+export type CallActivityAction =
+	| "call.received"
+	| "call.ringing"
+	| "call.offered"
+	| "call.accepted"
+	| "call.rejected"
+	| "call.terminated"
+	| "call.timed_out"
+	| "call.no_agent_reply"
+	| "call.failed"
+	| "call.media_updated"
+	| "call.quality_reported";
+
+/** Aggregate-only call audit data. Raw signaling and media stay server-side. */
+export interface CallActivityDetails {
+	reason?: string;
+	status?: string;
+	durationSeconds?: number;
+	packetLossPercent?: number;
+	jitterMilliseconds?: number;
+}
+
+interface ActivityBase {
 	id: string;
 	conversationId: string;
-	action:
-		| "conversation.updated"
-		| "tag.added"
-		| "tag.removed"
-		| "snooze.expired";
 	/** Authenticated agent responsible for the change; null for system work. */
 	actorId: string | null;
-	/** Immutable action-specific data (for example changed values or a tag id). */
-	details: Record<string, unknown>;
 	createdAt: string;
 }
+
+/** A system-generated audit record for a non-call Conversation metadata change. */
+export interface GenericActivity extends ActivityBase {
+	action: GenericActivityAction;
+	/** Immutable action-specific data (for example changed values or a tag id). */
+	details: Record<string, unknown>;
+}
+
+/** A client-visible call audit record with only allow-listed aggregate details. */
+export interface CallActivity {
+	id: string;
+	conversationId: string;
+	action: CallActivityAction;
+	details: CallActivityDetails;
+	createdAt: string;
+}
+
+export type Activity = GenericActivity | CallActivity;
 
 // POST /api/conversations/:id/comments — author and timestamp are assigned
 // from the authenticated Worker session, never accepted from the client.

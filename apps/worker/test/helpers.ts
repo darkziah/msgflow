@@ -9,7 +9,7 @@ import type { Env } from "../src/env";
 
 /**
  * Miniflare-backed D1 test database: fresh instance per call, full migration
- * chain (0000 → 0026) applied, wrapped in the worker Env shape so the real
+ * chain (all discovered migrations) applied, wrapped in the worker Env shape so the real
  * manage/access/rules/workspace-api functions run against actual SQLite.
  *
  * This is how the routing-spec invariants are tested for real: default-inbox
@@ -46,10 +46,18 @@ export async function createTestDb(
 				options.script ??
 				"export default { fetch() { return new Response('ok'); } }",
 			durableObjects: options.script
-				? { CONVERSATION_DO: { className: "ConversationDO", useSQLite: true } }
+				? {
+					CONVERSATION_DO: { className: "ConversationDO", useSQLite: true },
+					CALL_DISPATCH_DO: { className: "CallDispatchDO", useSQLite: true },
+					CALL_SESSION_DO: { className: "CallSessionDO", useSQLite: true },
+				}
 				: undefined,
 			d1Databases: {
 				DB: `msgflow-test-${Date.now()}-${Math.random()}`,
+			},
+			bindings: {
+				BETTER_AUTH_SECRET: "test-better-auth-secret-that-is-long-enough",
+				BETTER_AUTH_URL: "https://msgflow.test",
 			},
 			r2Buckets: ["ATTACHMENTS", "EMAIL_ARCHIVE"],
 			compatibilityDate: "2025-01-01",
@@ -77,6 +85,8 @@ export async function createTestDb(
 		env: {
 			DB: d1 as unknown as Env["DB"],
 			CONVERSATION_DO: conversationDo,
+			CALL_DISPATCH_DO: conversationDo as unknown as Env["CALL_DISPATCH_DO"],
+			CALL_SESSION_DO: conversationDo as unknown as Env["CALL_SESSION_DO"],
 			ATTACHMENTS: attachments as unknown as Env["ATTACHMENTS"],
 			EMAIL_ARCHIVE: emailArchive as unknown as Env["EMAIL_ARCHIVE"],
 			ATTACHMENT_PUBLIC_BASE_URL: "https://attachments.test",

@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
 	type AnySQLiteColumn,
+	check,
 	index,
 	integer,
 	primaryKey,
@@ -122,6 +123,120 @@ export const teamMembers = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// 1b. FACEBOOK PAGE CALLING (routing configuration and provider event audit)
+// ---------------------------------------------------------------------------
+
+export const ringGroups = sqliteTable(
+	"ring_groups",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "restrict" }),
+		teamId: text("team_id").notNull().references(() => teams.id, { onDelete: "restrict" }),
+		name: text("name").notNull(),
+		strategy: text("strategy", { enum: ["simultaneous", "round_robin"] }).notNull(),
+		nextMemberCursor: integer("next_member_cursor").notNull().default(0),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [index("idx_ring_groups_workspace_team").on(table.workspaceId, table.teamId)],
+);
+
+export const ringGroupMembers = sqliteTable(
+	"ring_group_members",
+	{
+		id: text("id").primaryKey(),
+		ringGroupId: text("ring_group_id").notNull().references(() => ringGroups.id, { onDelete: "restrict" }),
+		userId: text("user_id").notNull().references(() => user.id, { onDelete: "restrict" }),
+		sortOrder: integer("sort_order").notNull(),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [uniqueIndex("idx_ring_group_members_group_user").on(table.ringGroupId, table.userId)],
+);
+
+export const callQueues = sqliteTable(
+	"call_queues",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "restrict" }),
+		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
+		teamId: text("team_id").notNull().references(() => teams.id, { onDelete: "restrict" }),
+		name: text("name").notNull(),
+		isEnabled: integer("is_enabled", { mode: "boolean" }).notNull().default(false),
+		/** Opaque enable lease; it never makes this queue dispatch-active. */
+		provisioningLeaseToken: text("provisioning_lease_token"),
+		noAgentReplyText: text("no_agent_reply_text").notNull(),
+		timezoneId: text("timezone_id").notNull(),
+		weeklyOperatingHoursJson: text("weekly_operating_hours_json").notNull(),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("idx_call_queues_workspace_team").on(table.workspaceId, table.teamId),
+		uniqueIndex("idx_call_queues_enabled_channel").on(table.channelId).where(sql`${table.isEnabled} = 1`),
+		uniqueIndex("idx_call_queues_provisioning_channel")
+			.on(table.channelId)
+			.where(sql`${table.provisioningLeaseToken} IS NOT NULL`),
+	],
+);
+
+export const callQueueStages = sqliteTable(
+	"call_queue_stages",
+	{
+		id: text("id").primaryKey(),
+		queueId: text("queue_id").notNull().references(() => callQueues.id, { onDelete: "cascade" }),
+		ringGroupId: text("ring_group_id").notNull().references(() => ringGroups.id, { onDelete: "restrict" }),
+		stageOrder: integer("stage_order").notNull(),
+		ringDurationSeconds: integer("ring_duration_seconds").notNull(),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("idx_call_queue_stages_queue_order").on(table.queueId, table.stageOrder),
+		check("call_queue_stages_ring_duration_seconds_range", sql`${table.ringDurationSeconds} BETWEEN 1 AND 50`),
+	],
+);
+
+export const agentCallPresence = sqliteTable(
+	"agent_call_presence",
+	{
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "restrict" }),
+		userId: text("user_id").notNull().references(() => user.id, { onDelete: "restrict" }),
+		status: text("status", { enum: ["available", "away", "offline"] }).notNull().default("offline"),
+		socketConnectedAt: text("socket_connected_at"),
+		heartbeatExpiresAt: text("heartbeat_expires_at"),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.workspaceId, table.userId] }),
+		index("idx_agent_call_presence_eligible").on(
+			table.workspaceId,
+			table.status,
+			table.heartbeatExpiresAt,
+		),
+	],
+);
+
+export const callEvents = sqliteTable(
+	"call_events",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "restrict" }),
+		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
+		conversationId: text("conversation_id").references(() => conversations.id, { onDelete: "restrict" }),
+		queueId: text("queue_id").references(() => callQueues.id, { onDelete: "set null" }),
+		providerCallId: text("provider_call_id").notNull(),
+		providerEventId: text("provider_event_id").notNull(),
+		direction: text("direction", { enum: ["consumer_to_business"] }).notNull(),
+		state: text("state", { enum: ["ringing", "accepted", "rejected", "timed_out", "terminated", "failed"] }).notNull(),
+		acceptedByUserId: text("accepted_by_user_id").references(() => user.id, { onDelete: "set null" }),
+		terminalReason: text("terminal_reason"),
+		qualitySummaryJson: text("quality_summary_json"),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [uniqueIndex("idx_call_events_provider_event").on(table.channelId, table.providerEventId)],
+);
+
+// ---------------------------------------------------------------------------
 // 2. CHANNELS (Facebook Pages + email mailboxes)
 // ---------------------------------------------------------------------------
 
@@ -191,6 +306,8 @@ export const metaApps = sqliteTable(
 		appSecret: text("app_secret").notNull(),
 		/** SHA-256 of the per-App Meta webhook verification token. */
 		webhookVerifyTokenHash: text("webhook_verify_token_hash"),
+		/** Explicit Owner confirmation after Meta dashboard subscription setup. */
+		webhookSubscriptionConfirmedAt: text("webhook_subscription_confirmed_at"),
 		createdAt: text("created_at").notNull(),
 		updatedAt: text("updated_at").notNull(),
 	},

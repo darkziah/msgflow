@@ -1,8 +1,12 @@
 import type { ConversationDO } from "./conversation-do";
+import type { CallDispatchDO } from "./call-dispatch-do";
+import type { CallSessionDO } from "./call-session-do";
 
 export interface Env {
 	DB: D1Database;
 	CONVERSATION_DO: DurableObjectNamespace<ConversationDO>;
+	CALL_DISPATCH_DO: DurableObjectNamespace<CallDispatchDO>;
+	CALL_SESSION_DO: DurableObjectNamespace<CallSessionDO>;
 	EMAIL: SendEmail;
 	/** Verified provider sender for recovery and invitation email. */
 	AUTH_EMAIL_FROM?: string;

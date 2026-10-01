@@ -18,6 +18,9 @@ function pageTitle(pathname: string): string {
 	if (pathname === "/setup") return "Set up MsgFlow";
 	if (pathname === "/settings") return "Settings";
 	if (pathname === "/rules") return "Rules and canned replies";
+	if (pathname === "/facebook") return "MsgFlow for Messenger";
+	if (pathname === "/facebook/privacy") return "Privacy Policy";
+	if (pathname === "/facebook/terms") return "Terms of Service";
 	return "Shared inbox";
 }
 
@@ -46,7 +49,9 @@ function Root() {
 	}
 	if (
 		!session &&
-		!["/login", "/setup"].includes(router.state.location.pathname)
+		!["/login", "/setup", "/facebook", "/facebook/privacy", "/facebook/terms"].includes(
+			router.state.location.pathname,
+		)
 	) {
 		return <Navigate to="/login" />;
 	}

@@ -160,7 +160,11 @@ export async function recreateMetaAppWebhookToken(
 	const updatedAt = new Date().toISOString();
 	await db
 		.update(metaApps)
-		.set({ webhookVerifyTokenHash: await sha256Hex(webhookVerifyToken), updatedAt })
+		.set({
+			webhookVerifyTokenHash: await sha256Hex(webhookVerifyToken),
+			webhookSubscriptionConfirmedAt: null,
+			updatedAt,
+		})
 		.where(eq(metaApps.id, id))
 		.run();
 	return {
@@ -174,6 +178,28 @@ export async function recreateMetaAppWebhookToken(
 		},
 		webhookVerifyToken,
 	};
+}
+
+/**
+ * The Meta dashboard exposes no safe, authoritative subscription-state read for
+ * this flow. An Owner must attest only after Meta verifies the callback and the
+ * App's webhook subscription includes `calls`; App ID presence is insufficient.
+ */
+export async function confirmMetaAppWebhookSubscription(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const now = new Date().toISOString();
+	const result = await db
+		.update(metaApps)
+		.set({ webhookSubscriptionConfirmedAt: now, updatedAt: now })
+		.where(and(eq(metaApps.id, id), eq(metaApps.workspaceId, workspaceId)))
+		.run();
+	if (!result.meta.changes) throw new ManageError("Meta App not found", 404);
 }
 
 /** Page history is retained: disconnect/remove Page Channels before deleting. */

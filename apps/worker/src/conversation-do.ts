@@ -1,8 +1,4 @@
 import { DurableObject } from "cloudflare:workers";
-import { Either, Schema } from "effect";
-import { and, eq, lte } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
-import { conversations, messagesSummary } from "@msgflow/db";
 import type {
 	Activity,
 	Comment,
@@ -11,6 +7,7 @@ import type {
 	PresenceEntry,
 } from "@msgflow/contracts";
 import {
+	CallActivityDetailsSchema,
 	ConversationUpdatedEventSchema,
 	TimelineActivityDetailsSchema,
 	TimelineActivitySchema,
@@ -21,9 +18,14 @@ import {
 	TimelinePayloadSchema,
 	WebSocketClientEventSchema,
 } from "@msgflow/contracts";
+import { conversations, messagesSummary } from "@msgflow/db";
+import { and, eq, lte } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+import { Either, Schema } from "effect";
+import { isCallActivity, isCallActivityAction } from "./activity";
+import { canReadConversation } from "./conversation-permissions";
 import type { Env } from "./env";
 import { decodeJsonBody } from "./validation";
-import { canReadConversation } from "./conversation-permissions";
 
 interface WebSocketAttachment {
 	agentId: string;
@@ -271,12 +273,12 @@ export class ConversationDO extends DurableObject<Env> {
 	private async appendActivity(request: Request): Promise<Response> {
 		const decoded = await decodeJsonBody(request, TimelineActivitySchema);
 		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
-		const activity = decoded.value as Activity;
+		const activity: Activity = decoded.value;
 		this.sql.exec(
 			"INSERT INTO activities (id, action, actor_id, details, created_at) VALUES (?, ?, ?, ?, ?)",
 			activity.id,
 			activity.action,
-			activity.actorId,
+			isCallActivity(activity) ? null : activity.actorId,
 			JSON.stringify(activity.details),
 			activity.createdAt,
 		);
@@ -372,13 +374,24 @@ export class ConversationDO extends DurableObject<Env> {
 	}
 
 	private rowToActivity(row: Record<string, unknown>): Activity {
-		return {
+		const action = row.action as Activity["action"];
+		const base = {
 			id: row.id as string,
 			conversationId: this.ctx.id.name ?? "",
-			action: row.action as Activity["action"],
+			createdAt: row.created_at as string,
+		};
+		if (isCallActivityAction(action)) {
+			return {
+				...base,
+				action,
+				details: decodeStoredJson(row.details, CallActivityDetailsSchema, {}),
+			};
+		}
+		return {
+			...base,
+			action,
 			actorId: (row.actor_id as string | null) ?? null,
 			details: decodeStoredJson(row.details, TimelineActivityDetailsSchema, {}),
-			createdAt: row.created_at as string,
 		};
 	}
 

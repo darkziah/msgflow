@@ -73,6 +73,18 @@ The transport identity a Conversation flows through — a Facebook Messenger Pag
 **Page**:
 A Facebook business Page (the business-side identity for Facebook conversations), represented by one Facebook Messenger Channel rather than an Email Domain or Mailbox. A verified Workspace Owner or Administrator connects it through the post-setup Channel wizard by selecting an installation-level Meta App connection, then selecting its existing Shared Inbox and Page through Facebook Login for Business. An installation may register multiple Meta Apps; each App ID and encrypted App secret is reusable only by its own Page Channels, while Page access tokens remain per Channel. While a Meta App is in development mode, the connecting person must be its Meta developer/tester and only Meta-authorized Pages are selectable; App Review/verification is not required for that developer-only connection. MsgFlow validates the selected Page token and requests its Page-level Messenger subscription before persisting the encrypted token. Tokens and App secrets are never returned after connection. The email analogue is a Mailbox (e.g. support@example.com).
 
+**Call Queue**:
+A Workspace-owned, Team-bound ordered waiting set for an incoming consumer-initiated audio call to exactly one active Facebook Page Channel. It contains ordered Ring Group stages with bounded durations and selects eligible Agents through them; a Page Channel has at most one active/enabled Queue relationship. It is distinct from an Inbox or Conversation queue.
+
+**Ring Group**:
+A Workspace-owned, Team-scoped subset of eligible Agents that a Call Queue offers an incoming call to, using simultaneous or round-robin selection. Order applies only to round-robin selection; Call Queue stage order controls escalation. Current eligibility also requires active Call Presence.
+
+**Call Presence**:
+An Agent's current Workspace-scoped ability to receive Facebook Page calls. D1 persists the Agent's explicit opt-in state (available, away, or offline) and heartbeat expiry; the Workspace Call Dispatch Durable Object owns actual live authenticated sockets. Eligibility requires available state, a non-expired heartbeat, matching Team and Ring Group membership, and a live socket; socket close makes the Agent offline immediately. It is transient operational state, not an Inbox permission, Conversation assignment, or durable availability promise.
+
+**Call Activity**:
+An immutable audit/timeline record of a call lifecycle event, attached to a resolved or explicitly created Conversation. A separate lifecycle audit model exists in D1. It is rendered separately from Messages and Comments, is never a Message, and its details cannot contain audio, raw SDP or WebRTC stats, tokens, or customer-visible call text.
+
 **Mailbox**:
 A logical MsgFlow email identity at one canonical address with an ASCII, case-insensitive local-part, either private to an Agent or shared with explicitly authorized Agents. Each Mailbox is represented by one email Channel that routes to its default Inbox. It is not an IMAP, POP, or Google mailbox, is explicitly assigned rather than automatically provisioned, and unknown or disabled addresses reject inbound mail; plus addressing is not enabled. Its published address is immutable, and disabling it preserves history while stopping send-as and rejecting new inbound mail; operational local-parts are reserved from private assignment. One inbound email addressed to multiple Mailboxes creates a separate Conversation per receiving Mailbox in the initial deployment. Its private/shared type is immutable in the initial deployment; any future type transfer must be an Owner-confirmed audited migration that states the newly authorized audience.
 _Avoid_: email account, Google mailbox

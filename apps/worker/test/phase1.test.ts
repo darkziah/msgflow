@@ -211,21 +211,34 @@ describe("outbound delivery persistence", () => {
 });
 
 describe("activity append", () => {
-	test("assigns audit id and timestamp in the Worker", async () => {
+	test("materializes generic attribution but redacts call activities", async () => {
 		ctx = await createTestDb();
 		const before = Date.now();
-		const activity = await appendActivity(ctx.env, {
+		const genericActivity = await appendActivity(ctx.env, {
 			conversationId: "email:support@test.dev:thread-1",
 			action: "tag.added",
 			actorId: "agent",
 			details: { tagId: "vip" },
 		});
+		const callActivity = await appendActivity(ctx.env, {
+			conversationId: "email:support@test.dev:thread-1",
+			action: "call.quality_reported",
+			actorId: "agent",
+			details: {
+				providerCallId: "private-provider-id",
+				agentId: "agent",
+				durationSeconds: 120,
+			},
+		});
 
-		expect(activity.id).toBeString();
-		expect(new Date(activity.createdAt).getTime()).toBeGreaterThanOrEqual(
+		expect(genericActivity.id).toBeString();
+		expect(new Date(genericActivity.createdAt).getTime()).toBeGreaterThanOrEqual(
 			before,
 		);
-		expect(ctx.activityRequests).toEqual([activity]);
+		expect(genericActivity).toHaveProperty("actorId", "agent");
+		expect(callActivity).not.toHaveProperty("actorId");
+		expect(callActivity.details).toEqual({ durationSeconds: 120 });
+		expect(ctx.activityRequests).toEqual([genericActivity, callActivity]);
 	});
 });
 

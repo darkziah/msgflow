@@ -28,7 +28,49 @@ export const TimelineAttachmentsSchema = Schema.Array(AttachmentSchema);
 export const TimelineMentionsSchema = Schema.Array(Identifier).pipe(
 	Schema.maxItems(20),
 );
+/** Details for non-call audit records, retained for existing timeline actions. */
 export const TimelineActivityDetailsSchema = JsonRecord;
+
+const CallActivityActionSchema = Schema.Literal(
+	"call.received",
+	"call.ringing",
+	"call.offered",
+	"call.accepted",
+	"call.rejected",
+	"call.terminated",
+	"call.timed_out",
+	"call.no_agent_reply",
+	"call.failed",
+	"call.media_updated",
+	"call.quality_reported",
+);
+
+/**
+ * Aggregate-only, client-visible call audit fields. Raw signaling, media,
+ * transcript, token, session, and WebRTC stats must never cross this boundary.
+ */
+export const CallActivityDetailsSchema = Schema.Struct({
+	reason: Schema.optionalWith(Schema.String.pipe(Schema.maxLength(255)), {
+		exact: true,
+	}),
+	status: Schema.optionalWith(Schema.String.pipe(Schema.maxLength(255)), {
+		exact: true,
+	}),
+	durationSeconds: Schema.optionalWith(
+		Schema.Number.pipe(Schema.int(), Schema.between(0, 86_400)),
+		{ exact: true },
+	),
+	packetLossPercent: Schema.optionalWith(
+		Schema.Number.pipe(Schema.between(0, 100)),
+		{
+			exact: true,
+		},
+	),
+	jitterMilliseconds: Schema.optionalWith(
+		Schema.Number.pipe(Schema.between(0, 10_000)),
+		{ exact: true },
+	),
+});
 
 export const TimelineMessageSchema = Schema.Struct({
 	id: Identifier,
@@ -58,7 +100,7 @@ export const TimelineCommentSchema = Schema.Struct({
 	createdAt: Timestamp,
 });
 
-export const TimelineActivitySchema = Schema.Struct({
+const GenericTimelineActivitySchema = Schema.Struct({
 	id: Identifier,
 	conversationId: Identifier,
 	action: Schema.Literal(
@@ -71,6 +113,23 @@ export const TimelineActivitySchema = Schema.Struct({
 	details: TimelineActivityDetailsSchema,
 	createdAt: Timestamp,
 });
+
+const CallTimelineActivitySchema = Schema.Struct({
+	id: Identifier,
+	conversationId: Identifier,
+	action: CallActivityActionSchema,
+	details: CallActivityDetailsSchema,
+	createdAt: Timestamp,
+});
+
+/**
+ * Call activities decode through a strict allow-list; generic details remain
+ * available only to the pre-existing non-call activity actions.
+ */
+export const TimelineActivitySchema = Schema.Union(
+	GenericTimelineActivitySchema,
+	CallTimelineActivitySchema,
+);
 
 export const ConversationUpdatedEventSchema = Schema.Struct({
 	type: Schema.Literal("conversation-updated"),

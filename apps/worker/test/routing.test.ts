@@ -723,9 +723,12 @@ describe("workspace-scoped management route boundaries", () => {
 		] as const;
 
 		function extractRouteBlock(method: string, path: string): string {
-			const registration = `app.${method}("${path}", async (c) => {`;
+			const registration = new RegExp(
+				`app\\.${method}\\(\\s*"${escapeRegExp(path)}",\\s*async \\(c\\) => \\{`,
+				"g",
+			);
 			const matches = [
-				...source.matchAll(new RegExp(escapeRegExp(registration), "g")),
+				...source.matchAll(registration),
 			];
 			expect(
 				matches,
@@ -734,7 +737,7 @@ describe("workspace-scoped management route boundaries", () => {
 			const start = matches[0]?.index;
 			expect(start).toBeDefined();
 
-			const bodyStart = start + registration.length - 1;
+			const bodyStart = start + (matches[0]?.[0].length ?? 0) - 1;
 			let depth = 0;
 			let quote: "'" | '"' | "`" | null = null;
 			let lineComment = false;

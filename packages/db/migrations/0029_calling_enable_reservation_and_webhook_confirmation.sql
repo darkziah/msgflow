@@ -1,0 +1,1 @@
+ALTER TABLE `meta_apps` ADD `webhook_subscription_confirmed_at` text;

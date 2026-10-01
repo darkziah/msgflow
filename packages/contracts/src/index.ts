@@ -1,5 +1,6 @@
 export * from "./types";
 export * from "./channel-schema";
+export * from "./calling-schema";
 export * from "./conversation-schema";
 export * from "./inbox-schema";
 export * from "./management-schema";

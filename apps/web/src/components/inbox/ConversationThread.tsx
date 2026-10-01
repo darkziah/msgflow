@@ -616,7 +616,7 @@ function ActivityLine({
 	activity: Activity;
 	agentNames: Map<string, string>;
 }) {
-	const actor = activity.actorId
+	const actor = "actorId" in activity && activity.actorId
 		? (agentNames.get(activity.actorId) ?? "An agent")
 		: "System";
 	return (
@@ -633,10 +633,37 @@ function ActivityLine({
 }
 
 function activityDescription(activity: Activity): string {
+	if (activity.action.startsWith("call.")) {
+		switch (activity.action) {
+			case "call.received":
+				return "received an incoming call";
+			case "call.ringing":
+				return "is ringing agents";
+			case "call.offered":
+				return "offered a call to an agent";
+			case "call.accepted":
+				return "connected a call";
+			case "call.rejected":
+				return "declined a call";
+			case "call.terminated":
+				return "ended a call";
+			case "call.timed_out":
+				return "timed out a call";
+			case "call.no_agent_reply":
+				return "had no agent answer a call";
+			case "call.failed":
+				return "could not complete a call";
+			case "call.media_updated":
+				return "updated call media";
+			case "call.quality_reported":
+				return "recorded call quality";
+		}
+	}
 	if (activity.action === "tag.added") return "added a tag";
 	if (activity.action === "tag.removed") return "removed a tag";
 	if (activity.action === "snooze.expired") return "revived this conversation";
 
+	if (!("changes" in activity.details)) return "updated this conversation";
 	const changes = activity.details.changes;
 	if (!changes || typeof changes !== "object")
 		return "updated this conversation";
