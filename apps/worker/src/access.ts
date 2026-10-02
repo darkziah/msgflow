@@ -1,7 +1,7 @@
-import { and, eq } from "drizzle-orm";
-import type { drizzle } from "drizzle-orm/d1";
-import { workspaceMembers, workspaces } from "@msgflow/db";
 import type { WorkspaceSummary } from "@msgflow/contracts";
+import { user, workspaceMembers, workspaces } from "@msgflow/db";
+import { and, asc, eq } from "drizzle-orm";
+import type { drizzle } from "drizzle-orm/d1";
 import { ManageError } from "./errors";
 
 /**
@@ -15,10 +15,8 @@ import { ManageError } from "./errors";
  * - The session user must belong to the requested workspace before any read
  *   or write.
  *
- * Bootstrap: a workspace with zero workspace_members rows treats the first
- * authenticated caller as its owner (single-tenant legacy — the lazy 'default'
- * workspace predates RBAC). Once any membership row exists, membership is
- * strictly enforced.
+ * Access is always derived from an explicit workspace_members row. Initial
+ * ownership is created only by the first-use setup transaction.
  */
 
 export type WorkspaceRole = "owner" | "admin" | "member";
@@ -58,31 +56,10 @@ export async function getWorkspaceAccess(
 			isAdmin: membership.role === "owner" || membership.role === "admin",
 		};
 	}
-
-	// Bootstrap: no members at all → first caller becomes owner.
-	const memberCount = await db
-		.select({ id: workspaceMembers.id })
-		.from(workspaceMembers)
-		.where(eq(workspaceMembers.workspaceId, workspaceId))
-		.all();
-	if (memberCount.length === 0) {
-		await db
-			.insert(workspaceMembers)
-			.values({
-				id: crypto.randomUUID(),
-				workspaceId,
-				userId,
-				role: "owner",
-				createdAt: new Date().toISOString(),
-			})
-			.onConflictDoNothing()
-			.run();
-		return { workspaceId, role: "owner", isAdmin: true };
-	}
 	return null;
 }
 
-/** Membership (or bootstrap-owner) is required for any workspace-scoped route. */
+/** Explicit membership is required for every workspace-scoped route. */
 export async function requireWorkspaceAccess(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
@@ -91,6 +68,64 @@ export async function requireWorkspaceAccess(
 	const access = await getWorkspaceAccess(db, workspaceId, userId);
 	if (!access) {
 		throw new ManageError("you are not a member of this workspace", 403);
+	}
+	return access;
+}
+
+/**
+ * Email-domain and mailbox lifecycle changes require a verified Workspace Owner
+ * or Administrator. Workspace role grants lifecycle control only; mailbox
+ * content and send-as continue to use mailbox-specific authorization.
+ */
+export async function requireOwnerAccess(
+	db: ReturnType<typeof drizzle>,
+	workspaceId: string,
+	userId: string,
+): Promise<WorkspaceAccess> {
+	const access = await requireWorkspaceAccess(db, workspaceId, userId);
+	if (!access.isAdmin) {
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
+	}
+	const actor = await db
+		.select({ emailVerified: user.emailVerified })
+		.from(user)
+		.where(eq(user.id, userId))
+		.get();
+	if (!actor?.emailVerified) {
+		throw new ManageError(
+			"a verified recovery email is required for this action",
+			403,
+		);
+	}
+	return access;
+}
+
+/** Workspace creation is reserved for a verified Owner, not an Administrator. */
+export async function requireWorkspaceOwnerAccess(
+	db: ReturnType<typeof drizzle>,
+	workspaceId: string,
+	userId: string,
+): Promise<WorkspaceAccess> {
+	const access = await requireWorkspaceAccess(db, workspaceId, userId);
+	if (access.role !== "owner") {
+		throw new ManageError(
+			"workspace owner role is required for this action",
+			403,
+		);
+	}
+	const actor = await db
+		.select({ emailVerified: user.emailVerified })
+		.from(user)
+		.where(eq(user.id, userId))
+		.get();
+	if (!actor?.emailVerified) {
+		throw new ManageError(
+			"a verified recovery email is required for this action",
+			403,
+		);
 	}
 	return access;
 }
@@ -122,16 +157,19 @@ export async function listUserWorkspaces(
 			name: workspaces.name,
 			slug: workspaces.slug,
 			role: workspaceMembers.role,
+			createdAt: workspaces.createdAt,
 		})
 		.from(workspaceMembers)
 		.innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
 		.where(eq(workspaceMembers.userId, userId))
+		.orderBy(asc(workspaces.createdAt), asc(workspaces.id))
 		.all();
 	return rows.map((row) => ({
 		id: row.id,
 		name: row.name,
 		slug: row.slug,
 		role: row.role,
+		createdAt: row.createdAt,
 	}));
 }
 
@@ -151,5 +189,5 @@ export async function userBelongsToWorkspace(
 			),
 		)
 		.get();
-	return row !== null;
+	return !!row;
 }

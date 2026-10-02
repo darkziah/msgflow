@@ -1,18 +1,40 @@
-import { useQuery } from "@tanstack/react-query";
+import type { WorkspaceSummary } from "@msgflow/contracts";
+import {
+	type QueryClient,
+	useMutation,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
-import { ConversationList } from "@/components/inbox/ConversationList";
+import { useLayoutEffect, useRef, useState } from "react";
+import {
+	ConversationList,
+	ConversationListSkeleton,
+} from "@/components/inbox/ConversationList";
 import { ConversationThread } from "@/components/inbox/ConversationThread";
+import {
+	KeyboardShortcutsProvider,
+	useKeyboardShortcut,
+} from "@/components/inbox/KeyboardShortcutsProvider";
+import { NewEmailDialog } from "@/components/inbox/NewEmailDialog";
+import { FirstSignInWalkthrough } from "@/components/onboarding/FirstSignInWalkthrough";
 import { SearchBar, type SearchFilters } from "@/components/inbox/SearchBar";
-import { Sidebar, type ListFilters } from "@/components/sidebar/Sidebar";
+import { AppShell } from "@/components/layout/AppShell";
+import { AppTopBar } from "@/components/layout/AppTopBar";
+import { type ListFilters, Sidebar } from "@/components/sidebar/Sidebar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { authClient, useSession } from "@/lib/auth-client";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { useSession } from "@/lib/auth-client";
 
 export const Route = createFileRoute("/")({
-	validateSearch: (search: Record<string, unknown>): { c?: string } => ({
+	validateSearch: (
+		search: Record<string, unknown>,
+	): { c?: string; workspace?: string } => ({
 		c: typeof search.c === "string" ? search.c : undefined,
+		workspace:
+			typeof search.workspace === "string" ? search.workspace : undefined,
 	}),
 	component: Inbox,
 });
@@ -20,37 +42,196 @@ export const Route = createFileRoute("/")({
 const STATUS_TABS = ["open", "archived", "all"] as const;
 type StatusTab = (typeof STATUS_TABS)[number];
 
-const WORKSPACE_KEY = "msgflow.workspaceId";
-const COMPACT_KEY = "msgflow.sidebarCompact";
+export function resetFiltersForStatus(
+	filters: ListFilters,
+	status: StatusTab,
+): ListFilters {
+	return {
+		...filters,
+		status,
+		mailboxId: undefined,
+		inboxId: undefined,
+		inboxScope: undefined,
+		assigneeId: undefined,
+		unassigned: undefined,
+		snoozed: undefined,
+	};
+}
 
-function Inbox() {
-	const { c: conversationId } = Route.useSearch();
+const COMPACT_KEY = "msgflow.sidebarCompact";
+export const WORKSPACE_QUERY_ROOTS = [
+	"assigned-mailboxes",
+	"canned-replies",
+	"channels",
+	"comment-notifications",
+	"conversation",
+	"conversations",
+	"email-domains",
+	"email-members",
+	"email-operations",
+	"email-context",
+	"inboxes",
+	"mailbox-delegates",
+	"mailboxes",
+	"messages",
+	"meta-apps",
+	"rules",
+	"sidebar",
+	"tags",
+	"teams",
+	"users",
+	"workspace-inboxes",
+	"drafts",
+] as const;
+
+const WORKSPACE_QUERY_ROOT_SET = new Set<string>(WORKSPACE_QUERY_ROOTS);
+
+export function clearWorkspaceSensitiveQueries(queryClient: QueryClient): void {
+	queryClient.removeQueries({
+		predicate: (query) =>
+			WORKSPACE_QUERY_ROOT_SET.has(String(query.queryKey[0])),
+	});
+}
+
+export function resolveAuthorizedWorkspaceId(
+	requestedWorkspaceId: string | undefined,
+	workspaces: WorkspaceSummary[],
+): string | undefined {
+	if (
+		requestedWorkspaceId &&
+		workspaces.some((workspace) => workspace.id === requestedWorkspaceId)
+	) {
+		return requestedWorkspaceId;
+	}
+	return workspaces[0]?.id;
+}
+
+export function workspaceSearch(workspace: string): { workspace: string } {
+	return { workspace };
+}
+
+export function reconcileWorkspaceSelection({
+	previousWorkspaceId,
+	activeWorkspaceId,
+	requestedWorkspaceId,
+	conversationId,
+}: {
+	previousWorkspaceId: string;
+	activeWorkspaceId: string;
+	requestedWorkspaceId: string | undefined;
+	conversationId: string | undefined;
+}): { clearWorkspaceState: boolean; canonicalSearch?: { workspace: string } } {
+	const changedWorkspace = Boolean(
+		previousWorkspaceId &&
+			activeWorkspaceId &&
+			previousWorkspaceId !== activeWorkspaceId,
+	);
+	if (changedWorkspace) {
+		return {
+			clearWorkspaceState: true,
+			canonicalSearch: conversationId
+				? workspaceSearch(activeWorkspaceId)
+				: undefined,
+		};
+	}
+	if (activeWorkspaceId && activeWorkspaceId !== requestedWorkspaceId) {
+		return {
+			clearWorkspaceState: false,
+			canonicalSearch: workspaceSearch(activeWorkspaceId),
+		};
+	}
+	return { clearWorkspaceState: false };
+}
+
+/** Human-readable identity for the active operational queue. */
+export function queueIdentity(filters: ListFilters, status: StatusTab): string {
+	if (filters.snoozed) return "Snoozed";
+	if (filters.unassigned) return "Unassigned";
+	if (filters.assigneeId) return "Assigned";
+	if (filters.tagId) return "Tagged";
+	if (filters.mailboxId) return "Email mailbox";
+	if (filters.inboxId) return "Inbox";
+	if (status === "archived") return "Archived";
+	if (status === "all") return "All conversations";
+	return "Inbox";
+}
+
+export function Inbox() {
+	return (
+		<KeyboardShortcutsProvider>
+			<InboxContent />
+		</KeyboardShortcutsProvider>
+	);
+}
+
+function InboxContent() {
+	const { c: conversationId, workspace: requestedWorkspaceId } =
+		Route.useSearch();
 	const navigate = useNavigate();
+	const queryClient = useQueryClient();
 	const { data: session } = useSession();
 	const [status, setStatus] = useState<StatusTab>("open");
 	const [filters, setFilters] = useState<ListFilters>({});
 	const [compact, setCompact] = useState(
 		() => localStorage.getItem(COMPACT_KEY) === "1",
 	);
+	const [newEmailOpen, setNewEmailOpen] = useState(false);
+	const searchInputRef = useRef<HTMLInputElement>(null);
 
 	const { data: workspacesData } = useQuery({
 		queryKey: ["workspaces"],
 		queryFn: () => api.listWorkspaces(),
 	});
 	const workspaces = workspacesData?.workspaces ?? [];
-	const [workspaceId, setWorkspaceId] = useState<string>(() => {
-		const saved = localStorage.getItem(WORKSPACE_KEY);
-		return saved ?? "";
-	});
 	const activeWorkspaceId =
-		workspaceId && workspaces.some((ws) => ws.id === workspaceId)
-			? workspaceId
-			: (workspaces[0]?.id ?? "");
+		resolveAuthorizedWorkspaceId(requestedWorkspaceId, workspaces) ?? "";
+	const walkthrough = useQuery({
+		queryKey: ["first-sign-in-walkthrough", session?.user.id],
+		queryFn: () => api.getFirstSignInWalkthrough(),
+		enabled: Boolean(session && activeWorkspaceId),
+		staleTime: Number.POSITIVE_INFINITY,
+	});
+	const completeWalkthrough = useMutation({
+		mutationFn: () => api.completeFirstSignInWalkthrough(),
+		onSuccess: () =>
+			queryClient.setQueryData(
+				["first-sign-in-walkthrough", session?.user.id],
+				{ completed: true },
+			),
+	});
+	const previousWorkspaceId = useRef(activeWorkspaceId);
+
+	useLayoutEffect(() => {
+		const reconciliation = reconcileWorkspaceSelection({
+			previousWorkspaceId: previousWorkspaceId.current,
+			activeWorkspaceId,
+			requestedWorkspaceId,
+			conversationId,
+		});
+		previousWorkspaceId.current = activeWorkspaceId;
+
+		if (reconciliation.clearWorkspaceState) {
+			clearWorkspaceSensitiveQueries(queryClient);
+			setFilters({});
+		}
+		if (reconciliation.canonicalSearch) {
+			navigate({
+				to: "/",
+				search: reconciliation.canonicalSearch,
+				replace: true,
+			});
+		}
+	}, [
+		activeWorkspaceId,
+		conversationId,
+		navigate,
+		queryClient,
+		requestedWorkspaceId,
+	]);
 
 	function changeWorkspace(next: string) {
-		setWorkspaceId(next);
-		localStorage.setItem(WORKSPACE_KEY, next);
-		setFilters({});
+		if (next === activeWorkspaceId) return;
+		navigate({ to: "/", search: workspaceSearch(next) });
 	}
 
 	function toggleCompact() {
@@ -61,22 +242,62 @@ function Inbox() {
 	}
 
 	const { data, isPending } = useQuery({
-		queryKey: ["conversations", status, filters],
+		queryKey: ["conversations", activeWorkspaceId, status, filters],
 		queryFn: () =>
 			api.listConversations({
+				workspaceId: activeWorkspaceId,
+				mailboxId: filters.mailboxId,
 				status,
 				inboxId: filters.inboxId,
+				inboxScope: filters.inboxScope,
 				q: filters.q,
 				assigneeId: filters.assigneeId,
 				unassigned: filters.unassigned,
 				snoozed: filters.snoozed,
 				channel: filters.channel,
+				channelId: filters.channelId,
 				tagId: filters.tagId,
+				savedViewId: filters.savedViewId,
 				dateFrom: filters.dateFrom,
 				dateTo: filters.dateTo,
 			}),
+		enabled: Boolean(activeWorkspaceId),
 		refetchInterval: 5000,
 	});
+
+	const conversations = data?.conversations ?? [];
+
+	useKeyboardShortcut("focus-search", () => {
+		const input = searchInputRef.current;
+		if (!input) return false;
+		input.focus();
+		return document.activeElement === input;
+	});
+
+	function navigateConversation(direction: -1 | 1): boolean {
+		if (conversations.length === 0) return false;
+
+		const selectedIndex = conversations.findIndex(
+			(conversation) => conversation.id === conversationId,
+		);
+		const nextIndex =
+			selectedIndex === -1
+				? direction === 1
+					? 0
+					: conversations.length - 1
+				: selectedIndex + direction;
+		const nextConversation = conversations[nextIndex];
+		if (!nextConversation) return false;
+
+		navigate({
+			to: "/",
+			search: { workspace: activeWorkspaceId, c: nextConversation.id },
+		});
+		return true;
+	}
+
+	useKeyboardShortcut("previous-conversation", () => navigateConversation(-1));
+	useKeyboardShortcut("next-conversation", () => navigateConversation(1));
 
 	const searchFilters: SearchFilters = {
 		q: filters.q,
@@ -86,124 +307,147 @@ function Inbox() {
 		dateFrom: filters.dateFrom,
 		dateTo: filters.dateTo,
 	};
-
-	return (
-		<div className="flex h-screen flex-col">
-			<header className="flex items-center justify-between border-b px-4 py-2">
-				<nav className="flex gap-1">
-					{STATUS_TABS.map((tab) => (
-						<button
-							key={tab}
-							type="button"
-							onClick={() => {
-								setStatus(tab);
-								setFilters((current) => ({
-									...current,
-									status: tab,
-									inboxId: undefined,
-									assigneeId: undefined,
-									unassigned: undefined,
-									snoozed: undefined,
-								}));
-							}}
-							className={cn(
-								"rounded-md px-3 py-1 text-sm capitalize transition-colors",
-								status === tab
-									? "bg-primary text-primary-foreground"
-									: "text-gray-500 hover:bg-accent",
-							)}
-						>
-							{tab}
-						</button>
-					))}
-				</nav>
-				<HeaderUser />
-			</header>
-			<div className="flex min-h-0 flex-1">
-				{activeWorkspaceId && session ? (
-					<Sidebar
-						workspaceId={activeWorkspaceId}
-						workspaces={workspaces}
-						currentUserId={session.user.id}
-						activeFilters={filters}
-						onSelect={(next) => {
-							setFilters(next);
-							if (next.status) {
-								setStatus(next.status);
-							}
+	const queueLabel = queueIdentity(filters, status);
+	const list = (
+		<div
+			className="flex min-h-0 flex-1 flex-col"
+			data-onboarding-target="conversation-list"
+		>
+			<div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+				<div className="flex min-w-0 items-center gap-2">
+					<Tabs
+						value={status}
+						onValueChange={(value) => {
+							const next = value as StatusTab;
+							setStatus(next);
+							setFilters((current) => resetFiltersForStatus(current, next));
 						}}
-						onChangeWorkspace={changeWorkspace}
-						compact={compact}
-						onToggleCompact={toggleCompact}
-					/>
-				) : null}
-				<div className="flex min-w-0 flex-1 flex-col">
-					<SearchBar
-						filters={searchFilters}
-						onChange={(next) =>
-							setFilters((current) => ({ ...current, ...next }))
-						}
-					/>
-					<div className="flex min-h-0 flex-1">
-						<aside className="w-[360px] shrink-0 border-r">
-							{isPending ? (
-								<div className="p-4 text-sm text-gray-400">Loading…</div>
-							) : (
-								<ConversationList
-									conversations={data?.conversations ?? []}
-									selectedId={conversationId}
-									onSelect={(id) => navigate({ to: "/", search: { c: id } })}
-								/>
-							)}
-						</aside>
-						<main className="min-w-0 flex-1">
-							{conversationId ? (
-								<ConversationThread
-									key={conversationId}
-									conversationId={conversationId}
-								/>
-							) : (
-								<div className="flex h-full items-center justify-center text-sm text-gray-400">
-									Select a conversation to open it.
-								</div>
-							)}
-						</main>
+					>
+						<TabsList aria-label="Conversation status">
+							{STATUS_TABS.map((tab) => (
+								<TabsTrigger key={tab} value={tab} className="capitalize">
+									{tab}
+								</TabsTrigger>
+							))}
+						</TabsList>
+					</Tabs>
+					<div
+						className="flex min-w-0 items-center gap-1 text-xs whitespace-nowrap"
+						aria-live="polite"
+					>
+						<span>{queueLabel}</span>
+						<Badge variant="secondary">{data?.conversations.length ?? 0}</Badge>
 					</div>
 				</div>
+				<Button size="sm" onClick={() => setNewEmailOpen(true)}>
+					New email
+				</Button>
+			</div>
+			<SearchBar
+				filters={searchFilters}
+				workspaceId={activeWorkspaceId}
+				inputRef={searchInputRef}
+				onChange={(next) =>
+					setFilters((current) =>
+						Object.keys(next).length === 0 ? next : { ...current, ...next },
+					)
+				}
+			/>
+			<div className="min-h-0 flex-1 overflow-y-auto">
+				{isPending ? (
+					<ConversationListSkeleton />
+				) : (
+					<ConversationList
+						conversations={data?.conversations ?? []}
+						selectedId={conversationId}
+						onSelect={(id) =>
+							navigate({
+								to: "/",
+								search: { workspace: activeWorkspaceId, c: id },
+							})
+						}
+					/>
+				)}
 			</div>
 		</div>
 	);
-}
-
-function HeaderUser() {
-	const { data: session } = useSession();
-	const navigate = useNavigate();
-
-	async function signOut() {
-		await authClient.signOut();
-		navigate({ to: "/login" });
-	}
+	const detail = conversationId ? (
+		<ConversationThread
+			key={`${activeWorkspaceId}:${conversationId}`}
+			conversationId={conversationId}
+			workspaceId={activeWorkspaceId}
+		/>
+	) : (
+		<div
+			className="flex h-full items-center justify-center text-sm text-muted-foreground"
+			data-onboarding-target="conversation-detail"
+		>
+			Select a conversation to open it.
+		</div>
+	);
+	const renderSidebar = (compactMode: boolean) =>
+		activeWorkspaceId && session ? (
+			<Sidebar
+				workspaceId={activeWorkspaceId}
+				currentUserId={session.user.id}
+				activeFilters={filters}
+				onSelect={(next) => {
+					setFilters(next);
+					if (next.status) setStatus(next.status);
+					if (conversationId) {
+						navigate({
+							to: "/",
+							search: workspaceSearch(activeWorkspaceId),
+							replace: true,
+						});
+					}
+				}}
+				compact={compactMode}
+				onToggleCompact={toggleCompact}
+			/>
+		) : null;
 
 	return (
-		<div className="flex items-center gap-2">
-			<span className="text-sm text-gray-500">{session?.user.email}</span>
-			<Button
-				variant="ghost"
-				size="sm"
-				onClick={() => navigate({ to: "/rules" })}
-			>
-				Rules
-			</Button>
-			<Button
-				variant="ghost"
-				size="sm"
-				onClick={() => navigate({ to: "/settings" })}
-			>
-				Settings
-			</Button>
-			<Button variant="outline" size="sm" onClick={signOut}>
-				Sign out
-			</Button>
-		</div>
+		<>
+			<AppShell
+				header={
+					<AppTopBar
+						workspaceId={activeWorkspaceId}
+						workspaces={workspaces}
+						onChangeWorkspace={changeWorkspace}
+					/>
+				}
+				hasDetail={Boolean(conversationId)}
+				onBack={() =>
+					navigate({ to: "/", search: workspaceSearch(activeWorkspaceId) })
+				}
+				list={list}
+				detail={detail}
+				sidebar={renderSidebar(compact)}
+				mobileSidebar={renderSidebar(false)}
+			/>
+			<NewEmailDialog
+				workspaceId={activeWorkspaceId}
+				open={newEmailOpen}
+				onOpenChange={setNewEmailOpen}
+				onSent={(id) => {
+					queryClient.invalidateQueries({
+						queryKey: ["conversations", activeWorkspaceId],
+					});
+					navigate({
+						to: "/",
+						search: { workspace: activeWorkspaceId, c: id },
+					});
+				}}
+			/>
+			{activeWorkspaceId &&
+			session &&
+			walkthrough.data &&
+			!walkthrough.data.completed ? (
+				<FirstSignInWalkthrough
+					onComplete={() => completeWalkthrough.mutateAsync()}
+				/>
+			) : null}
+		</>
 	);
 }

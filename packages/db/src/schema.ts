@@ -1,11 +1,13 @@
+import { sql } from "drizzle-orm";
 import {
+	type AnySQLiteColumn,
+	check,
 	index,
 	integer,
 	primaryKey,
 	sqliteTable,
 	text,
 	uniqueIndex,
-	type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
 import { user } from "./auth-schema";
 
@@ -31,6 +33,18 @@ export const workspaces = sqliteTable("workspaces", {
 	updatedAt: text("updated_at").notNull(),
 });
 
+/** Singleton lock and durable audit marker for explicit first-use setup. */
+export const workspaceSetupClaim = sqliteTable("workspace_setup_claim", {
+	id: integer("id").primaryKey(),
+	email: text("email").notNull(),
+	userId: text("user_id").references(() => user.id, { onDelete: "restrict" }),
+	workspaceId: text("workspace_id").references(() => workspaces.id, {
+		onDelete: "restrict",
+	}),
+	claimedAt: text("claimed_at").notNull(),
+	completedAt: text("completed_at"),
+});
+
 export const workspaceMembers = sqliteTable(
 	"workspace_members",
 	{
@@ -48,6 +62,33 @@ export const workspaceMembers = sqliteTable(
 		uniqueIndex("idx_workspace_members_unique").on(
 			table.workspaceId,
 			table.userId,
+		),
+	],
+);
+
+/** Immutable record of a workspace-only member offboarding. */
+export const workspaceMemberOffboardings = sqliteTable(
+	"workspace_member_offboardings",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "restrict" }),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "restrict" }),
+		actorUserId: text("actor_user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "restrict" }),
+		priorRole: text("prior_role", { enum: ["owner", "admin", "member"] }).notNull(),
+		confirmationIdentifier: text("confirmation_identifier").notNull(),
+		privateMailboxesDisabled: integer("private_mailboxes_disabled").notNull().default(0),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [
+		index("idx_workspace_member_offboardings_workspace_time").on(
+			table.workspaceId,
+			table.createdAt,
 		),
 	],
 );
@@ -82,6 +123,120 @@ export const teamMembers = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// 1b. FACEBOOK PAGE CALLING (routing configuration and provider event audit)
+// ---------------------------------------------------------------------------
+
+export const ringGroups = sqliteTable(
+	"ring_groups",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "restrict" }),
+		teamId: text("team_id").notNull().references(() => teams.id, { onDelete: "restrict" }),
+		name: text("name").notNull(),
+		strategy: text("strategy", { enum: ["simultaneous", "round_robin"] }).notNull(),
+		nextMemberCursor: integer("next_member_cursor").notNull().default(0),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [index("idx_ring_groups_workspace_team").on(table.workspaceId, table.teamId)],
+);
+
+export const ringGroupMembers = sqliteTable(
+	"ring_group_members",
+	{
+		id: text("id").primaryKey(),
+		ringGroupId: text("ring_group_id").notNull().references(() => ringGroups.id, { onDelete: "restrict" }),
+		userId: text("user_id").notNull().references(() => user.id, { onDelete: "restrict" }),
+		sortOrder: integer("sort_order").notNull(),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [uniqueIndex("idx_ring_group_members_group_user").on(table.ringGroupId, table.userId)],
+);
+
+export const callQueues = sqliteTable(
+	"call_queues",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "restrict" }),
+		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
+		teamId: text("team_id").notNull().references(() => teams.id, { onDelete: "restrict" }),
+		name: text("name").notNull(),
+		isEnabled: integer("is_enabled", { mode: "boolean" }).notNull().default(false),
+		/** Opaque enable lease; it never makes this queue dispatch-active. */
+		provisioningLeaseToken: text("provisioning_lease_token"),
+		noAgentReplyText: text("no_agent_reply_text").notNull(),
+		timezoneId: text("timezone_id").notNull(),
+		weeklyOperatingHoursJson: text("weekly_operating_hours_json").notNull(),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("idx_call_queues_workspace_team").on(table.workspaceId, table.teamId),
+		uniqueIndex("idx_call_queues_enabled_channel").on(table.channelId).where(sql`${table.isEnabled} = 1`),
+		uniqueIndex("idx_call_queues_provisioning_channel")
+			.on(table.channelId)
+			.where(sql`${table.provisioningLeaseToken} IS NOT NULL`),
+	],
+);
+
+export const callQueueStages = sqliteTable(
+	"call_queue_stages",
+	{
+		id: text("id").primaryKey(),
+		queueId: text("queue_id").notNull().references(() => callQueues.id, { onDelete: "cascade" }),
+		ringGroupId: text("ring_group_id").notNull().references(() => ringGroups.id, { onDelete: "restrict" }),
+		stageOrder: integer("stage_order").notNull(),
+		ringDurationSeconds: integer("ring_duration_seconds").notNull(),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("idx_call_queue_stages_queue_order").on(table.queueId, table.stageOrder),
+		check("call_queue_stages_ring_duration_seconds_range", sql`${table.ringDurationSeconds} BETWEEN 1 AND 50`),
+	],
+);
+
+export const agentCallPresence = sqliteTable(
+	"agent_call_presence",
+	{
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "restrict" }),
+		userId: text("user_id").notNull().references(() => user.id, { onDelete: "restrict" }),
+		status: text("status", { enum: ["available", "away", "offline"] }).notNull().default("offline"),
+		socketConnectedAt: text("socket_connected_at"),
+		heartbeatExpiresAt: text("heartbeat_expires_at"),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.workspaceId, table.userId] }),
+		index("idx_agent_call_presence_eligible").on(
+			table.workspaceId,
+			table.status,
+			table.heartbeatExpiresAt,
+		),
+	],
+);
+
+export const callEvents = sqliteTable(
+	"call_events",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "restrict" }),
+		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
+		conversationId: text("conversation_id").references(() => conversations.id, { onDelete: "restrict" }),
+		queueId: text("queue_id").references(() => callQueues.id, { onDelete: "set null" }),
+		providerCallId: text("provider_call_id").notNull(),
+		providerEventId: text("provider_event_id").notNull(),
+		direction: text("direction", { enum: ["consumer_to_business"] }).notNull(),
+		state: text("state", { enum: ["ringing", "accepted", "rejected", "timed_out", "terminated", "failed"] }).notNull(),
+		acceptedByUserId: text("accepted_by_user_id").references(() => user.id, { onDelete: "set null" }),
+		terminalReason: text("terminal_reason"),
+		qualitySummaryJson: text("quality_summary_json"),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [uniqueIndex("idx_call_events_provider_event").on(table.channelId, table.providerEventId)],
+);
+
+// ---------------------------------------------------------------------------
 // 2. CHANNELS (Facebook Pages + email mailboxes)
 // ---------------------------------------------------------------------------
 
@@ -92,19 +247,24 @@ export const channels = sqliteTable(
 		workspaceId: text("workspace_id")
 			.notNull()
 			.references(() => workspaces.id, { onDelete: "cascade" }),
-		type: text("type", { enum: ["facebook_page", "email"] }).notNull(),
+		type: text("type", {
+			enum: ["facebook_page", "email", "whatsapp_phone"],
+		}).notNull(),
 		displayName: text("display_name").notNull(),
-		// Facebook: Page ID. Email: the mailbox address (From/To), e.g. support@yehey.com.
+		// Facebook: Page ID. Email: mailbox address. WhatsApp: immutable Meta Phone Number ID.
 		externalId: text("external_id").notNull(),
 		// Encrypted at rest; only the Worker/channel layer reads these.
 		accessToken: text("access_token"),
+		metaAppId: text("meta_app_id"),
 		refreshToken: text("refresh_token"),
 		tokenExpiresAt: text("token_expires_at"),
 		webhookVerifyToken: text("webhook_verify_token"),
 		// Reserved for a future self-hosted mailbox; unused with Cloudflare Email
 		// Service (ADR 0014) — outbound goes through the send_email binding.
 		imapSmtpConfig: text("imap_smtp_config"),
-		status: text("status", { enum: ["active", "disconnected", "error"] })
+		status: text("status", {
+			enum: ["active", "disconnected", "error", "deleted"],
+		})
 			.notNull()
 			.default("active"),
 		createdAt: text("created_at").notNull(),
@@ -115,19 +275,63 @@ export const channels = sqliteTable(
 			table.workspaceId,
 			table.externalId,
 		),
+		// Meta identifies Messenger deliveries only by Page ID. Retained deleted
+		// channels may share a Page identity, but no configured Page may belong to
+		// more than one workspace or ingress would be ambiguous.
+		uniqueIndex("idx_channels_facebook_page_identity")
+			.on(table.externalId)
+			.where(
+				sql`${table.type} = 'facebook_page' AND ${table.status} <> 'deleted'`,
+			),
+		// Meta identifies WhatsApp deliveries only by Phone Number ID. Keep it
+		// globally unambiguous while retaining deleted historical channel rows.
+		uniqueIndex("idx_channels_whatsapp_phone_identity")
+			.on(table.externalId)
+			.where(
+				sql`${table.type} = 'whatsapp_phone' AND ${table.status} <> 'deleted'`,
+			),
 	],
+);
+
+/** Installation-owned Meta Apps; each may authorize multiple Page Channels. */
+export const metaApps = sqliteTable(
+	"meta_apps",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "cascade" }),
+		displayName: text("display_name").notNull(),
+		appId: text("app_id").notNull(),
+		appSecret: text("app_secret").notNull(),
+		/** SHA-256 of the per-App Meta webhook verification token. */
+		webhookVerifyTokenHash: text("webhook_verify_token_hash"),
+		/** Explicit Owner confirmation after Meta dashboard subscription setup. */
+		webhookSubscriptionConfirmedAt: text("webhook_subscription_confirmed_at"),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [uniqueIndex("idx_meta_apps_app_id").on(table.appId)],
 );
 
 // ---------------------------------------------------------------------------
 // 3. INBOXES (team/queue grouping of conversations)
 // ---------------------------------------------------------------------------
 
-export const inboxes = sqliteTable("inboxes", {
+export const inboxes = sqliteTable(
+	"inboxes",
+	{
 	id: text("id").primaryKey(),
 	workspaceId: text("workspace_id")
 		.notNull()
 		.references(() => workspaces.id, { onDelete: "cascade" }),
 	teamId: text("team_id").references(() => teams.id, { onDelete: "set null" }),
+	// Navigation-only. Migration 0026 triggers preserve a same-workspace,
+	// acyclic forest; deleting a parent preserves its children as roots.
+	parentInboxId: text("parent_inbox_id").references(
+		(): AnySQLiteColumn => inboxes.id,
+		{ onDelete: "set null" },
+	),
 	name: text("name").notNull(),
 	description: text("description"),
 	// Validated hex color (#RRGGBB); the sidebar dot falls back to it when no icon.
@@ -139,6 +343,12 @@ export const inboxes = sqliteTable("inboxes", {
 	isArchived: integer("is_archived", { mode: "boolean" })
 		.notNull()
 		.default(false),
+	visibilityType: text("visibility_type", {
+		enum: ["shared", "team", "private", "system"],
+	})
+		.notNull()
+		.default("shared"),
+	treeVersion: integer("tree_version").notNull().default(0),
 	// Queue assignment strategy; round-robin/least-busy are hooks for a later phase.
 	assignmentStrategy: text("assignment_strategy", {
 		enum: ["manual", "round_robin", "least_busy"],
@@ -149,7 +359,21 @@ export const inboxes = sqliteTable("inboxes", {
 	// Unix milliseconds (deliberate: the inbox-routing spec's new columns use ms,
 	// unlike the older ISO-8601 TEXT columns in this table).
 	updatedAt: integer("updated_at"),
-});
+	},
+	(table) => [
+		index("idx_inboxes_workspace_parent_order").on(
+			table.workspaceId,
+			table.parentInboxId,
+			table.sortOrder,
+			table.id,
+		),
+		index("idx_inboxes_workspace_visibility").on(
+			table.workspaceId,
+			table.visibilityType,
+			table.isArchived,
+		),
+	],
+);
 
 // A channel can feed several inboxes; exactly one link per channel must be the
 // default (ADR 0008: "each Channel has a default Inbox, overridable by rules").
@@ -223,9 +447,9 @@ export const contactIdentities = sqliteTable(
 			.notNull()
 			.references(() => channels.id, { onDelete: "cascade" }),
 		channelType: text("channel_type", {
-			enum: ["facebook_page", "email"],
+			enum: ["facebook_page", "email", "whatsapp_phone"],
 		}).notNull(),
-		// Facebook: PSID. Email: the sender's address.
+		// Facebook: PSID. Email: sender address. WhatsApp: customer WhatsApp ID.
 		externalUserId: text("external_user_id").notNull(),
 		createdAt: text("created_at").notNull(),
 	},
@@ -281,6 +505,10 @@ export const conversations = sqliteTable(
 	},
 	(table) => [
 		index("idx_conversations_inbox_status").on(table.inboxId, table.status),
+		uniqueIndex("idx_conversation_workspace_identity").on(
+			table.id,
+			table.workspaceId,
+		),
 		index("idx_conversations_assignee").on(table.assigneeId),
 		index("idx_conversations_contact").on(table.contactId),
 		index("idx_conversations_last_activity").on(table.lastMessageAt),
@@ -492,15 +720,225 @@ export const scheduledMessages = sqliteTable("scheduled_messages", {
 	id: text("id").primaryKey(),
 	conversationId: text("conversation_id").notNull(),
 	text: text("text").notNull(),
+	attachmentsJson: text("attachments_json").notNull().default("[]"),
 	sendAt: text("send_at").notNull(),
 	createdBy: text("created_by"),
 	// Delivery attempts; the cron tick deletes the row after MAX_ATTEMPTS failures
 	// so a permanently failing message (e.g. revoked Page token) stops retrying.
 	attempts: integer("attempts").notNull().default(0),
+	// A cron invocation owns a row only while its token is present. This lease
+	// prevents overlapping Cron Trigger invocations from dispatching it twice.
+	claimToken: text("claim_token"),
+	claimedAt: text("claimed_at"),
 });
 
 // 5 attempts (≈5 minutes) before a scheduled message is dropped with an error log.
 export const SCHEDULED_MAX_ATTEMPTS = 5;
+
+// Durable outbound command log. This is intentionally separate from the DO
+// timeline: D1 records the intent before crossing the provider boundary, while
+// the DO remains the canonical live message log.
+export const outboundIntents = sqliteTable(
+	"outbound_intents",
+	{
+		// Stable client/idempotency key, also used as the canonical Message id.
+		id: text("id").primaryKey(),
+		conversationId: text("conversation_id").notNull(),
+		text: text("text").notNull(),
+		attachmentsJson: text("attachments_json").notNull().default("[]"),
+		subject: text("subject"),
+		commandJson: text("command_json"),
+		senderId: text("sender_id").notNull(),
+		// queued is send-later waiting for its due time; sending is deliberately
+		// treated as uncertain after a crash because the provider may have acted.
+		// accepted means the provider accepted handoff. It is deliberately not
+		// delivery: delivery/bounce events need a future queue binding.
+		status: text("status", {
+			enum: [
+				"queued",
+				"pending",
+				"sending",
+				"accepted",
+				// Legacy rows remain readable during the Phase 2 transition.
+				"provider_sent",
+				"delivered",
+				"failed",
+				"uncertain",
+			],
+		}).notNull(),
+		attempts: integer("attempts").notNull().default(0),
+		lastError: text("last_error"),
+		providerMessageId: text("provider_message_id"),
+		// Set for send-later intents; unique prevents duplicate schedule rows for
+		// one stable client id.
+		scheduledMessageId: text("scheduled_message_id"),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+		providerSentAt: text("provider_sent_at"),
+		deliveredAt: text("delivered_at"),
+	},
+	(table) => [
+		uniqueIndex("idx_outbound_intents_scheduled_message").on(
+			table.scheduledMessageId,
+		),
+		index("idx_outbound_intents_status").on(table.status, table.updatedAt),
+	],
+);
+
+// ---------------------------------------------------------------------------
+// 8b. LOGICAL EMAIL DOMAINS / MAILBOXES (ADR 0021)
+// ---------------------------------------------------------------------------
+
+export const emailDomains = sqliteTable(
+	"email_domains",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "restrict" }),
+		canonicalDomain: text("canonical_domain").notNull().unique(),
+		inboundState: text("inbound_state", {
+			enum: ["pending", "ready", "suspended"],
+		})
+			.notNull()
+			.default("pending"),
+		outboundState: text("outbound_state", {
+			enum: ["pending", "ready", "suspended"],
+		})
+			.notNull()
+			.default("pending"),
+		dnsStatusJson: text("dns_status_json").notNull().default("{}"),
+		operatorConfirmedAt: text("operator_confirmed_at"),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [index("idx_email_domains_workspace").on(table.workspaceId)],
+);
+
+export const mailboxes = sqliteTable(
+	"mailboxes",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "restrict" }),
+		emailDomainId: text("email_domain_id")
+			.notNull()
+			.references(() => emailDomains.id, { onDelete: "restrict" }),
+		localPart: text("local_part").notNull(),
+		canonicalAddress: text("canonical_address").notNull().unique(),
+		type: text("type", { enum: ["private", "shared"] }).notNull(),
+		ownerUserId: text("owner_user_id").references(() => user.id, {
+			onDelete: "restrict",
+		}),
+		inboxId: text("inbox_id").references(() => inboxes.id, {
+			onDelete: "restrict",
+		}),
+		teamId: text("team_id").references(() => teams.id, {
+			onDelete: "restrict",
+		}),
+		isEnabled: integer("is_enabled", { mode: "boolean" })
+			.notNull()
+			.default(false),
+		isSendEnabled: integer("is_send_enabled", { mode: "boolean" })
+			.notNull()
+			.default(false),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("idx_mailboxes_domain_local_part").on(
+			table.emailDomainId,
+			table.localPart,
+		),
+		uniqueIndex("idx_mailbox_workspace_identity").on(
+			table.id,
+			table.workspaceId,
+		),
+		index("idx_mailboxes_workspace_owner").on(
+			table.workspaceId,
+			table.ownerUserId,
+		),
+	],
+);
+
+export const emailAudit = sqliteTable(
+	"email_audit",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull(),
+		actorUserId: text("actor_user_id"),
+		action: text("action").notNull(),
+		targetId: text("target_id").notNull(),
+		detailJson: text("detail_json").notNull().default("{}"),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [
+		index("idx_email_audit_workspace_time").on(
+			table.workspaceId,
+			table.createdAt,
+		),
+	],
+);
+
+export const mailboxDelegates = sqliteTable(
+	"mailbox_delegates",
+	{
+		mailboxId: text("mailbox_id")
+			.notNull()
+			.references(() => mailboxes.id, { onDelete: "cascade" }),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		createdBy: text("created_by")
+			.notNull()
+			.references(() => user.id, { onDelete: "restrict" }),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [primaryKey({ columns: [table.mailboxId, table.userId] })],
+);
+
+export const emailIngress = sqliteTable(
+	"email_ingress",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "restrict" }),
+		mailboxId: text("mailbox_id")
+			.notNull()
+			.references(() => mailboxes.id, { onDelete: "restrict" }),
+		dedupeKey: text("dedupe_key").notNull(),
+		rawObjectKey: text("raw_object_key").notNull(),
+		/** SHA-256 of the exact RFC 5322 source; the mailbox-scoped dedupe key. */
+		rawSha256: text("raw_sha256").notNull().default(""),
+		rawBytes: integer("raw_bytes").notNull().default(0),
+		leaseToken: text("lease_token"),
+		leaseUntil: integer("lease_until"),
+		attempts: integer("attempts").notNull().default(0),
+		envelopeFrom: text("envelope_from"),
+		state: text("state", {
+			enum: ["stored", "processing", "quarantined", "processed", "failed"],
+		})
+			.notNull()
+			.default("stored"),
+		error: text("error"),
+		receivedAt: text("received_at").notNull(),
+		processedAt: text("processed_at"),
+	},
+	(table) => [
+		uniqueIndex("idx_email_ingress_mailbox_dedupe").on(
+			table.mailboxId,
+			table.dedupeKey,
+		),
+		index("idx_email_ingress_state").on(table.state, table.receivedAt),
+		uniqueIndex("idx_ingress_scope_identity").on(
+			table.id,
+			table.workspaceId,
+			table.mailboxId,
+		),
+	],
+);
 
 // ---------------------------------------------------------------------------
 // 9. SIDEBAR PERSONALIZATION + SAVED FILTERS + WEBHOOK IDEMPOTENCY
@@ -522,6 +960,10 @@ export const userSidebarPreferences = sqliteTable(
 			.notNull()
 			.references(() => workspaces.id, { onDelete: "cascade" }),
 		collapsedSectionsJson: text("collapsed_sections_json")
+			.notNull()
+			.default("[]"),
+		collapsedNodeIdsJson: text("collapsed_node_ids_json").notNull().default("[]"),
+		lastOpenBranchIdsJson: text("last_open_branch_ids_json")
 			.notNull()
 			.default("[]"),
 		pinnedItemIdsJson: text("pinned_item_ids_json").notNull().default("[]"),
@@ -575,5 +1017,41 @@ export const processedMessages = sqliteTable(
 		primaryKey({
 			columns: [table.conversationId, table.providerMessageId],
 		}),
+	],
+);
+
+// Per-agent inbox for Comment @mentions. The Comment remains canonical in its
+// ConversationDO; D1 stores the recipient's cross-conversation read state.
+export const commentNotifications = sqliteTable(
+	"comment_notifications",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "cascade" }),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		conversationId: text("conversation_id")
+			.notNull()
+			.references(() => conversations.id, { onDelete: "cascade" }),
+		commentId: text("comment_id").notNull(),
+		authorId: text("author_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		commentText: text("comment_text").notNull(),
+		createdAt: text("created_at").notNull(),
+		readAt: text("read_at"),
+	},
+	(table) => [
+		uniqueIndex("idx_comment_notifications_comment_user").on(
+			table.commentId,
+			table.userId,
+		),
+		index("idx_comment_notifications_user_unread").on(
+			table.userId,
+			table.readAt,
+			table.createdAt,
+		),
 	],
 );

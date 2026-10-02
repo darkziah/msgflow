@@ -1,26 +1,73 @@
-import { and, eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
+import type { NormalizedInbound } from "@msgflow/channel";
 import type { Message } from "@msgflow/contracts";
 import { parseConversationId } from "@msgflow/contracts";
-import type { NormalizedInbound } from "@msgflow/channel";
 import {
 	channels,
 	contactIdentities,
 	contacts,
-	conversationTags,
 	conversations,
+	conversationTags,
 	inboxChannels,
 	inboxes,
 	processedMessages,
 } from "@msgflow/db";
+import { and, eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+import { copyProviderImages } from "./attachments";
+import { decryptChannelToken } from "./channel-token-crypto";
+import {
+	getCanonicalEmail,
+	persistCanonicalEmail,
+	projectCanonicalEmail,
+	routeEmailRulesAtomically,
+} from "./email-persistence";
+import type { AuthorizedEmailInboundRoute } from "./email-transport";
 import type { Env } from "./env";
 import { evaluateRules } from "./rules";
-import { getOrCreateWorkspace } from "./workspace";
 
+// Legacy helper defaults retained only for migration-era helpers below. Runtime
+// ingress resolves explicit configured channels and never calls those helpers.
 const DEFAULT_INBOX_NAMES: Record<string, string> = {
 	facebook_page: "Facebook Support",
 	email: "Support",
 };
+
+interface FacebookProfile {
+	displayName: string | null;
+	avatarUrl: string | null;
+}
+
+/**
+ * Fetch a Messenger user's profile (name + avatar) from the Graph API.
+ * Meta webhook messaging events carry only the PSID — the name must be
+ * resolved separately. Best-effort: any failure returns null so ingest
+ * never breaks because a name lookup failed. Channels without a page
+ * access token (lazily-created, never connected) simply skip this.
+ */
+export async function fetchFacebookProfile(
+	psid: string,
+	accessToken: string,
+): Promise<FacebookProfile | null> {
+	try {
+		const url =
+			`https://graph.facebook.com/v21.0/${encodeURIComponent(psid)}` +
+			`?fields=name,profile_pic&access_token=${encodeURIComponent(accessToken)}`;
+		const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+		if (!response.ok) return null;
+		const data = (await response.json()) as {
+			name?: string;
+			profile_pic?: string;
+			error?: { message?: string };
+		};
+		if (data.error) return null;
+		return {
+			displayName: data.name ?? null,
+			avatarUrl: data.profile_pic ?? null,
+		};
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Ingest routing (ADR 0009): resolve workspace → channel → contact identity →
@@ -28,50 +75,146 @@ const DEFAULT_INBOX_NAMES: Record<string, string> = {
  * rules (reroute/assign/tag), then forward the canonical Message to the
  * Conversation DO (which owns the timeline and mirrors the summary to D1).
  *
- * Single-tenant bootstrap: a "default" workspace is created lazily; the
- * workspace_members/teams RBAC wiring is a later phase.
+ * Every transport must resolve a pre-configured Channel and default Inbox;
+ * traffic never creates a Workspace, Channel, or Inbox.
  */
 export async function routeInbound(
 	env: Env,
 	inbound: NormalizedInbound,
+	emailRoute?: AuthorizedEmailInboundRoute,
+	emailIngressId?: string,
 ): Promise<void> {
+	// WhatsApp Task 6 is text-only. Do not copy provider media or allow a
+	// malformed normalized payload to introduce attachments into its timeline.
+	const attachments =
+		inbound.channel === "whatsapp"
+			? []
+			: [
+					...inbound.attachments,
+					...(await copyProviderImages(env, inbound.providerAttachments)),
+				];
+	if (!inbound.text && attachments.length === 0 && inbound.channel !== "email")
+		return;
 	const db = drizzle(env.DB);
 	const now = new Date().toISOString();
 
 	// Conversation IDs embed the channel instance: fb:{page_id}:{psid} | email:{mailbox}:{thread_key}.
 	const parsed = parseConversationId(inbound.conversationId);
 	if (!parsed) return;
-	const channelType = parsed.channel === "facebook" ? "facebook_page" : "email";
+	const channelType =
+		parsed.channel === "facebook"
+			? "facebook_page"
+			: parsed.channel === "whatsapp"
+				? "whatsapp_phone"
+				: "email";
 
-	// 1. Workspace (lazy single-tenant bootstrap).
-	const workspace = await getOrCreateWorkspace(db, now);
-
-	// 2. Channel (Page or mailbox) the conversation flows through.
-	const channel = await getOrCreateChannel(
-		db,
-		workspace.id,
-		channelType,
-		parsed.left,
-		now,
-	);
+	// Email ingress is authorization-first. Messenger likewise resolves an
+	// explicit Page Channel; neither transport may bootstrap configuration.
+	let workspaceId: string;
+	let channel: typeof channels.$inferSelect;
+	let inbox: typeof inboxes.$inferSelect;
+	if (channelType === "email") {
+		if (!emailRoute) throw new Error("email route missing");
+		const [resolvedChannel, resolvedInbox] = await Promise.all([
+			db
+				.select()
+				.from(channels)
+				.where(
+					and(
+						eq(channels.id, emailRoute.channelId),
+						eq(channels.workspaceId, emailRoute.workspaceId),
+						eq(channels.type, "email"),
+					),
+				)
+				.get(),
+			db
+				.select()
+				.from(inboxes)
+				.where(
+					and(
+						eq(inboxes.id, emailRoute.inboxId),
+						eq(inboxes.workspaceId, emailRoute.workspaceId),
+						eq(inboxes.isArchived, false),
+					),
+				)
+				.get(),
+		]);
+		if (!resolvedChannel || !resolvedInbox)
+			throw new Error("email route unavailable");
+		workspaceId = emailRoute.workspaceId;
+		channel = resolvedChannel;
+		inbox = resolvedInbox;
+	} else {
+		const expectedType =
+			channelType === "whatsapp_phone" ? "whatsapp_phone" : "facebook_page";
+		const channelLabel =
+			channelType === "whatsapp_phone" ? "WhatsApp phone" : "Facebook Page";
+		const resolvedChannel = await db
+			.select()
+			.from(channels)
+			.where(
+				and(
+					eq(channels.type, expectedType),
+					eq(channels.externalId, parsed.left),
+					eq(channels.status, "active"),
+				),
+			)
+			.get();
+		if (!resolvedChannel)
+			throw new Error(`${channelLabel} channel is not configured`);
+		const resolvedInbox = await db
+			.select()
+			.from(inboxChannels)
+			.innerJoin(inboxes, eq(inboxChannels.inboxId, inboxes.id))
+			.where(
+				and(
+					eq(inboxChannels.channelId, resolvedChannel.id),
+					eq(inboxChannels.isDefault, true),
+					eq(inboxes.workspaceId, resolvedChannel.workspaceId),
+					eq(inboxes.isArchived, false),
+				),
+			)
+			.get();
+		if (!resolvedInbox)
+			throw new Error(`${channelLabel} channel has no active default Inbox`);
+		workspaceId = resolvedChannel.workspaceId;
+		channel = resolvedChannel;
+		inbox = resolvedInbox.inboxes;
+	}
 
 	// 3. Contact via its channel identity (PSIDs are Page-scoped → keyed by channel).
+	//    Meta webhooks carry only the PSID — resolve the display name/avatar via
+	//    the Graph API when the channel has a token (best-effort, never fatal).
+	let profile: FacebookProfile | null = null;
+	if (channelType === "facebook_page" && channel.accessToken) {
+		try {
+			profile = await fetchFacebookProfile(
+				inbound.senderId,
+				await decryptChannelToken(
+					channel.accessToken,
+					env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+				),
+			);
+		} catch {
+			// Profile resolution is best-effort. Ingest remains available while a
+			// credential is missing, legacy plaintext, or cannot be decrypted.
+		}
+	}
+	if (channelType === "whatsapp_phone") {
+		const profileName = (inbound.payload as { profileName?: unknown } | null)
+			?.profileName;
+		if (typeof profileName === "string" && profileName.trim()) {
+			profile = { displayName: profileName.trim(), avatarUrl: null };
+		}
+	}
 	const contact = await getOrCreateContact(
 		db,
-		workspace.id,
+		workspaceId,
 		channel.id,
 		channelType,
 		inbound.senderId,
 		now,
-	);
-
-	// 4. Default inbox for the channel (each channel has exactly one default, ADR 0008).
-	const inbox = await getOrCreateDefaultInbox(
-		db,
-		workspace.id,
-		channel.id,
-		channelType,
-		now,
+		profile,
 	);
 
 	// 5. Ensure the conversation metadata row exists (D1 is authoritative for it).
@@ -80,7 +223,7 @@ export async function routeInbound(
 		.insert(conversations)
 		.values({
 			id: inbound.conversationId,
-			workspaceId: workspace.id,
+			workspaceId,
 			channelId: channel.id,
 			inboxId: inbox.id,
 			contactId: contact.id,
@@ -94,6 +237,66 @@ export async function routeInbound(
 		.onConflictDoNothing()
 		.run();
 
+	if (channelType === "email" && emailRoute && emailIngressId) {
+		await env.DB.prepare(
+			"UPDATE email_private_attachments SET conversation_id=? WHERE ingress_id=? AND workspace_id=? AND mailbox_id=?",
+		)
+			.bind(
+				inbound.conversationId,
+				emailIngressId,
+				workspaceId,
+				emailRoute.mailboxId,
+			)
+			.run();
+		const existing = await getCanonicalEmail(env, emailIngressId);
+		if (!existing)
+			await persistCanonicalEmail(
+				env,
+				{
+					id: emailIngressId,
+					conversationId: inbound.conversationId,
+					kind: "inbound",
+					channel: "email",
+					providerMessageId: inbound.providerMessageId,
+					senderId: contact.id,
+					text: inbound.text,
+					html: inbound.html,
+					payload: inbound.payload,
+					attachments,
+					createdAt: inbound.createdAt,
+				},
+				{
+					workspaceId,
+					mailboxId: emailRoute.mailboxId,
+					ingressId: emailIngressId,
+				},
+				inbound.payload,
+			);
+		const current = await db
+			.select()
+			.from(conversations)
+			.where(eq(conversations.id, inbound.conversationId))
+			.get();
+		const tags = await db
+			.select({ tagId: conversationTags.tagId })
+			.from(conversationTags)
+			.where(eq(conversationTags.conversationId, inbound.conversationId))
+			.all();
+		await routeEmailRulesAtomically(env, emailIngressId, {
+			conversationId: inbound.conversationId,
+			workspaceId,
+			inboxId: current?.inboxId ?? inbox.id,
+			assigneeId: current?.assigneeId ?? null,
+			status: current?.status ?? "open",
+			channelType: "email",
+			senderEmail: inbound.senderId,
+			subject: emailPayload.subject ?? null,
+			messageText: inbound.text,
+			conversationTagIds: tags.map((row) => row.tagId),
+		});
+		await projectCanonicalEmail(env, emailIngressId);
+		return;
+	}
 	// 5b. Webhook idempotency (routing spec): rules run BEFORE the DO append,
 	// so a replayed provider event could re-run rule side effects (duplicate
 	// canned replies, re-tags). Claim the event in processed_messages first —
@@ -133,7 +336,7 @@ export async function routeInbound(
 		.all();
 	const outcome = await evaluateRules(env, {
 		conversationId: inbound.conversationId,
-		workspaceId: workspace.id,
+		workspaceId,
 		inboxId: inbox.id,
 		assigneeId: null,
 		status: "open",
@@ -171,17 +374,19 @@ export async function routeInbound(
 		senderId: contact.id,
 		text: inbound.text,
 		payload: inbound.payload,
-		attachments: [],
+		attachments,
 		createdAt: inbound.createdAt,
 	};
 
 	const doId = env.CONVERSATION_DO.idFromName(inbound.conversationId);
 	const stub = env.CONVERSATION_DO.get(doId);
-	await stub.fetch("https://do/append-message", {
+	const response = await stub.fetch("https://do/append-message", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(message),
 	});
+	if (!response.ok)
+		throw new Error(`Conversation DO append failed (${response.status})`);
 }
 
 /**
@@ -203,7 +408,7 @@ function syntheticMessageKey(
 	return `syn:${hash.toString(36)}:${source.length}`;
 }
 
-async function getOrCreateChannel(
+async function _getOrCreateChannel(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
 	channelType: "facebook_page" | "email",
@@ -253,9 +458,10 @@ async function getOrCreateContact(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
 	channelId: string,
-	channelType: "facebook_page" | "email",
+	channelType: "facebook_page" | "email" | "whatsapp_phone",
 	externalUserId: string,
 	now: string,
+	profile?: FacebookProfile | null,
 ): Promise<typeof contacts.$inferSelect> {
 	const identity = await db
 		.select({ contactId: contactIdentities.contactId })
@@ -273,7 +479,30 @@ async function getOrCreateContact(
 			.from(contacts)
 			.where(eq(contacts.id, identity.contactId))
 			.get();
-		if (contact) return contact;
+		if (contact) {
+			// Fill only missing Facebook provider fields when a channel gains a token.
+			// WhatsApp profile names are creation-only webhook metadata and never
+			// overwrite or backfill an existing contact.
+			const displayName = contact.displayName ?? profile?.displayName ?? null;
+			const avatarUrl = contact.avatarUrl ?? profile?.avatarUrl ?? null;
+			if (
+				profile &&
+				channelType !== "whatsapp_phone" &&
+				(displayName !== contact.displayName || avatarUrl !== contact.avatarUrl)
+			) {
+				await db
+					.update(contacts)
+					.set({
+						displayName,
+						avatarUrl,
+						updatedAt: now,
+					})
+					.where(eq(contacts.id, contact.id))
+					.run();
+				return { ...contact, displayName, avatarUrl };
+			}
+			return contact;
+		}
 	}
 
 	const contactId = crypto.randomUUID();
@@ -282,6 +511,10 @@ async function getOrCreateContact(
 		.values({
 			id: contactId,
 			workspaceId,
+			displayName:
+				channelType === "email" ? null : (profile?.displayName ?? null),
+			avatarUrl:
+				channelType === "facebook_page" ? (profile?.avatarUrl ?? null) : null,
 			primaryEmail: channelType === "email" ? externalUserId : null,
 			createdAt: now,
 			updatedAt: now,
@@ -308,7 +541,7 @@ async function getOrCreateContact(
 	return created;
 }
 
-async function getOrCreateDefaultInbox(
+async function _getOrCreateDefaultInbox(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
 	channelId: string,

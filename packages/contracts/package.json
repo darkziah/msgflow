@@ -13,6 +13,9 @@
 		"build": "tsc",
 		"dev": "tsc --watch"
 	},
+	"dependencies": {
+		"effect": "3.22.2"
+	},
 	"devDependencies": {
 		"typescript": "^5.9.3"
 	}

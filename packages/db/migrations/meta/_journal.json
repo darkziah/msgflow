@@ -36,6 +36,188 @@
 			"when": 1789828119828,
 			"tag": "0004_inbox_routing_sidebar",
 			"breakpoints": true
+		},
+		{
+			"idx": 5,
+			"version": "6",
+			"when": 1790035200000,
+			"tag": "0005_outbound_delivery_intents",
+			"breakpoints": true
+		},
+		{
+			"idx": 6,
+			"version": "6",
+			"when": 1790121600000,
+			"tag": "0006_image_attachments",
+			"breakpoints": true
+		},
+		{
+			"idx": 7,
+			"version": "6",
+			"when": 1790208000000,
+			"tag": "0007_comment_mentions_notifications",
+			"breakpoints": true
+		},
+		{
+			"idx": 8,
+			"version": "6",
+			"when": 1790294400000,
+			"tag": "0008_logical_email_mailboxes",
+			"breakpoints": true
+		},
+		{
+			"idx": 9,
+			"version": "6",
+			"when": 1790380800000,
+			"tag": "0009_auth_usernames",
+			"breakpoints": true
+		},
+		{
+			"idx": 10,
+			"version": "6",
+			"when": 1790467200000,
+			"tag": "0010_auth_username_immutability",
+			"breakpoints": true
+		},
+		{
+			"idx": 11,
+			"version": "6",
+			"when": 1790553600000,
+			"tag": "0011_workspace_setup_claim",
+			"breakpoints": true
+		},
+		{
+			"idx": 12,
+			"version": "6",
+			"when": 1790640000000,
+			"tag": "0012_email_ingress_archive_integrity",
+			"breakpoints": true
+		},
+		{
+			"idx": 13,
+			"version": "6",
+			"when": 1790726400000,
+			"tag": "0013_mailbox_pilot",
+			"breakpoints": true
+		},
+		{
+			"idx": 14,
+			"version": "6",
+			"when": 1790812800000,
+			"tag": "0014_email_persistence",
+			"breakpoints": true
+		},
+		{
+			"idx": 15,
+			"version": "6",
+			"when": 1790899200000,
+			"tag": "0015_agent_onboarding",
+			"breakpoints": true
+		},
+		{
+			"idx": 16,
+			"version": "6",
+			"when": 1790985600000,
+			"tag": "0016_email_drafts",
+			"breakpoints": true
+		},
+		{
+			"idx": 17,
+			"version": "6",
+			"when": 1790985600001,
+			"tag": "0017_email_send_audit",
+			"breakpoints": true
+		},
+		{
+			"idx": 18,
+			"version": "6",
+			"when": 1790985600002,
+			"tag": "0018_email_draft_versions",
+			"breakpoints": true
+		},
+		{
+			"idx": 19,
+			"version": "6",
+			"when": 1791072000000,
+			"tag": "0019_invitation_username_reservations",
+			"breakpoints": true
+		},
+		{
+			"idx": 20,
+			"version": "6",
+			"when": 1791158400000,
+			"tag": "0020_meta_app_oauth",
+			"breakpoints": true
+		},
+		{
+			"idx": 21,
+			"version": "6",
+			"when": 1791244800000,
+			"tag": "0021_meta_app_webhook_tokens",
+			"breakpoints": true
+		},
+		{
+			"idx": 22,
+			"version": "6",
+			"when": 1791244800001,
+			"tag": "0022_multi_workspace_meta_app_identity",
+			"breakpoints": true
+		},
+		{
+			"idx": 23,
+			"version": "6",
+			"when": 1791244800002,
+			"tag": "0023_multi_workspace_facebook_page_identity",
+			"breakpoints": true
+		},
+		{
+			"idx": 24,
+			"version": "6",
+			"when": 1790595158000,
+			"tag": "0024_team_member_offboarding",
+			"breakpoints": true
+		},
+		{
+			"idx": 25,
+			"version": "6",
+			"when": 1791244800003,
+			"tag": "0025_workspace_owner_invariant",
+			"breakpoints": true
+		},
+		{
+			"idx": 26,
+			"version": "6",
+			"when": 1791331200000,
+			"tag": "0026_inbox_tree_sidebar_preferences",
+			"breakpoints": true
+		},
+		{
+			"idx": 27,
+			"version": "6",
+			"when": 1791331200001,
+			"tag": "0027_whatsapp_phone_identity",
+			"breakpoints": true
+		},
+		{
+			"idx": 28,
+			"version": "6",
+			"when": 1791331200002,
+			"tag": "0028_facebook_page_calling",
+			"breakpoints": true
+		},
+		{
+			"idx": 29,
+			"version": "6",
+			"when": 1791331200003,
+			"tag": "0029_calling_enable_reservation_and_webhook_confirmation",
+			"breakpoints": true
+		},
+		{
+			"idx": 30,
+			"version": "6",
+			"when": 1791331200004,
+			"tag": "0030_first_sign_in_walkthrough",
+			"breakpoints": true
 		}
 	]
 }

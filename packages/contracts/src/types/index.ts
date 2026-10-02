@@ -1,14 +1,29 @@
 // Canonical, channel-agnostic domain types shared by the Worker, Durable Objects, and web client.
 
-export type Channel = "facebook" | "email";
+import type { InboxAssignmentStrategy, InboxIconKey } from "../inbox-schema";
+
+export type Channel = "facebook" | "email" | "whatsapp";
 
 export type MessageKind = "inbound" | "outbound";
 
 export interface Attachment {
 	id: string;
-	type: string;
+	/** Immutable R2 object key. */
+	key: string;
+	/** Messenger images or private email images/PDFs. */
+	type:
+		| "image/jpeg"
+		| "image/png"
+		| "image/gif"
+		| "image/webp"
+		| "application/pdf";
 	url: string;
-	name?: string;
+	name: string;
+	size: number;
+	/** MIME disposition from an email part; omitted for existing channels. */
+	disposition?: "attachment" | "inline";
+	/** Normalized MIME Content-ID for an inline email image. */
+	contentId?: string;
 }
 
 export interface Message {
@@ -19,6 +34,8 @@ export interface Message {
 	providerMessageId: string | null;
 	senderId: string;
 	text: string;
+	/** Server-sanitized inbound email HTML. Never present for chat channels. */
+	html?: string;
 	payload: unknown;
 	attachments: Attachment[];
 	createdAt: string;
@@ -39,6 +56,89 @@ export interface Comment {
 	createdAt: string;
 }
 
+export type GenericActivityAction =
+	| "conversation.updated"
+	| "tag.added"
+	| "tag.removed"
+	| "snooze.expired";
+
+export type CallActivityAction =
+	| "call.received"
+	| "call.ringing"
+	| "call.offered"
+	| "call.accepted"
+	| "call.rejected"
+	| "call.terminated"
+	| "call.timed_out"
+	| "call.no_agent_reply"
+	| "call.failed"
+	| "call.media_updated"
+	| "call.quality_reported";
+
+/** Aggregate-only call audit data. Raw signaling and media stay server-side. */
+export interface CallActivityDetails {
+	reason?: string;
+	status?: string;
+	durationSeconds?: number;
+	packetLossPercent?: number;
+	jitterMilliseconds?: number;
+}
+
+interface ActivityBase {
+	id: string;
+	conversationId: string;
+	/** Authenticated agent responsible for the change; null for system work. */
+	actorId: string | null;
+	createdAt: string;
+}
+
+/** A system-generated audit record for a non-call Conversation metadata change. */
+export interface GenericActivity extends ActivityBase {
+	action: GenericActivityAction;
+	/** Immutable action-specific data (for example changed values or a tag id). */
+	details: Record<string, unknown>;
+}
+
+/** A client-visible call audit record with only allow-listed aggregate details. */
+export interface CallActivity {
+	id: string;
+	conversationId: string;
+	action: CallActivityAction;
+	details: CallActivityDetails;
+	createdAt: string;
+}
+
+export type Activity = GenericActivity | CallActivity;
+
+// POST /api/conversations/:id/comments — author and timestamp are assigned
+// from the authenticated Worker session, never accepted from the client.
+export interface CreateCommentRequest {
+	/** Explicit workspace scope, validated against the authenticated membership. */
+	workspaceId: string;
+	text: string;
+	mentions?: string[];
+}
+
+export interface CreateCommentResponse {
+	comment: Comment;
+}
+
+/** A personal D1 projection created when another agent mentions the recipient. */
+export interface CommentNotification {
+	id: string;
+	conversationId: string;
+	commentId: string;
+	authorId: string;
+	commentText: string;
+	createdAt: string;
+	readAt: string | null;
+}
+
+export interface CommentNotificationsResponse {
+	notifications: CommentNotification[];
+	unreadCount: number;
+}
+
 export interface PresenceEntry {
 	agentId: string;
 	status: "viewing" | "drafting";
@@ -48,6 +148,7 @@ export interface PresenceEntry {
 export type ConversationEvent =
 	| { type: "message:new"; message: Message }
 	| { type: "comment:new"; comment: Comment }
+	| { type: "activity:new"; activity: Activity }
 	| { type: "conversation-updated"; patch: Record<string, unknown> }
 	| { type: "presence"; agents: PresenceEntry[] }
 	| { type: "typing"; agentId: string; isTyping: boolean };
@@ -59,13 +160,22 @@ export interface ApiResponse {
 
 // POST /api/conversations/:id/messages
 export interface SendMessageRequest {
+	/** Explicit workspace scope, validated against the authenticated membership. */
+	workspaceId: string;
+	/** Server draft CAS revision; omitted means a new draft. */
+	draftRevision?: number;
 	text: string;
+	/** Uploaded image metadata returned by POST /api/attachments. */
+	attachments?: Attachment[];
 	/** Email only: the subject line (Front/Missive composers show it). */
 	subject?: string;
 	/** ISO timestamp; when set in the future the message is scheduled instead of sent. */
 	sendAt?: string;
 	/** Client-generated idempotency key; the DO dedups on it. */
 	clientMessageId?: string;
+	/** Authorized email Reply Identity, defaulting to the receiving mailbox. */
+	mailboxId?: string;
+	confirmPrivateIdentity?: boolean;
 }
 
 export type SendMessageResult =
@@ -200,13 +310,22 @@ export interface CannedReplyWriteRequest {
 	body: string;
 }
 
-// GET /api/conversations/:id/messages — full timeline from the Conversation DO.
-export interface MessagesResponse {
+// GET /api/conversations/:id/messages — complete internal timeline from the
+// Conversation DO. Each sibling collection preserves its own semantics:
+// customer-facing messages, team-only comments, and system Activities.
+export interface TimelineResponse {
 	messages: Message[];
+	comments: Comment[];
+	activities: Activity[];
 }
+
+/** @deprecated Use TimelineResponse. Kept for callers of the existing endpoint. */
+export type MessagesResponse = TimelineResponse;
 
 // POST /api/conversations/:id/read
 export interface MarkReadRequest {
+	/** Explicit workspace scope, validated against the authenticated membership. */
+	workspaceId: string;
 	lastReadSeq: number;
 }
 
@@ -214,6 +333,8 @@ export interface MarkReadRequest {
 // ADR 0004: write D1 first, then relay a conversation-updated broadcast
 // through the DO so open threads update in real time.
 export interface ConversationUpdateRequest {
+	/** Explicit workspace scope, validated against the authenticated membership. */
+	workspaceId: string;
 	status?: "open" | "archived";
 	/** User id, or null to unassign. */
 	assigneeId?: string | null;
@@ -239,20 +360,34 @@ export interface UserSummary {
 // state. Access tokens never leave the Worker; only hasToken is exposed.
 export interface ChannelSummary {
 	id: string;
-	type: "facebook_page" | "email";
+	type: "facebook_page" | "email" | "whatsapp_phone";
 	displayName: string;
 	externalId: string;
-	status: "active" | "disconnected" | "error";
+	status: "active" | "disconnected" | "error" | "deleted";
 	hasToken: boolean;
 	tokenExpiresAt: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
 
-// POST /api/channels/:id/token
-export interface ChannelConnectRequest {
-	accessToken: string;
+/** Installation-level Meta App metadata. The App secret never leaves the Worker. */
+export interface MetaAppSummary {
+	id: string;
+	displayName: string;
+	appId: string;
+	hasSecret: boolean;
+	createdAt: string;
+	updatedAt: string;
 }
+
+/** Returned only when an App is created or its webhook token is rotated. */
+export interface MetaAppWebhookSetup {
+	metaApp: MetaAppSummary;
+	webhookVerifyToken: string;
+}
+
+// POST /api/channels/:id/token is defined by ChannelConnectRequestSchema.
+export type { ChannelConnectRequest } from "../channel-schema";
 
 // ---------------------------------------------------------------------------
 // INBOXES (ADR 0008: every conversation in exactly one inbox; channels link
@@ -261,6 +396,12 @@ export interface ChannelConnectRequest {
 
 export interface InboxSummary {
 	id: string;
+	/** Navigation parent; changing it never reroutes conversations. */
+	parentInboxId?: string | null;
+	/** System inboxes are not valid move sources or destinations. */
+	visibilityType?: "shared" | "private" | "team" | "system";
+	/** Optimistic version required by the navigation move endpoint. */
+	treeVersion?: number;
 	name: string;
 	description: string | null;
 	/** Validated hex color (#RRGGBB); sidebar dot when no icon is set. */
@@ -277,61 +418,30 @@ export interface InboxSummary {
 	isDefault: boolean;
 	/** Channel instances feeding this inbox. */
 	channels: InboxChannelLink[];
-	/** Agent ids that are members of this inbox. */
-	memberIds: string[];
-	conversationCount: number;
+	/** Present only when the caller can read this inbox. */
+	memberIds?: string[];
+	/** Present only when the caller can read this inbox. */
+	conversationCount?: number;
 	createdAt: string;
 	/** Unix ms; null for inboxes created before the routing migration. */
 	updatedAtMs: number | null;
 }
 
-export const INBOX_ICON_KEYS = [
-	"inbox",
-	"headphones",
-	"receipt-text",
-	"badge-dollar-sign",
-	"briefcase",
-] as const;
-export type InboxIconKey = (typeof INBOX_ICON_KEYS)[number];
-
-export const INBOX_ASSIGNMENT_STRATEGIES = [
-	"manual",
-	"round_robin",
-	"least_busy",
-] as const;
-export type InboxAssignmentStrategy =
-	(typeof INBOX_ASSIGNMENT_STRATEGIES)[number];
-
-export const INBOX_COLOR_PRESETS = [
-	"#3B82F6",
-	"#22C55E",
-	"#A855F7",
-	"#F97316",
-	"#EAB308",
-	"#EF4444",
-	"#14B8A6",
-	"#64748B",
-] as const;
-
 export interface InboxChannelLink {
 	channelId: string;
 	channelDisplayName: string;
-	channelType: "facebook_page" | "email";
+	channelType: "facebook_page" | "email" | "whatsapp_phone";
 	/** True when this channel's default inbox is this inbox. */
 	isDefault: boolean;
 }
 
-// POST /api/workspaces/:workspaceId/inboxes
-export interface InboxCreateRequest {
-	name: string;
-	description?: string | null;
-	color?: string;
-	icon?: InboxIconKey | null;
-	teamId?: string | null;
-	assignmentStrategy?: InboxAssignmentStrategy;
-	/** Optional channel ids to link immediately (first becomes the channel's default). */
-	channelIds?: string[];
-}
+// POST /api/workspaces/:workspaceId/inboxes is defined by InboxCreateRequestSchema.
+// Re-export its inferred type here to preserve the existing contracts surface.
+export type {
+	InboxAssignmentStrategy,
+	InboxCreateRequest,
+	InboxIconKey,
+} from "../inbox-schema";
 
 // PATCH /api/workspaces/:workspaceId/inboxes/:inboxId
 export interface InboxUpdateRequest {
@@ -356,6 +466,12 @@ export interface InboxReorderRequest {
 	inboxIds: string[];
 }
 
+export interface InboxTreeMoveRequest {
+	parentInboxId: string | null;
+	beforeInboxId?: string;
+	expectedTreeVersion: number;
+}
+
 // POST /api/inboxes/:id/channels — link a channel to an inbox.
 export interface InboxChannelRequest {
 	channelId: string;
@@ -364,6 +480,7 @@ export interface InboxChannelRequest {
 }
 
 // Conversation ID scheme: fb:{page_id}:{sender_psid} | email:{mailbox}:{thread_key}
+// | wa:{phone_number_id}:{customer_whatsapp_id}
 export function facebookConversationId(
 	pageId: string,
 	senderPsid: string,
@@ -378,15 +495,23 @@ export function emailConversationId(
 	return `email:${mailbox}:${threadKey}`;
 }
 
+/** Canonical WhatsApp conversation identity: receiving number plus customer wa_id. */
+export function whatsappConversationId(
+	phoneNumberId: string,
+	waId: string,
+): string {
+	return `wa:${phoneNumberId}:${waId}`;
+}
+
 // Parse a conversation ID into { channel, left, right }:
 //   fb:     left = page_id,  right = sender_psid
 //   email:  left = mailbox,  right = thread_key (RFC 822 Message-ID, may contain colons)
+//   wa:     left = phone_number_id, right = customer WhatsApp ID
 // Split on the FIRST colon after the channel prefix so colons inside the
 // thread key never break parsing.
 //
-// The canonical facebook prefix is "fb" (facebookConversationId); the longer
-// "facebook" form is also accepted for compat with ids minted before the
-// scheme was tightened.
+// The canonical prefixes are "fb" and "wa". The longer "facebook" form
+// remains accepted for IDs minted before the scheme was tightened.
 export function parseConversationId(
 	id: string,
 ): { channel: Channel; left: string; right: string } | null {
@@ -396,19 +521,24 @@ export function parseConversationId(
 	if (
 		rawChannel !== "facebook" &&
 		rawChannel !== "fb" &&
-		rawChannel !== "email"
+		rawChannel !== "email" &&
+		rawChannel !== "wa"
 	) {
 		return null;
 	}
-	const channel: Channel = rawChannel === "fb" ? "facebook" : rawChannel;
+	const channel: Channel =
+		rawChannel === "fb"
+			? "facebook"
+			: rawChannel === "wa"
+				? "whatsapp"
+				: rawChannel;
 	const rest = id.slice(sep + 1);
 	const restSep = rest.indexOf(":");
 	if (restSep === -1) return null;
-	return {
-		channel,
-		left: rest.slice(0, restSep),
-		right: rest.slice(restSep + 1),
-	};
+	const left = rest.slice(0, restSep);
+	const right = rest.slice(restSep + 1);
+	if (!left || !right) return null;
+	return { channel, left, right };
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +550,7 @@ export interface WorkspaceSummary {
 	name: string;
 	slug: string;
 	role: "owner" | "admin" | "member";
+	createdAt: string;
 }
 
 export interface TeamSummary {
@@ -427,89 +558,65 @@ export interface TeamSummary {
 	name: string;
 }
 
-// Stable item identifiers used in sidebar JSON preferences:
-//   system:all | system:assigned-to-me | system:unassigned | system:snoozed
-//   | system:closed | inbox:<inbox-id> | tag:<tag-id> | view:<saved-filter-id>
-export type SidebarItemKind = "system" | "inbox" | "tag" | "view";
+/** Authoritative normalized navigation node returned by the sidebar endpoint. */
+export type SidebarNodeType =
+	| "section"
+	| "smart-view"
+	| "inbox"
+	| "channel-group"
+	| "channel"
+	| "tag"
+	| "saved-view";
 
-export interface SidebarItemBase {
-	kind: SidebarItemKind;
-	/** Stable id (see above). */
+export interface SidebarNode {
 	id: string;
+	type: SidebarNodeType;
+	parentId: string | null;
 	label: string;
-}
-
-export interface SidebarSystemItem extends SidebarItemBase {
-	kind: "system";
-	count: number;
-}
-
-export interface SidebarInboxItem extends SidebarItemBase {
-	kind: "inbox";
-	inboxId: string;
-	color: string;
 	icon: string | null;
-	teamId: string | null;
-	isArchived: boolean;
-	/** This inbox is a channel's current default (never hide/archive without checks). */
-	isDefault: boolean;
-	/** Open conversations in the inbox. */
-	count: number;
-	/**
-	 * The user has an open conversation assigned to them inside this inbox.
-	 * Such an inbox must stay visible even if the user hides it (the never-
-	 * remove rule) until the work is resolved or reassigned.
-	 */
-	hasOpenAssigned: boolean;
-}
-
-export interface SidebarTagItem extends SidebarItemBase {
-	kind: "tag";
 	color: string | null;
-	count: number;
+	count: number | null;
+	unread?: number | null;
+	unassigned?: number | null;
+	children: SidebarNode[];
+	isCollapsible: boolean;
+	isEditable: boolean;
+	isHidden: boolean;
+	permissionState: "allowed" | "readonly";
+	filter: SavedFilterFilters;
 }
 
-export interface SidebarViewItem extends SidebarItemBase {
-	kind: "view";
+/** New server-authoritative sidebar response. */
+export interface SidebarTreeResponse {
+	workspace: { id: string; name: string; slug: string };
+	permissions: { isAdmin: boolean };
+	preferences: SidebarPreferences;
+	sections: SidebarNode[];
 }
 
-export type SidebarItem =
-	| SidebarSystemItem
-	| SidebarInboxItem
-	| SidebarTagItem
-	| SidebarViewItem;
+/** Persisted visibility classification for an inbox tree node. */
+export type InboxVisibilityType = "shared" | "team" | "private" | "system";
 
-export interface SidebarGroup {
-	id: string;
-	label: string;
-	items: SidebarItem[];
-}
-
-export interface SidebarSection {
-	key: "inbox" | "assigned" | "teams" | "tags" | "views";
-	label: string;
-	/** Ungrouped items rendered before the groups (e.g. All Messages). */
-	items: SidebarItem[];
-	groups: SidebarGroup[];
+/** Additive per-user tree state stored with sidebar preferences. */
+export interface SidebarTreePreferences {
+	collapsedNodeIds: string[];
+	lastOpenBranchIds: string[];
 }
 
 export interface SidebarPreferences {
 	collapsedSections: string[];
+	collapsedNodeIds: string[];
+	lastOpenBranchIds: string[];
 	pinnedItemIds: string[];
 	hiddenItemIds: string[];
 	itemOrder: Record<string, number>;
 }
 
-export interface SidebarResponse {
-	workspace: { id: string; name: string; slug: string };
-	permissions: { isAdmin: boolean };
-	preferences: SidebarPreferences;
-	sections: SidebarSection[];
-}
-
 // PATCH /api/workspaces/:workspaceId/sidebar-preferences — personal UI state.
 export interface SidebarPreferencesUpdate {
 	collapsedSections?: string[];
+	collapsedNodeIds?: string[];
+	lastOpenBranchIds?: string[];
 	pinnedItemIds?: string[];
 	hiddenItemIds?: string[];
 	itemOrder?: Record<string, number>;
@@ -523,8 +630,12 @@ export interface SavedFilterFilters {
 	assigneeId?: string;
 	unassigned?: boolean;
 	snoozed?: boolean;
-	channel?: "facebook" | "email";
+	channel?: "facebook" | "email" | "whatsapp";
+	/** Exact authorized channel selection from a sidebar leaf. */
+	channelId?: string;
 	tagId?: string;
+	/** Saved view identity; the Worker resolves its stored filters per request. */
+	savedViewId?: string;
 	dateFrom?: string;
 	dateTo?: string;
 }

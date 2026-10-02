@@ -1,11 +1,10 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import type { BatchItem } from "drizzle-orm/batch";
-import { drizzle } from "drizzle-orm/d1";
 import {
-	INBOX_ASSIGNMENT_STRATEGIES,
-	INBOX_ICON_KEYS,
 	type CannedReplySummary,
 	type CannedReplyWriteRequest,
+	type ChannelSummary,
+	type FacebookChannelCreateRequest,
+	INBOX_ASSIGNMENT_STRATEGIES,
+	INBOX_ICON_KEYS,
 	type InboxChannelRequest,
 	type InboxCreateRequest,
 	type InboxSummary,
@@ -16,49 +15,72 @@ import {
 	type TagSummary,
 	type TagUpdateRequest,
 	type TeamSummary,
+	type WhatsAppChannelCreateRequest,
+	type WhatsAppChannelUpdateRequest,
 } from "@msgflow/contracts";
 import {
-	channels,
 	cannedReplies,
+	channels,
 	conversations,
 	inboxChannels,
-	inboxMembers,
 	inboxes,
+	inboxMembers,
+	metaApps,
 	ruleActions,
 	ruleConditions,
 	rules,
 	tags,
 	teams,
 } from "@msgflow/db";
-import type { Env } from "./env";
-import { getOrCreateWorkspace } from "./workspace";
+import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
+import { drizzle } from "drizzle-orm/d1";
 import {
 	requireAdminAccess,
+	requireOwnerAccess,
 	requireWorkspaceAccess,
 	userBelongsToWorkspace,
 } from "./access";
+import { encryptChannelToken } from "./channel-token-crypto";
+import type { Env } from "./env";
 import { ManageError } from "./errors";
+import { validateAndSubscribeFacebookPage } from "./facebook-page";
+import { assertValidInboxParent, getReadableInboxIds } from "./inbox-tree";
+import { validateWhatsAppPhoneNumber } from "./whatsapp";
 
 export { ManageError } from "./errors";
 
 /**
- * Management CRUD for tags, rules, and canned replies (ADR 0009/0010).
- * All rows are scoped to the single default workspace (RBAC is a later
- * phase). The ingest path reads these tables directly (evaluateRules), so
- * the shapes written here are the shapes it evaluates.
+ * Management CRUD for workspace-owned resources (ADR 0009/0010). Service
+ * functions enforce both workspace membership and row ownership so callers
+ * cannot rely on route-local authorization alone.
  */
 
 // ---------------------------------------------------------------------------
 // TAGS
 // ---------------------------------------------------------------------------
 
-export async function listTags(env: Env): Promise<TagSummary[]> {
+export async function listTags(
+	env: Env,
+	workspaceId: string,
+	userId: string,
+): Promise<TagSummary[]> {
 	const db = drizzle(env.DB);
-	const workspace = await getOrCreateWorkspace(db, new Date().toISOString());
+	const access = await requireWorkspaceAccess(db, workspaceId, userId);
+	const visibility = access.isAdmin
+		? eq(tags.workspaceId, workspaceId)
+		: and(
+				eq(tags.workspaceId, workspaceId),
+				or(
+					eq(tags.visibility, "shared"),
+					eq(tags.visibility, "company"),
+					eq(tags.ownerUserId, userId),
+				),
+			);
 	const rows = await db
 		.select()
 		.from(tags)
-		.where(eq(tags.workspaceId, workspace.id))
+		.where(visibility)
 		.orderBy(asc(tags.name))
 		.all();
 	return rows.map(toTagSummary);
@@ -66,11 +88,12 @@ export async function listTags(env: Env): Promise<TagSummary[]> {
 
 export async function createTag(
 	env: Env,
+	workspaceId: string,
 	input: TagCreateRequest,
-	ownerUserId: string,
+	actorUserId: string,
 ): Promise<TagSummary> {
 	const db = drizzle(env.DB);
-	const workspace = await getOrCreateWorkspace(db, new Date().toISOString());
+	const access = await requireWorkspaceAccess(db, workspaceId, actorUserId);
 	const now = new Date().toISOString();
 	const name = input.name.trim();
 	if (!name) throw new ManageError("name is required");
@@ -78,14 +101,30 @@ export async function createTag(
 	if (visibility !== "shared" && visibility !== "private") {
 		throw new ManageError("visibility must be 'shared' or 'private'");
 	}
+	if (visibility === "shared" && !access.isAdmin) {
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
+	}
+	if (input.parentTagId) {
+		const parent = await db
+			.select({ id: tags.id })
+			.from(tags)
+			.where(
+				and(eq(tags.id, input.parentTagId), eq(tags.workspaceId, workspaceId)),
+			)
+			.get();
+		if (!parent) throw new ManageError("parent tag not found", 404);
+	}
 	const row = {
 		id: crypto.randomUUID(),
-		workspaceId: workspace.id,
+		workspaceId,
 		name,
 		color: input.color ?? null,
 		visibility,
 		parentTagId: input.parentTagId ?? null,
-		ownerUserId: visibility === "private" ? ownerUserId : null,
+		ownerUserId: visibility === "private" ? actorUserId : null,
 		createdAt: now,
 	};
 	await db.insert(tags).values(row).run();
@@ -94,12 +133,28 @@ export async function createTag(
 
 export async function updateTag(
 	env: Env,
+	workspaceId: string,
 	id: string,
 	input: TagUpdateRequest,
+	actorUserId: string,
 ): Promise<TagSummary> {
 	const db = drizzle(env.DB);
-	const existing = await db.select().from(tags).where(eq(tags.id, id)).get();
+	const access = await requireWorkspaceAccess(db, workspaceId, actorUserId);
+	const existing = await db
+		.select()
+		.from(tags)
+		.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
+		.get();
 	if (!existing) throw new ManageError("tag not found", 404);
+	if (
+		!access.isAdmin &&
+		(existing.visibility !== "private" || existing.ownerUserId !== actorUserId)
+	) {
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
+	}
 
 	const set: Partial<typeof tags.$inferInsert> = {};
 	if (input.name !== undefined) {
@@ -112,28 +167,84 @@ export async function updateTag(
 		if (input.visibility !== "shared" && input.visibility !== "private") {
 			throw new ManageError("visibility must be 'shared' or 'private'");
 		}
+		if (input.visibility === "shared" && !access.isAdmin) {
+			throw new ManageError(
+				"workspace owner or admin role is required for this action",
+				403,
+			);
+		}
 		set.visibility = input.visibility;
-		// Private tags are owned by whoever made them private; clearing back to
-		// shared releases the owner binding.
+		// A shared tag can become private only through the admin path above; its
+		// new private owner is that administrator. Existing private ownership is
+		// preserved unless it becomes shared.
 		set.ownerUserId =
-			input.visibility === "private" ? (existing.ownerUserId ?? null) : null;
+			input.visibility === "private"
+				? (existing.ownerUserId ?? actorUserId)
+				: null;
 	}
-	if (input.parentTagId !== undefined) set.parentTagId = input.parentTagId;
+	if (input.parentTagId !== undefined) {
+		if (input.parentTagId === id)
+			throw new ManageError("a tag cannot be its own parent");
+		if (input.parentTagId) {
+			const parent = await db
+				.select({ id: tags.id })
+				.from(tags)
+				.where(
+					and(
+						eq(tags.id, input.parentTagId),
+						eq(tags.workspaceId, workspaceId),
+					),
+				)
+				.get();
+			if (!parent) throw new ManageError("parent tag not found", 404);
+		}
+		set.parentTagId = input.parentTagId;
+	}
 
 	if (Object.keys(set).length > 0) {
-		await db.update(tags).set(set).where(eq(tags.id, id)).run();
+		await db
+			.update(tags)
+			.set(set)
+			.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
+			.run();
 	}
-	const updated = await db.select().from(tags).where(eq(tags.id, id)).get();
+	const updated = await db
+		.select()
+		.from(tags)
+		.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
+		.get();
 	if (!updated) throw new ManageError("tag not found", 404);
 	return toTagSummary(updated);
 }
 
-export async function deleteTag(env: Env, id: string): Promise<void> {
+export async function deleteTag(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
 	const db = drizzle(env.DB);
-	const existing = await db.select().from(tags).where(eq(tags.id, id)).get();
+	const access = await requireWorkspaceAccess(db, workspaceId, actorUserId);
+	const existing = await db
+		.select()
+		.from(tags)
+		.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
+		.get();
 	if (!existing) throw new ManageError("tag not found", 404);
+	if (
+		!access.isAdmin &&
+		(existing.visibility !== "private" || existing.ownerUserId !== actorUserId)
+	) {
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
+	}
 	// conversation_tags rows cascade on tag delete (schema FK onDelete cascade).
-	await db.delete(tags).where(eq(tags.id, id)).run();
+	await db
+		.delete(tags)
+		.where(and(eq(tags.id, id), eq(tags.workspaceId, workspaceId)))
+		.run();
 }
 
 function toTagSummary(row: typeof tags.$inferSelect): TagSummary {
@@ -457,13 +568,15 @@ async function getRuleById(
 
 export async function listCannedReplies(
 	env: Env,
+	workspaceId: string,
+	userId: string,
 ): Promise<CannedReplySummary[]> {
 	const db = drizzle(env.DB);
-	const workspace = await getOrCreateWorkspace(db, new Date().toISOString());
+	await requireWorkspaceAccess(db, workspaceId, userId);
 	const rows = await db
 		.select()
 		.from(cannedReplies)
-		.where(eq(cannedReplies.workspaceId, workspace.id))
+		.where(eq(cannedReplies.workspaceId, workspaceId))
 		.orderBy(asc(cannedReplies.name))
 		.all();
 	return rows.map((row) => ({
@@ -477,10 +590,12 @@ export async function listCannedReplies(
 
 export async function createCannedReply(
 	env: Env,
+	workspaceId: string,
 	input: CannedReplyWriteRequest,
+	actorUserId: string,
 ): Promise<CannedReplySummary> {
 	const db = drizzle(env.DB);
-	const workspace = await getOrCreateWorkspace(db, new Date().toISOString());
+	await requireAdminAccess(db, workspaceId, actorUserId);
 	const now = new Date().toISOString();
 	const name = input.name.trim();
 	const body = input.body.trim();
@@ -489,7 +604,7 @@ export async function createCannedReply(
 	}
 	const row = {
 		id: crypto.randomUUID(),
-		workspaceId: workspace.id,
+		workspaceId,
 		name,
 		body,
 		createdAt: now,
@@ -501,16 +616,27 @@ export async function createCannedReply(
 
 export async function updateCannedReply(
 	env: Env,
+	workspaceId: string,
 	id: string,
 	input: CannedReplyWriteRequest,
+	actorUserId: string,
 ): Promise<CannedReplySummary> {
 	const db = drizzle(env.DB);
+	const access = await requireWorkspaceAccess(db, workspaceId, actorUserId);
 	const existing = await db
 		.select()
 		.from(cannedReplies)
-		.where(eq(cannedReplies.id, id))
+		.where(
+			and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)),
+		)
 		.get();
 	if (!existing) throw new ManageError("canned reply not found", 404);
+	if (!access.isAdmin) {
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
+	}
 	const name = input.name.trim();
 	const body = input.body.trim();
 	if (!name || !body) {
@@ -520,20 +646,567 @@ export async function updateCannedReply(
 	await db
 		.update(cannedReplies)
 		.set({ name, body, updatedAt })
-		.where(eq(cannedReplies.id, id))
+		.where(
+			and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)),
+		)
 		.run();
 	return { id, name, body, createdAt: existing.createdAt, updatedAt };
 }
 
-export async function deleteCannedReply(env: Env, id: string): Promise<void> {
+export async function deleteCannedReply(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
 	const db = drizzle(env.DB);
+	const access = await requireWorkspaceAccess(db, workspaceId, actorUserId);
 	const existing = await db
 		.select()
 		.from(cannedReplies)
-		.where(eq(cannedReplies.id, id))
+		.where(
+			and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)),
+		)
 		.get();
 	if (!existing) throw new ManageError("canned reply not found", 404);
-	await db.delete(cannedReplies).where(eq(cannedReplies.id, id)).run();
+	if (!access.isAdmin) {
+		throw new ManageError(
+			"workspace owner or admin role is required for this action",
+			403,
+		);
+	}
+	await db
+		.delete(cannedReplies)
+		.where(
+			and(eq(cannedReplies.id, id), eq(cannedReplies.workspaceId, workspaceId)),
+		)
+		.run();
+}
+
+// ---------------------------------------------------------------------------
+// CHANNELS — credentials never leave these service boundaries. Membership may
+// inspect connection state; owner/admin alone may connect or disconnect.
+// ---------------------------------------------------------------------------
+
+export async function listChannels(
+	env: Env,
+	workspaceId: string,
+	userId: string,
+): Promise<ChannelSummary[]> {
+	const db = drizzle(env.DB);
+	await requireWorkspaceAccess(db, workspaceId, userId);
+	const rows = await db
+		.select({
+			id: channels.id,
+			type: channels.type,
+			displayName: channels.displayName,
+			externalId: channels.externalId,
+			status: channels.status,
+			accessToken: channels.accessToken,
+			tokenExpiresAt: channels.tokenExpiresAt,
+			createdAt: channels.createdAt,
+			updatedAt: channels.updatedAt,
+		})
+		.from(channels)
+		.where(
+			and(
+				eq(channels.workspaceId, workspaceId),
+				ne(channels.status, "deleted"),
+			),
+		)
+		.all();
+	return rows.map((row) => ({
+		id: row.id,
+		type: row.type,
+		displayName: row.displayName,
+		externalId: row.externalId,
+		status: row.status,
+		hasToken: row.accessToken !== null,
+		tokenExpiresAt: row.tokenExpiresAt,
+		createdAt: row.createdAt,
+		updatedAt: row.updatedAt,
+	}));
+}
+
+/** Creates an explicit Messenger Page channel and its one default Inbox link. */
+export async function createFacebookChannel(
+	env: Env,
+	workspaceId: string,
+	input: FacebookChannelCreateRequest,
+	actorUserId: string,
+): Promise<ChannelSummary> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const inbox = await db
+		.select({ id: inboxes.id })
+		.from(inboxes)
+		.where(
+			and(
+				eq(inboxes.id, input.inboxId),
+				eq(inboxes.workspaceId, workspaceId),
+				eq(inboxes.isArchived, false),
+			),
+		)
+		.get();
+	if (!inbox) throw new ManageError("active inbox not found", 404);
+	const metaApp = await db
+		.select({ id: metaApps.id })
+		.from(metaApps)
+		.where(
+			and(
+				eq(metaApps.id, input.metaAppId),
+				eq(metaApps.workspaceId, workspaceId),
+			),
+		)
+		.get();
+	if (!metaApp) throw new ManageError("Meta App not found", 404);
+	let pageValidation: { displayName: string | null };
+	try {
+		pageValidation = await validateAndSubscribeFacebookPage(
+			input.pageId,
+			input.accessToken,
+		);
+	} catch {
+		throw new ManageError(
+			"Facebook Page validation or subscription failed",
+			400,
+		);
+	}
+	const displayName =
+		input.displayName ?? pageValidation.displayName ?? input.pageId;
+	let accessToken: string;
+	try {
+		accessToken = await encryptChannelToken(
+			input.accessToken,
+			env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+		);
+	} catch {
+		throw new ManageError("channel token encryption is unavailable", 503);
+	}
+	const id = crypto.randomUUID();
+	const now = new Date().toISOString();
+	// Deleted Page channels retain their provider identity for historical
+	// conversations. Reconnect that exact workspace-local identity instead of
+	// inserting a second row that the workspace identity key would reject.
+	const deletedChannel = await db
+		.select({ id: channels.id, createdAt: channels.createdAt })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "facebook_page"),
+				eq(channels.externalId, input.pageId),
+				eq(channels.status, "deleted"),
+			),
+		)
+		.get();
+	try {
+		if (deletedChannel) {
+			await env.DB.batch([
+				env.DB.prepare(
+					`UPDATE channels SET display_name=?, access_token=?, refresh_token=NULL, token_expires_at=NULL, meta_app_id=?, status='active', updated_at=?
+					 WHERE id=? AND workspace_id=? AND type='facebook_page' AND external_id=? AND status='deleted'`,
+				).bind(
+					displayName,
+					accessToken,
+					metaApp.id,
+					now,
+					deletedChannel.id,
+					workspaceId,
+					input.pageId,
+				),
+				env.DB.prepare(
+					"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+				).bind(crypto.randomUUID(), inbox.id, deletedChannel.id),
+			]);
+		} else {
+			await env.DB.batch([
+				env.DB.prepare(
+					`INSERT INTO channels (id,workspace_id,type,display_name,external_id,access_token,meta_app_id,status,created_at,updated_at)
+ VALUES (?,?,?,?,?,?,?,'active',?,?)`,
+				).bind(
+					id,
+					workspaceId,
+					"facebook_page",
+					displayName,
+					input.pageId,
+					accessToken,
+					metaApp.id,
+					now,
+					now,
+				),
+				env.DB.prepare(
+					"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+				).bind(crypto.randomUUID(), inbox.id, id),
+			]);
+		}
+	} catch {
+		throw new ManageError(
+			"a channel for this Facebook Page already exists",
+			409,
+		);
+	}
+	return {
+		id: deletedChannel?.id ?? id,
+		type: "facebook_page",
+		displayName,
+		externalId: input.pageId,
+		status: "active",
+		hasToken: true,
+		tokenExpiresAt: null,
+		createdAt: deletedChannel?.createdAt ?? now,
+		updatedAt: now,
+	};
+}
+
+/** Creates or revives a validated WhatsApp Cloud API phone channel. */
+export async function createWhatsAppChannel(
+	env: Env,
+	workspaceId: string,
+	input: WhatsAppChannelCreateRequest,
+	actorUserId: string,
+): Promise<ChannelSummary> {
+	const db = drizzle(env.DB);
+	await requireAdminAccess(db, workspaceId, actorUserId);
+	const inbox = await db
+		.select({ id: inboxes.id })
+		.from(inboxes)
+		.where(
+			and(
+				eq(inboxes.id, input.inboxId),
+				eq(inboxes.workspaceId, workspaceId),
+				eq(inboxes.isArchived, false),
+			),
+		)
+		.get();
+	if (!inbox) throw new ManageError("active inbox not found", 404);
+	const metaApp = await db
+		.select({ id: metaApps.id })
+		.from(metaApps)
+		.where(
+			and(
+				eq(metaApps.id, input.metaAppId),
+				eq(metaApps.workspaceId, workspaceId),
+			),
+		)
+		.get();
+	if (!metaApp) throw new ManageError("Meta App not found", 404);
+
+	let phone: { phoneNumberId: string; displayName: string };
+	try {
+		phone = await validateWhatsAppPhoneNumber(
+			input.phoneNumberId,
+			input.accessToken,
+		);
+	} catch {
+		throw new ManageError("WhatsApp phone number validation failed", 400);
+	}
+	let accessToken: string;
+	try {
+		accessToken = await encryptChannelToken(
+			input.accessToken,
+			env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+		);
+	} catch {
+		throw new ManageError("channel token encryption is unavailable", 503);
+	}
+
+	const now = new Date().toISOString();
+	const id = crypto.randomUUID();
+	const deletedChannel = await db
+		.select({ id: channels.id, createdAt: channels.createdAt })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "whatsapp_phone"),
+				eq(channels.externalId, phone.phoneNumberId),
+				eq(channels.status, "deleted"),
+			),
+		)
+		.get();
+	try {
+		if (deletedChannel) {
+			await env.DB.batch([
+				env.DB.prepare(`UPDATE channels SET display_name=?, access_token=?, refresh_token=NULL, token_expires_at=NULL, meta_app_id=?, status='active', updated_at=?
+					WHERE id=? AND workspace_id=? AND type='whatsapp_phone' AND external_id=? AND status='deleted'`).bind(
+					phone.displayName,
+					accessToken,
+					metaApp.id,
+					now,
+					deletedChannel.id,
+					workspaceId,
+					phone.phoneNumberId,
+				),
+				env.DB.prepare(
+					"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+				).bind(crypto.randomUUID(), inbox.id, deletedChannel.id),
+			]);
+		} else {
+			await env.DB.batch([
+				env.DB.prepare(`INSERT INTO channels (id,workspace_id,type,display_name,external_id,access_token,meta_app_id,status,created_at,updated_at)
+					VALUES (?,?,?,?,?,?,?,'active',?,?)`).bind(
+					id,
+					workspaceId,
+					"whatsapp_phone",
+					phone.displayName,
+					phone.phoneNumberId,
+					accessToken,
+					metaApp.id,
+					now,
+					now,
+				),
+				env.DB.prepare(
+					"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
+				).bind(crypto.randomUUID(), inbox.id, id),
+			]);
+		}
+	} catch {
+		throw new ManageError(
+			"a channel for this WhatsApp phone number already exists",
+			409,
+		);
+	}
+	return {
+		id: deletedChannel?.id ?? id,
+		type: "whatsapp_phone",
+		displayName: phone.displayName,
+		externalId: phone.phoneNumberId,
+		status: "active",
+		hasToken: true,
+		tokenExpiresAt: null,
+		createdAt: deletedChannel?.createdAt ?? now,
+		updatedAt: now,
+	};
+}
+
+export async function updateWhatsAppChannel(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	input: WhatsAppChannelUpdateRequest,
+	actorUserId: string,
+): Promise<ChannelSummary> {
+	const db = drizzle(env.DB);
+	await requireAdminAccess(db, workspaceId, actorUserId);
+	const existing = await db
+		.select()
+		.from(channels)
+		.where(
+			and(
+				eq(channels.id, id),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "whatsapp_phone"),
+				ne(channels.status, "deleted"),
+			),
+		)
+		.get();
+	if (!existing) throw new ManageError("WhatsApp channel not found", 404);
+	if (input.displayName === undefined && input.accessToken === undefined) {
+		throw new ManageError("displayName or accessToken is required", 400);
+	}
+	const set: Partial<typeof channels.$inferInsert> = {
+		updatedAt: new Date().toISOString(),
+	};
+	if (input.displayName !== undefined) set.displayName = input.displayName;
+	if (input.accessToken !== undefined) {
+		try {
+			await validateWhatsAppPhoneNumber(existing.externalId, input.accessToken);
+		} catch {
+			throw new ManageError("WhatsApp phone number validation failed", 400);
+		}
+		try {
+			set.accessToken = await encryptChannelToken(
+				input.accessToken,
+				env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+			);
+		} catch {
+			throw new ManageError("channel token encryption is unavailable", 503);
+		}
+	}
+	await db.update(channels).set(set).where(eq(channels.id, id)).run();
+	return {
+		id,
+		type: "whatsapp_phone",
+		displayName: set.displayName ?? existing.displayName,
+		externalId: existing.externalId,
+		status: existing.status,
+		hasToken: set.accessToken !== undefined || existing.accessToken !== null,
+		tokenExpiresAt: existing.tokenExpiresAt,
+		createdAt: existing.createdAt,
+		updatedAt: set.updatedAt ?? existing.updatedAt,
+	};
+}
+
+export async function deleteWhatsAppChannel(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireAdminAccess(db, workspaceId, actorUserId);
+	const channel = await db
+		.select({ id: channels.id })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.id, id),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "whatsapp_phone"),
+				ne(channels.status, "deleted"),
+			),
+		)
+		.get();
+	if (!channel) throw new ManageError("WhatsApp channel not found", 404);
+	await db.batch([
+		db.delete(inboxChannels).where(eq(inboxChannels.channelId, id)),
+		db
+			.update(channels)
+			.set({
+				accessToken: null,
+				refreshToken: null,
+				tokenExpiresAt: null,
+				metaAppId: null,
+				status: "deleted",
+				updatedAt: new Date().toISOString(),
+			})
+			.where(eq(channels.id, id)),
+	]);
+}
+
+export async function connectChannelToken(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	accessToken: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const channel = await db
+		.select({ id: channels.id })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.id, id),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "facebook_page"),
+			),
+		)
+		.get();
+	if (!channel) throw new ManageError("channel not found", 404);
+	const token = accessToken.trim();
+	if (!token) throw new ManageError("accessToken is required");
+	const page = await db
+		.select({ externalId: channels.externalId })
+		.from(channels)
+		.where(and(eq(channels.id, id), eq(channels.workspaceId, workspaceId)))
+		.get();
+	if (!page) throw new ManageError("channel not found", 404);
+	try {
+		await validateAndSubscribeFacebookPage(page.externalId, token);
+	} catch {
+		throw new ManageError(
+			"Facebook Page validation or subscription failed",
+			400,
+		);
+	}
+	let encryptedToken: string;
+	try {
+		encryptedToken = await encryptChannelToken(
+			token,
+			env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+		);
+	} catch {
+		throw new ManageError("channel token encryption is unavailable", 503);
+	}
+	await db
+		.update(channels)
+		.set({
+			accessToken: encryptedToken,
+			status: "active",
+			updatedAt: new Date().toISOString(),
+		})
+		.where(
+			and(
+				eq(channels.id, id),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "facebook_page"),
+			),
+		)
+		.run();
+}
+
+export async function disconnectChannel(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const channel = await db
+		.select({ id: channels.id, type: channels.type })
+		.from(channels)
+		.where(and(eq(channels.id, id), eq(channels.workspaceId, workspaceId)))
+		.get();
+	if (!channel) throw new ManageError("channel not found", 404);
+	if (channel.type !== "facebook_page" && channel.type !== "whatsapp_phone") {
+		throw new ManageError("this channel type cannot be disconnected", 409);
+	}
+	await db
+		.update(channels)
+		.set({
+			accessToken: null,
+			refreshToken: null,
+			tokenExpiresAt: null,
+			status: "disconnected",
+			updatedAt: new Date().toISOString(),
+		})
+		.where(and(eq(channels.id, id), eq(channels.workspaceId, workspaceId)))
+		.run();
+}
+
+/**
+ * Removes a Page from active configuration while retaining its historical
+ * conversations and timeline. A future re-connection can revive the identity.
+ */
+export async function deleteFacebookChannel(
+	env: Env,
+	workspaceId: string,
+	id: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const channel = await db
+		.select({ id: channels.id })
+		.from(channels)
+		.where(
+			and(
+				eq(channels.id, id),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "facebook_page"),
+				ne(channels.status, "deleted"),
+			),
+		)
+		.get();
+	if (!channel) throw new ManageError("Facebook Page channel not found", 404);
+	await db.batch([
+		db.delete(inboxChannels).where(eq(inboxChannels.channelId, id)),
+		db
+			.update(channels)
+			.set({
+				accessToken: null,
+				refreshToken: null,
+				tokenExpiresAt: null,
+				metaAppId: null,
+				status: "deleted",
+				updatedAt: new Date().toISOString(),
+			})
+			.where(eq(channels.id, id)),
+	]);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,16 +1307,30 @@ export async function listInboxes(
 	userId: string,
 ): Promise<InboxSummary[]> {
 	const db = drizzle(env.DB);
-	await requireWorkspaceAccess(db, workspaceId, userId);
+	const access = await requireWorkspaceAccess(db, workspaceId, userId);
+	const readableInboxIds = await getReadableInboxIds(db, workspaceId, userId);
+	const readableInboxIdSet = new Set(readableInboxIds);
 	const rows = await db
 		.select()
 		.from(inboxes)
-		.where(eq(inboxes.workspaceId, workspaceId))
+		.where(
+			access.isAdmin
+				? eq(inboxes.workspaceId, workspaceId)
+				: readableInboxIds.length > 0
+					? and(
+							eq(inboxes.workspaceId, workspaceId),
+							inArray(inboxes.id, readableInboxIds),
+						)
+					: sql`0`,
+		)
 		.orderBy(asc(inboxes.sortOrder), asc(inboxes.name))
 		.all();
 	if (rows.length === 0) return [];
 
 	const inboxIds = rows.map((row) => row.id);
+	const readableRowIds = rows
+		.filter((row) => readableInboxIdSet.has(row.id))
+		.map((row) => row.id);
 	const links = await db
 		.select({
 			inboxId: inboxChannels.inboxId,
@@ -656,20 +1343,24 @@ export async function listInboxes(
 		.innerJoin(channels, eq(inboxChannels.channelId, channels.id))
 		.where(inArray(inboxChannels.inboxId, inboxIds))
 		.all();
-	const members = await db
-		.select()
-		.from(inboxMembers)
-		.where(inArray(inboxMembers.inboxId, inboxIds))
-		.all();
-	const counts = await db
-		.select({
-			inboxId: conversations.inboxId,
-			count: sqlCount(),
-		})
-		.from(conversations)
-		.where(inArray(conversations.inboxId, inboxIds))
-		.groupBy(conversations.inboxId)
-		.all();
+	const members = readableRowIds.length
+		? await db
+				.select()
+				.from(inboxMembers)
+				.where(inArray(inboxMembers.inboxId, readableRowIds))
+				.all()
+		: [];
+	const counts = readableRowIds.length
+		? await db
+				.select({
+					inboxId: conversations.inboxId,
+					count: sqlCount(),
+				})
+				.from(conversations)
+				.where(inArray(conversations.inboxId, readableRowIds))
+				.groupBy(conversations.inboxId)
+				.all()
+		: [];
 	const teamRows = await db
 		.select({ id: teams.id, name: teams.name })
 		.from(teams)
@@ -697,24 +1388,39 @@ export async function listInboxes(
 	const countByInbox = new Map<string, number>();
 	for (const row of counts) countByInbox.set(row.inboxId, row.count ?? 0);
 
-	return rows.map((row) => ({
-		id: row.id,
-		name: row.name,
-		description: row.description,
-		color: row.color,
-		icon: row.icon,
-		teamId: row.teamId,
-		teamName: row.teamId ? (teamNameById.get(row.teamId) ?? null) : null,
-		sortOrder: row.sortOrder,
-		isArchived: row.isArchived,
-		assignmentStrategy: row.assignmentStrategy,
-		isDefault: (linksByInbox.get(row.id) ?? []).some((link) => link.isDefault),
-		channels: linksByInbox.get(row.id) ?? [],
-		memberIds: membersByInbox.get(row.id) ?? [],
-		conversationCount: countByInbox.get(row.id) ?? 0,
-		createdAt: row.createdAt,
-		updatedAtMs: row.updatedAt,
-	}));
+	return rows.map((row) => {
+		const summary = {
+			id: row.id,
+			parentInboxId: row.parentInboxId,
+			visibilityType: row.visibilityType,
+			treeVersion: row.treeVersion,
+			name: row.name,
+			description: row.description,
+			color: row.color,
+			icon: row.icon,
+			teamId: row.teamId,
+			teamName: row.teamId ? (teamNameById.get(row.teamId) ?? null) : null,
+			sortOrder: row.sortOrder,
+			isArchived: row.isArchived,
+			assignmentStrategy: row.assignmentStrategy,
+			isDefault: (linksByInbox.get(row.id) ?? []).some(
+				(link) => link.isDefault,
+			),
+			channels: linksByInbox.get(row.id) ?? [],
+			createdAt: row.createdAt,
+			updatedAtMs: row.updatedAt,
+		};
+		// Admins can configure every inbox, but configuration access is not
+		// conversation access. Do not disclose membership or traffic for an
+		// inbox outside their readable scope.
+		return readableInboxIdSet.has(row.id)
+			? {
+					...summary,
+					memberIds: membersByInbox.get(row.id) ?? [],
+					conversationCount: countByInbox.get(row.id) ?? 0,
+				}
+			: summary;
+	});
 }
 
 // SQL count helper (drizzle's count() needs an alias; this keeps the query flat).
@@ -916,32 +1622,11 @@ export async function deleteInbox(
 ): Promise<void> {
 	const db = drizzle(env.DB);
 	await requireAdminAccess(db, workspaceId, actorUserId);
-	const existing = await db
-		.select()
-		.from(inboxes)
-		.where(and(eq(inboxes.id, id), eq(inboxes.workspaceId, workspaceId)))
-		.get();
-	if (!existing) throw new ManageError("inbox not found", 404);
-
-	// Conversations in this inbox must re-route, never orphan (ADR 0008: the
-	// FK is NOT NULL with no ON DELETE). Re-home to the workspace's first
-	// remaining inbox, then remove links/members and the inbox itself.
-	const fallback = await db
-		.select()
-		.from(inboxes)
-		.where(eq(inboxes.workspaceId, workspaceId))
-		.all();
-	const target = fallback.find((row) => row.id !== id);
-	if (!target) throw new ManageError("cannot delete the last inbox", 409);
-
-	await db
-		.update(conversations)
-		.set({ inboxId: target.id, updatedAt: new Date().toISOString() })
-		.where(eq(conversations.inboxId, id))
-		.run();
-	await db.delete(inboxChannels).where(eq(inboxChannels.inboxId, id)).run();
-	await db.delete(inboxMembers).where(eq(inboxMembers.inboxId, id)).run();
-	await db.delete(inboxes).where(eq(inboxes.id, id)).run();
+	void id;
+	throw new ManageError(
+		"inbox deletion is disabled: archive the inbox or explicitly transfer its conversations first",
+		409,
+	);
 }
 
 /**
@@ -1128,9 +1813,8 @@ export async function setDefaultInbox(
 }
 
 /**
- * Shared admin ordering: rewrite sort_order across the given inbox ids.
- * Accepts the full ordered list of workspace inboxes; unknown ids or ids from
- * another workspace are rejected so sort_order never goes stale.
+ * Shared admin ordering for ordinary inboxes. This is navigation state only:
+ * system inboxes are immutable, and sort_order rewrites never touch updated_at.
  */
 export async function reorderInboxes(
 	env: Env,
@@ -1144,43 +1828,219 @@ export async function reorderInboxes(
 		throw new ManageError("inboxIds is required");
 	}
 	const rows = await db
-		.select({ id: inboxes.id, sortOrder: inboxes.sortOrder })
+		.select({
+			id: inboxes.id,
+			sortOrder: inboxes.sortOrder,
+			visibilityType: inboxes.visibilityType,
+		})
 		.from(inboxes)
 		.where(eq(inboxes.workspaceId, workspaceId))
 		.all();
-	const validIds = new Set(rows.map((row) => row.id));
+	const byId = new Map(rows.map((row) => [row.id, row]));
 	const seen = new Set<string>();
 	for (const id of inboxIds) {
-		if (!validIds.has(id)) {
+		const row = byId.get(id);
+		if (!row) {
 			throw new ManageError("inbox does not belong to this workspace", 404);
+		}
+		if (row.visibilityType === "system") {
+			throw new ManageError("system inboxes cannot be reordered", 403);
 		}
 		if (seen.has(id)) throw new ManageError("duplicate inboxId in reorder");
 		seen.add(id);
 	}
 	// Partial orders are allowed: listed ids take 0..n in the given order, then
-	// every untouched inbox is appended after them in its current order — so a
-	// group-level drag never collides with (or silently demotes) the rest.
+	// every untouched inbox is appended after them in its current order. Reject a
+	// partial order if that derived sequence would alter a system inbox: system
+	// rows are never included in updates, directly or implicitly.
 	const remaining = rows
 		.filter((row) => !seen.has(row.id))
-		.sort((a, b) => a.sortOrder - b.sortOrder || (a.id < b.id ? -1 : 1));
-	const nowMs = Date.now();
-	const updates = [
-		...inboxIds.map((id, index) =>
-			db
-				.update(inboxes)
-				.set({ sortOrder: index, updatedAt: nowMs })
-				.where(eq(inboxes.id, id)),
-		),
-		...remaining.map((row, index) =>
-			db
-				.update(inboxes)
-				.set({ sortOrder: inboxIds.length + index, updatedAt: nowMs })
-				.where(eq(inboxes.id, row.id)),
-		),
-	];
-	await db.batch(
-		updates as unknown as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]],
+		.sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+	const orderedIds = [...inboxIds, ...remaining.map((row) => row.id)];
+	for (const [index, id] of orderedIds.entries()) {
+		const row = byId.get(id);
+		if (row?.visibilityType === "system" && row.sortOrder !== index) {
+			throw new ManageError(
+				"reorder would change a system inbox sort order",
+				409,
+			);
+		}
+	}
+	const updates = orderedIds.flatMap((id, sortOrder) => {
+		const row = byId.get(id);
+		if (!row || row.visibilityType === "system" || row.sortOrder === sortOrder)
+			return [];
+		return [db.update(inboxes).set({ sortOrder }).where(eq(inboxes.id, id))];
+	});
+	if (updates.length) {
+		await db.batch(
+			updates as unknown as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]],
+		);
+	}
+}
+
+export interface MoveInboxInTreeInput {
+	inboxId: string;
+	parentInboxId: string | null;
+	expectedTreeVersion: number;
+	sortOrder?: number;
+}
+
+/**
+ * Navigation-only structural move. This intentionally has no HTTP route yet:
+ * callers must opt into the internal optimistic version contract. One guarded
+ * D1 statement changes only parent/sibling order and the moved row's tree_version.
+ */
+export async function moveInboxInTree(
+	env: Env,
+	workspaceId: string,
+	input: MoveInboxInTreeInput,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireAdminAccess(db, workspaceId, actorUserId);
+	if (
+		!Number.isInteger(input.expectedTreeVersion) ||
+		input.expectedTreeVersion < 0
+	) {
+		throw new ManageError("expectedTreeVersion must be a non-negative integer");
+	}
+	if (
+		input.sortOrder !== undefined &&
+		(!Number.isInteger(input.sortOrder) || input.sortOrder < 0)
+	) {
+		throw new ManageError("sortOrder must be a non-negative integer");
+	}
+	const source = await db
+		.select()
+		.from(inboxes)
+		.where(
+			and(eq(inboxes.id, input.inboxId), eq(inboxes.workspaceId, workspaceId)),
+		)
+		.get();
+	if (!source) throw new ManageError("inbox not found", 404);
+	if (source.visibilityType === "system") {
+		throw new ManageError("system inboxes cannot be moved", 403);
+	}
+	// This fast path makes a known stale request fail before calculating or
+	// issuing any sibling updates. The conditional update below remains the
+	// concurrency guard between this read and the atomic D1 batch.
+	if (source.treeVersion !== input.expectedTreeVersion) {
+		throw new ManageError("inbox tree version is stale", 409);
+	}
+	await assertValidInboxParent(
+		db,
+		workspaceId,
+		input.inboxId,
+		input.parentInboxId,
 	);
+	const rows = await db
+		.select({
+			id: inboxes.id,
+			parentInboxId: inboxes.parentInboxId,
+			sortOrder: inboxes.sortOrder,
+			visibilityType: inboxes.visibilityType,
+		})
+		.from(inboxes)
+		.where(eq(inboxes.workspaceId, workspaceId))
+		.all();
+	const children = new Map<string, string[]>();
+	for (const row of rows) {
+		if (row.parentInboxId !== null) {
+			children.set(row.parentInboxId, [
+				...(children.get(row.parentInboxId) ?? []),
+				row.id,
+			]);
+		}
+	}
+	const subtreeIds = new Set<string>();
+	const collectSubtree = (id: string) => {
+		if (subtreeIds.has(id)) return;
+		subtreeIds.add(id);
+		for (const childId of children.get(id) ?? []) collectSubtree(childId);
+	};
+	collectSubtree(source.id);
+	if (
+		rows.some(
+			(row) => subtreeIds.has(row.id) && row.visibilityType === "system",
+		)
+	) {
+		throw new ManageError(
+			"inbox trees containing system inboxes cannot be moved",
+			409,
+		);
+	}
+	const oldSiblings = rows
+		.filter(
+			(row) =>
+				row.parentInboxId === source.parentInboxId && row.id !== source.id,
+		)
+		.sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+	const newSiblings = rows
+		.filter(
+			(row) =>
+				row.parentInboxId === input.parentInboxId && row.id !== source.id,
+		)
+		.sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+	const position = Math.max(
+		0,
+		Math.min(input.sortOrder ?? newSiblings.length, newSiblings.length),
+	);
+	newSiblings.splice(position, 0, {
+		id: source.id,
+		parentInboxId: input.parentInboxId,
+		sortOrder: position,
+		visibilityType: source.visibilityType,
+	});
+	const orderUpdates = new Map<string, number>();
+	for (const [index, row] of oldSiblings.entries())
+		orderUpdates.set(row.id, index);
+	for (const [index, row] of newSiblings.entries())
+		orderUpdates.set(row.id, index);
+	const orderedUpdates = Array.from(orderUpdates.entries());
+	const rowsById = new Map(rows.map((row) => [row.id, row]));
+	for (const [id, sortOrder] of orderedUpdates) {
+		const row = rowsById.get(id);
+		if (row?.visibilityType === "system" && row.sortOrder !== sortOrder) {
+			throw new ManageError("move would change a system inbox sort order", 409);
+		}
+	}
+	const sourceGuard =
+		"EXISTS (SELECT 1 FROM inboxes guarded WHERE guarded.id = ? AND guarded.workspace_id = ? AND guarded.tree_version = ?)";
+	// D1 cannot make a conditional batch depend on the preceding statement's
+	// affected-row count. A single guarded UPDATE makes the source version check
+	// and every sibling rewrite atomic, so a source that became stale after the
+	// reads above cannot reorder siblings. This deliberately does not touch
+	// updated_at: tree placement is navigation state, not inbox content.
+	const sortOrderCases = orderedUpdates.map(() => "WHEN ? THEN ?").join(" ");
+	const targetPlaceholders = orderedUpdates.map(() => "?").join(", ");
+	const result = await env.DB.prepare(
+		`UPDATE inboxes
+			 SET parent_inbox_id = CASE id WHEN ? THEN ? ELSE parent_inbox_id END,
+			     sort_order = CASE id ${sortOrderCases} ELSE sort_order END,
+			     tree_version = CASE
+			       WHEN id = ? THEN tree_version + 1
+			       WHEN sort_order != CASE id ${sortOrderCases} ELSE sort_order END THEN tree_version + 1
+			       ELSE tree_version
+			     END
+			 WHERE workspace_id = ? AND id IN (${targetPlaceholders}) AND ${sourceGuard}`,
+	)
+		.bind(
+			source.id,
+			input.parentInboxId,
+			...orderedUpdates.flat(),
+			source.id,
+			...orderedUpdates.flat(),
+			workspaceId,
+			...orderedUpdates.map(([id]) => id),
+			source.id,
+			workspaceId,
+			input.expectedTreeVersion,
+		)
+		.run();
+	if ((result.meta.changes ?? 0) !== orderedUpdates.length) {
+		throw new ManageError("inbox tree version is stale", 409);
+	}
 }
 
 export async function joinInbox(

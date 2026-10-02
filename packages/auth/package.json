@@ -11,7 +11,8 @@
 	},
 	"scripts": {
 		"build": "tsc",
-		"dev": "tsc --watch"
+		"dev": "tsc --watch",
+		"test": "bun test src/username-policy.test.ts"
 	},
 	"dependencies": {
 		"@msgflow/db": "workspace:*",

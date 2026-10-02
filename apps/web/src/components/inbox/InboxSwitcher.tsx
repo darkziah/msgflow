@@ -8,14 +8,16 @@ import { cn } from "@/lib/utils";
  */
 export function InboxSwitcher({
 	inboxId,
+	workspaceId,
 	onChange,
 }: {
 	inboxId?: string;
+	workspaceId: string;
 	onChange: (inboxId: string | undefined) => void;
 }) {
 	const { data } = useQuery({
-		queryKey: ["inboxes"],
-		queryFn: () => api.listInboxes(),
+		queryKey: ["inboxes", workspaceId],
+		queryFn: () => api.workspaceListInboxes(workspaceId),
 	});
 
 	// Single-tenant bootstrap: every agent sees every inbox. When membership

@@ -15,8 +15,9 @@
 	},
 	"scripts": {
 		"build": "tsc",
-		"dev": "wrangler dev",
+		"dev": "wrangler dev --port 8787 --var MESSENGER_APP_SECRET:test-secret --var MESSENGER_VERIFY_TOKEN:test-verify --var BETTER_AUTH_SECRET:msgflow-local-dev-secret-change-me-32 --var BETTER_AUTH_URL:http://localhost:8787 --var BETTER_AUTH_TRUSTED_ORIGINS:http://localhost:5173,http://localhost:5174 --var AUTH_EMAIL_FROM:auth@example.test --var CHANNEL_TOKEN_ENCRYPTION_KEY:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		"deploy": "wrangler deploy",
+		"deploy:dev": "bun --env-file=.env.deploy.local x wrangler deploy --config wrangler.dev.toml --keep-vars",
 		"type-check": "tsc --noEmit",
 		"test": "bun test",
 		"smoke": "bun scripts/smoke.ts",
@@ -27,8 +28,13 @@
 		"@msgflow/contracts": "workspace:*",
 		"@msgflow/db": "workspace:*",
 		"drizzle-orm": "^0.45.2",
+		"effect": "^3.22.2",
 		"hono": "^4.10.8",
-		"postal-mime": "^3.0.0"
+		"postal-mime": "^3.0.0",
+		"rehype-parse": "^9.0.1",
+		"rehype-sanitize": "^6.0.0",
+		"rehype-stringify": "^10.0.1",
+		"unified": "^11.0.5"
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^5.20260918.1",

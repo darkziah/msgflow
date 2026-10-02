@@ -5,10 +5,16 @@ export const user = sqliteTable("user", {
 	id: text("id").primaryKey(),
 	name: text("name").notNull(),
 	email: text("email").notNull().unique(),
+	// Nullable only during the existing-account transition. SQLite migration 0010
+	// permits one valid NULL -> username assignment and rejects later changes.
+	username: text("username").unique(),
 	emailVerified: integer("email_verified", { mode: "boolean" })
 		.default(false)
 		.notNull(),
 	image: text("image"),
+	onboardingTourCompletedAt: integer("onboarding_tour_completed_at", {
+		mode: "timestamp_ms",
+	}),
 	createdAt: integer("created_at", { mode: "timestamp_ms" })
 		.default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
 		.notNull(),

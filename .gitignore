@@ -45,3 +45,5 @@ bun.lockb
 # Cloudflare local dev state
 .wrangler
 apps/worker/.wrangler
+apps/worker/wrangler.deploy.toml
+apps/worker/wrangler.msgflow-worker.toml

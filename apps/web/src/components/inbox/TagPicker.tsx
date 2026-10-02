@@ -1,9 +1,15 @@
 import type { TagSummary } from "@msgflow/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
 import { Tag as TagIcon } from "lucide-react";
-import { api } from "@/lib/api";
+import { useCallback, useEffect } from "react";
 import { Button } from "@/components/ui/button";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@/components/ui/popover";
+import { api } from "@/lib/api";
+import { invalidateWorkspaceConversationViews } from "@/lib/sidebar-live-update";
 import { TagChip } from "./TagChip";
 
 /**
@@ -12,37 +18,44 @@ import { TagChip } from "./TagChip";
  */
 export function TagPicker({
 	conversationId,
+	workspaceId,
 	tags,
+	open,
+	onOpenChange,
+	onOpenRequestChange,
 }: {
 	conversationId: string;
+	workspaceId: string;
 	tags: TagSummary[];
+	open?: boolean;
+	onOpenChange?: (open: boolean) => void;
+	onOpenRequestChange?: (open: (() => boolean) | null) => void;
 }) {
 	const queryClient = useQueryClient();
-	const [open, setOpen] = useState(false);
 
 	const { data: tagsData } = useQuery({
-		queryKey: ["tags"],
-		queryFn: () => api.listTags(),
+		queryKey: ["tags", workspaceId],
+		queryFn: () => api.listTags(workspaceId),
 	});
 
 	const { mutate: addTag, isPending: adding } = useMutation({
 		mutationFn: (tagId: string) =>
-			api.addConversationTag(conversationId, tagId),
+			api.addConversationTag(workspaceId, conversationId, tagId),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["conversation", conversationId],
+				queryKey: ["conversation", workspaceId, conversationId],
 			});
-			queryClient.invalidateQueries({ queryKey: ["conversations"] });
+			invalidateWorkspaceConversationViews(queryClient, workspaceId);
 		},
 	});
 	const { mutate: removeTag } = useMutation({
 		mutationFn: (tagId: string) =>
-			api.removeConversationTag(conversationId, tagId),
+			api.removeConversationTag(workspaceId, conversationId, tagId),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["conversation", conversationId],
+				queryKey: ["conversation", workspaceId, conversationId],
 			});
-			queryClient.invalidateQueries({ queryKey: ["conversations"] });
+			invalidateWorkspaceConversationViews(queryClient, workspaceId);
 		},
 	});
 
@@ -50,47 +63,60 @@ export function TagPicker({
 	const available = (tagsData?.tags ?? []).filter(
 		(tag) => !attached.has(tag.id),
 	);
+	const requestOpen = useCallback(() => {
+		if (adding) return false;
+		onOpenChange?.(true);
+		return Boolean(onOpenChange);
+	}, [adding, onOpenChange]);
+	useEffect(() => {
+		onOpenRequestChange?.(requestOpen);
+		return () => onOpenRequestChange?.(null);
+	}, [onOpenRequestChange, requestOpen]);
 
 	return (
-		<div className="relative">
+		<Popover open={open} onOpenChange={onOpenChange}>
 			<div className="flex items-center gap-1">
 				{tags.map((tag) => (
 					<TagChip key={tag.id} tag={tag} onRemove={() => removeTag(tag.id)} />
 				))}
-				<Button
-					variant="ghost"
-					size="sm"
-					disabled={adding}
-					onClick={() => setOpen((prev) => !prev)}
-					className="gap-1 text-xs text-gray-500"
-				>
-					<TagIcon className="size-3.5" />
-					Tag
-				</Button>
+				<PopoverTrigger asChild>
+					<Button
+						type="button"
+						variant="ghost"
+						size="sm"
+						disabled={adding}
+						className="gap-1 text-xs text-muted-foreground"
+					>
+						<TagIcon className="size-3.5" />
+						Tag
+					</Button>
+				</PopoverTrigger>
 			</div>
-			{open ? (
-				<div className="absolute right-0 z-20 mt-1 w-48 rounded-md border bg-white p-1 shadow-lg">
-					{available.length === 0 ? (
-						<p className="px-2 py-1.5 text-xs text-gray-400">
-							{tags.length === 0
-								? "No tags yet — create them in Settings."
-								: "All tags are already applied."}
-						</p>
-					) : (
-						available.map((tag) => (
-							<button
-								key={tag.id}
-								type="button"
-								disabled={adding}
-								onClick={() => addTag(tag.id)}
-								className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent disabled:opacity-50"
-							>
-								<TagChip tag={tag} />
-							</button>
-						))
-					)}
-				</div>
-			) : null}
-		</div>
+			<PopoverContent
+				aria-label="Add a tag"
+				align="end"
+				className="w-48 p-1"
+			>
+				{available.length === 0 ? (
+					<p className="px-2 py-1.5 text-xs text-muted-foreground">
+						{tags.length === 0
+							? "No tags yet — create them in Settings."
+							: "All tags are already applied."}
+					</p>
+				) : (
+					available.map((tag) => (
+						<button
+							key={tag.id}
+							type="button"
+							disabled={adding}
+							onClick={() => addTag(tag.id)}
+							className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent disabled:opacity-50"
+						>
+							<TagChip tag={tag} />
+						</button>
+					))
+				)}
+			</PopoverContent>
+		</Popover>
 	);
 }

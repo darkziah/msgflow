@@ -4,31 +4,60 @@ import {
 	Outlet,
 	useRouter,
 } from "@tanstack/react-router";
-import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { useSession } from "@/lib/auth-client";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 export const Route = createRootRoute({
 	component: Root,
 });
 
+function pageTitle(pathname: string): string {
+	if (pathname === "/login") return "Sign in";
+	if (pathname === "/setup") return "Set up MsgFlow";
+	if (pathname === "/settings") return "Settings";
+	if (pathname === "/rules") return "Rules and canned replies";
+	if (pathname === "/facebook") return "MsgFlow for Messenger";
+	if (pathname === "/facebook/privacy") return "Privacy Policy";
+	if (pathname === "/facebook/terms") return "Terms of Service";
+	return "Shared inbox";
+}
+
 function Root() {
 	const router = useRouter();
 	const { data: session, isPending } = useSession();
+	const cache = useQueryClient();
+	const identity = session?.user.id ?? null;
+	const [cacheOwner, setCacheOwner] = useState<string | null | undefined>(undefined);
+	const pathname = router.state.location.pathname;
+	useEffect(() => {
+		document.title = `${pageTitle(pathname)} · MsgFlow`;
+	}, [pathname]);
+	useEffect(() => {
+		if (isPending || cacheOwner === identity) return;
+		cache.clear();
+		setCacheOwner(identity);
+	}, [cache, cacheOwner, identity, isPending]);
 
-	if (isPending) {
+	if (isPending || cacheOwner !== identity) {
 		return (
-			<div className="flex min-h-screen items-center justify-center text-sm text-gray-400">
+			<div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
 				Loading…
 			</div>
 		);
 	}
-	if (!session && router.state.location.pathname !== "/login") {
+	if (
+		!session &&
+		!["/login", "/setup", "/facebook", "/facebook/privacy", "/facebook/terms"].includes(
+			router.state.location.pathname,
+		)
+	) {
 		return <Navigate to="/login" />;
 	}
 	return (
-		<>
-			<Outlet />
-			<TanStackRouterDevtools />
-		</>
+		<TooltipProvider>
+			<Outlet key={identity ?? "anonymous"} />
+		</TooltipProvider>
 	);
 }

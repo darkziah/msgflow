@@ -1,3 +1,12 @@
+import type { ConversationSummary, TagSummary } from "@msgflow/contracts";
+import {
+	channels,
+	contacts,
+	conversationReads,
+	conversations,
+	conversationTags,
+	tags,
+} from "@msgflow/db";
 import {
 	and,
 	desc,
@@ -13,16 +22,10 @@ import {
 	sql,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { ConversationSummary, TagSummary } from "@msgflow/contracts";
-import {
-	channels,
-	contacts,
-	conversationReads,
-	conversationTags,
-	conversations,
-	tags,
-} from "@msgflow/db";
+import { canReadConversation } from "./conversation-permissions";
+import { getMailboxAccessByAddress } from "./email-transport";
 import type { Env } from "./env";
+import { getInboxDescendantIds, getReadableInboxIds } from "./inbox-tree";
 
 // Fields shared by the list and single-conversation queries. The unread count
 // (ADR 0015) is computed per agent: unread = message_count − last_read_seq.
@@ -31,6 +34,7 @@ const conversationColumns = {
 	channelId: conversations.channelId,
 	channelType: channels.type,
 	channelDisplayName: channels.displayName,
+	channelExternalId: channels.externalId,
 	inboxId: conversations.inboxId,
 	subject: conversations.subject,
 	status: conversations.status,
@@ -51,8 +55,9 @@ const conversationColumns = {
 interface ConversationRow {
 	id: string;
 	channelId: string;
-	channelType: "facebook_page" | "email";
+	channelType: "facebook_page" | "email" | "whatsapp_phone";
 	channelDisplayName: string;
+	channelExternalId: string;
 	inboxId: string;
 	subject: string | null;
 	status: "open" | "archived";
@@ -76,7 +81,12 @@ function toSummary(
 ): ConversationSummary {
 	return {
 		id: row.id,
-		channel: row.channelType === "facebook_page" ? "facebook" : "email",
+		channel:
+			row.channelType === "facebook_page"
+				? "facebook"
+				: row.channelType === "whatsapp_phone"
+					? "whatsapp"
+					: "email",
 		channelId: row.channelId,
 		channelDisplayName: row.channelDisplayName,
 		inboxId: row.inboxId,
@@ -102,8 +112,11 @@ function toSummary(
 
 /** Faceted search filters (ADR 0013): q, assignee, channel, tag, date range. */
 export interface ConversationListOptions {
+	mailboxId?: string;
 	status?: "open" | "archived" | "all";
 	inboxId?: string;
+	/** A tree-node selection resolved server-side; clients never submit id arrays. */
+	inboxScope?: "exact" | "descendants";
 	/** Free text: contact name/email, subject, last-message preview. */
 	q?: string;
 	assigneeId?: string;
@@ -111,8 +124,10 @@ export interface ConversationListOptions {
 	unassigned?: boolean;
 	/** Open conversations snoozed until the future (sidebar "Snoozed" queue). */
 	snoozed?: boolean;
-	channel?: "facebook" | "email";
+	channel?: "facebook" | "email" | "whatsapp";
+	channelId?: string;
 	tagId?: string;
+	savedViewId?: string;
 	/** ISO date range bound on lastMessageAt (inclusive). */
 	dateFrom?: string;
 	dateTo?: string;
@@ -127,26 +142,70 @@ export async function listConversations(
 	env: Env,
 	agentId: string,
 	opts: ConversationListOptions = {},
+	workspaceId?: string,
 ): Promise<ConversationSummary[]> {
 	const db = drizzle(env.DB);
+	if (!workspaceId) return [];
+	const readableInboxIds = await getReadableInboxIds(db, workspaceId, agentId);
+	const readableInboxSet = new Set(readableInboxIds);
+	let scopedInboxIds = readableInboxIds;
+	if (opts.inboxId) {
+		// A guessed, foreign, or inaccessible node has the same empty result as an
+		// empty filter, so list selection cannot reveal hierarchy membership.
+		if (!readableInboxSet.has(opts.inboxId)) return [];
+		scopedInboxIds =
+			opts.inboxScope === "descendants"
+				? await getInboxDescendantIds(
+						db,
+						workspaceId,
+						opts.inboxId,
+						readableInboxSet,
+					)
+				: [opts.inboxId];
+	}
 	const q = opts.q?.trim();
+	const now = new Date().toISOString();
+	// Future-snoozed open conversations belong exclusively to the Snoozed
+	// virtual queue. Archived conversations remain discoverable even if they
+	// retain a stale snooze timestamp.
+	const visibleOutsideSnoozedQueue = or(
+		eq(conversations.status, "archived"),
+		isNull(conversations.snoozedUntil),
+		lte(conversations.snoozedUntil, now),
+	);
 	const conditions = [
+		scopedInboxIds.length
+			? inArray(conversations.inboxId, scopedInboxIds)
+			: sql`0`,
+		opts.mailboxId
+			? sql`EXISTS (SELECT 1 FROM mailboxes m WHERE m.id = ${opts.mailboxId} AND m.workspace_id = ${conversations.workspaceId} AND m.canonical_address = ${channels.externalId} AND ${channels.type} = 'email')`
+			: undefined,
+		workspaceId ? eq(conversations.workspaceId, workspaceId) : undefined,
 		opts.status && opts.status !== "all"
 			? eq(conversations.status, opts.status)
 			: undefined,
-		opts.inboxId ? eq(conversations.inboxId, opts.inboxId) : undefined,
 		opts.assigneeId ? eq(conversations.assigneeId, opts.assigneeId) : undefined,
 		opts.unassigned ? isNull(conversations.assigneeId) : undefined,
 		opts.snoozed
 			? and(
 					eq(conversations.status, "open"),
-					gt(conversations.snoozedUntil, new Date().toISOString()),
+					gt(conversations.snoozedUntil, now),
 				)
-			: undefined,
+			: visibleOutsideSnoozedQueue,
 		opts.channel
 			? eq(
 					channels.type,
-					opts.channel === "facebook" ? "facebook_page" : "email",
+					({
+						facebook: "facebook_page",
+						email: "email",
+						whatsapp: "whatsapp_phone",
+					} as const)[opts.channel],
+				)
+			: undefined,
+		opts.channelId
+			? and(
+					eq(conversations.channelId, opts.channelId),
+					eq(channels.workspaceId, workspaceId),
 				)
 			: undefined,
 		opts.tagId
@@ -194,11 +253,19 @@ export async function listConversations(
 		.limit(200)
 		.all();
 
+	const visibleRows = await filterMailboxAccess(
+		env,
+		agentId,
+		workspaceId,
+		rows,
+	);
 	const tagsByConversation = await loadTagsForConversations(
 		db,
-		rows.map((row) => row.id),
+		visibleRows.map((row) => row.id),
 	);
-	return rows.map((row) => toSummary(row, tagsByConversation[row.id] ?? []));
+	return visibleRows.map((row) =>
+		toSummary(row, tagsByConversation[row.id] ?? []),
+	);
 }
 
 /** Single conversation (metadata + contact + agent unread) or null. */
@@ -206,6 +273,7 @@ export async function getConversation(
 	env: Env,
 	agentId: string,
 	id: string,
+	workspaceId?: string,
 ): Promise<ConversationSummary | null> {
 	const db = drizzle(env.DB);
 	const row = await db
@@ -220,12 +288,46 @@ export async function getConversation(
 				eq(conversationReads.agentId, agentId),
 			),
 		)
-		.where(eq(conversations.id, id))
+		.where(
+			workspaceId
+				? and(
+						eq(conversations.id, id),
+						eq(conversations.workspaceId, workspaceId),
+					)
+				: eq(conversations.id, id),
+		)
 		.get();
 
 	if (!row) return null;
+	if (!(await canReadConversation(env, agentId, id, workspaceId))) return null;
 	const tagsByConversation = await loadTagsForConversations(db, [row.id]);
 	return toSummary(row, tagsByConversation[row.id] ?? []);
+}
+
+/**
+ * Inbox scope is already enforced in the list SQL. Email rows additionally
+ * intersect that scope with mailbox policy in a fixed number of queries.
+ */
+async function filterMailboxAccess(
+	env: Env,
+	userId: string,
+	workspaceId: string,
+	rows: ConversationRow[],
+): Promise<ConversationRow[]> {
+	const mailboxAccess = await getMailboxAccessByAddress(
+		env,
+		workspaceId,
+		rows
+			.filter((row) => row.channelType === "email")
+			.map((row) => row.channelExternalId),
+		userId,
+	);
+	return rows.filter(
+		(row) =>
+			row.channelType !== "email" ||
+			!mailboxAccess.has(row.channelExternalId) ||
+			mailboxAccess.get(row.channelExternalId) === true,
+	);
 }
 
 /** Tags attached to the given conversations, keyed by conversation id. */

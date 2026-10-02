@@ -1,4 +1,11 @@
-import type { Channel } from "@msgflow/contracts";
+import type { Attachment, Channel } from "@msgflow/contracts";
+
+/** A provider-hosted image which the Worker must copy into durable storage. */
+export interface ProviderImageAttachment {
+	type: "image";
+	url: string;
+	name?: string;
+}
 
 /**
  * A canonical inbound message, already channel-agnostic, ready to be routed
@@ -11,8 +18,14 @@ export interface NormalizedInbound {
 	providerMessageId: string | null;
 	senderId: string;
 	text: string;
+	/** Server-sanitized formatted email body; absent for chat channels. */
+	html?: string;
 	createdAt: string;
 	payload: unknown;
+	/** Durable R2-backed images, populated before routeInbound appends the message. */
+	attachments: Attachment[];
+	/** Provider-hosted images awaiting Worker-side copy to R2. */
+	providerAttachments?: ProviderImageAttachment[];
 }
 
 export interface OutboundMessage {
@@ -21,6 +34,15 @@ export interface OutboundMessage {
 	text: string;
 	/** Email only: the subject line to send with. */
 	subject?: string;
+	/** Stable client key, used by providers that support request idempotency. */
+	idempotencyKey?: string;
+	/**
+	 * Set only for a live reply written by an authenticated support agent after
+	 * the standard Messenger window has elapsed. Scheduled/automated sends must
+	 * never set this because Meta's HUMAN_AGENT tag is manual-support only.
+	 */
+	humanAgent?: boolean;
+	attachments?: Attachment[];
 }
 
 /**
@@ -31,6 +53,11 @@ export interface OutboundMessage {
 export interface OutboundContext {
 	/** Facebook: the Page access token for the conversation's Page. */
 	pageAccessToken?: string;
+	/** WhatsApp Cloud API credentials for the conversation's receiving number. */
+	whatsapp?: {
+		accessToken: string;
+		phoneNumberId: string;
+	};
 	/** Email: the conversation's own mailbox (From address, e.g. support@yehey.com). */
 	from?: string;
 	/** Email: root thread key (RFC 822 Message-ID) for In-Reply-To/References. */
@@ -39,7 +66,29 @@ export interface OutboundContext {
 	 * Email: structural wrapper around the Worker's SendEmail binding, so this
 	 * package stays environment-neutral (no Cloudflare types here).
 	 */
-	emailSender?: { send(from: string, to: string, raw: string): Promise<void> };
+	emailSender?: {
+		send(message: StructuredEmail): Promise<{ messageId: string }>;
+	};
+	inReplyTo?: string;
+	references?: string[];
+	/** Structural R2 reader supplied by the Worker; no Worker types leak here. */
+	attachmentReader?: {
+		read(attachment: Attachment): Promise<ArrayBuffer | null>;
+	};
+}
+
+export interface StructuredEmail {
+	from: string;
+	to: string;
+	subject: string;
+	text: string;
+	headers: Record<string, string>;
+	attachments: {
+		content: ArrayBuffer;
+		filename: string;
+		type: string;
+		disposition: "attachment";
+	}[];
 }
 
 export interface ProviderSendResult {
@@ -47,6 +96,8 @@ export interface ProviderSendResult {
 	providerMessageId: string | null;
 	/** Human-readable provider error when ok is false. */
 	error?: string;
+	/** An ambiguous transport failure may have reached the provider; never retry it blindly. */
+	failureKind?: "definitive" | "uncertain";
 }
 
 export interface ChannelAdapter {

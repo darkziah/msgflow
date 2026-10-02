@@ -1,26 +1,66 @@
-name = "msgflow-worker"
+name = "msgflow"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# The production Worker serves the Vite build at its custom domain. Keep the
+# public app generic: the hostname is attached at deploy time, not committed.
+[assets]
+directory = "../web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/health", "/webhooks/*", "/ws", "/ws/calling"]
+
 [observability]
 enabled = true
+
+# Deployment-specific account ID, D1 ID, public origins, hostnames, and sender
+# address belong in an uncommitted operator configuration. See
+# docs/runbooks/deploy-msgflow-cloudflare.md.
 
 [[d1_databases]]
 binding = "DB"
 database_name = "msgflow"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+# Placeholder only: replace in an uncommitted operator configuration.
+database_id = "00000000-0000-0000-0000-000000000000"
 
 [[durable_objects.bindings]]
 name = "CONVERSATION_DO"
 class_name = "ConversationDO"
 
+[[durable_objects.bindings]]
+name = "CALL_DISPATCH_DO"
+class_name = "CallDispatchDO"
+
+[[durable_objects.bindings]]
+name = "CALL_SESSION_DO"
+class_name = "CallSessionDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ConversationDO"]
 
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CallDispatchDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["CallSessionDO"]
+
 [[send_email]]
 name = "EMAIL"
+
+# Public Messenger-image bucket. Its custom domain is an operator-managed
+# non-secret runtime variable, not a hard-coded application setting.
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "msgflow-attachments"
+
+# Private email raw-MIME/attachment archive (ADR 0021). This must never have a
+# public custom domain or share the Messenger attachment bucket.
+[[r2_buckets]]
+binding = "EMAIL_ARCHIVE"
+bucket_name = "msgflow-email-archive"
 
 # Send-later: every minute, delivers due scheduled_messages rows (ADR 0013).
 [triggers]
@@ -31,3 +71,6 @@ crons = ["* * * * *"]
 
 # Auth: BETTER_AUTH_SECRET is set via `wrangler secret put` (or .dev.vars locally);
 # BETTER_AUTH_URL is the Worker's public base URL. See apps/worker/.dev.vars.example.
+# Set ATTACHMENT_PUBLIC_BASE_URL as a non-secret Worker runtime variable at
+# deploy time. It must be the public custom domain serving ATTACHMENTS and must
+# not end with '/'.

@@ -1,22 +1,40 @@
 import { DurableObject } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
-import { conversations, messagesSummary } from "@msgflow/db";
 import type {
+	Activity,
 	Comment,
 	ConversationEvent,
 	Message,
 	PresenceEntry,
 } from "@msgflow/contracts";
+import {
+	CallActivityDetailsSchema,
+	ConversationUpdatedEventSchema,
+	TimelineActivityDetailsSchema,
+	TimelineActivitySchema,
+	TimelineAttachmentsSchema,
+	TimelineCommentSchema,
+	TimelineMentionsSchema,
+	TimelineMessageSchema,
+	TimelinePayloadSchema,
+	WebSocketClientEventSchema,
+} from "@msgflow/contracts";
+import { conversations, messagesSummary } from "@msgflow/db";
+import { and, eq, lte } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+import { Either, Schema } from "effect";
+import { isCallActivity, isCallActivityAction } from "./activity";
+import { canReadConversation } from "./conversation-permissions";
 import type { Env } from "./env";
+import { decodeJsonBody } from "./validation";
 
 interface WebSocketAttachment {
 	agentId: string;
+	conversationId: string;
 }
 
 /**
- * One ConversationDO per conversation. Owns the live Message/Comment timeline
- * (authoritative), holds connected agent WebSockets (Hibernation API), and
+ * One ConversationDO per conversation. Owns the live Message/Comment/Activity
+ * timeline (authoritative), holds connected agent WebSockets (Hibernation API), and
  * fans out events in real time. D1 is only a synced summary — this DO never
  * stores conversation metadata.
  */
@@ -36,6 +54,7 @@ export class ConversationDO extends DurableObject<Env> {
         sender_id TEXT NOT NULL,
         text TEXT NOT NULL,
         payload TEXT,
+        attachments TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider_message_id);
@@ -47,12 +66,29 @@ export class ConversationDO extends DurableObject<Env> {
         mentions TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS activities (
+        id TEXT PRIMARY KEY,
+        action TEXT NOT NULL,
+        actor_id TEXT,
+        details TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_activities_created_at ON activities(created_at, id);
       CREATE TABLE IF NOT EXISTS presence (
         agent_id TEXT PRIMARY KEY,
         status TEXT NOT NULL,
         connected_at TEXT NOT NULL
       );
     `);
+		// Existing DO SQLite databases predate image attachments. The add is
+		// intentionally idempotent across constructor restarts.
+		try {
+			this.sql.exec(
+				"ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+			);
+		} catch {
+			// Column already exists.
+		}
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -78,8 +114,24 @@ export class ConversationDO extends DurableObject<Env> {
 		if (request.method === "POST" && url.pathname === "/append-comment") {
 			return this.appendComment(request);
 		}
+		if (request.method === "POST" && url.pathname === "/append-activity") {
+			return this.appendActivity(request);
+		}
 		if (request.method === "GET" && url.pathname === "/messages") {
 			return this.listMessages();
+		}
+		if (request.method === "GET" && url.pathname === "/comments") {
+			return this.listComments();
+		}
+		if (request.method === "GET" && url.pathname === "/activities") {
+			const requestedLimit = Number.parseInt(
+				url.searchParams.get("limit") ?? "50",
+				10,
+			);
+			const limit = Number.isFinite(requestedLimit)
+				? Math.min(Math.max(requestedLimit, 1), 100)
+				: 50;
+			return this.listActivities(limit);
 		}
 		if (request.method === "POST" && url.pathname === "/broadcast") {
 			return this.broadcastEvent(request);
@@ -88,13 +140,24 @@ export class ConversationDO extends DurableObject<Env> {
 		return new Response("not found", { status: 404 });
 	}
 
-	private handleUpgrade(request: Request): Response {
-		const agentId = request.headers.get("x-agent-id") ?? "anonymous";
+	private async handleUpgrade(request: Request): Promise<Response> {
+		const agentId = request.headers.get("x-agent-id");
+		const conversationId = request.headers.get("x-conversation-id");
+		if (
+			!agentId ||
+			!conversationId ||
+			!(await canReadConversation(this.env, agentId, conversationId))
+		) {
+			return new Response("forbidden", { status: 403 });
+		}
 		const pair = new WebSocketPair();
 		const { 0: client, 1: server } = pair;
 
 		this.ctx.acceptWebSocket(server, [agentId]);
-		server.serializeAttachment({ agentId } satisfies WebSocketAttachment);
+		server.serializeAttachment({
+			agentId,
+			conversationId,
+		} satisfies WebSocketAttachment);
 
 		this.upsertPresence(agentId, "viewing");
 		void this.broadcast({ type: "presence", agents: this.listPresence() });
@@ -103,19 +166,31 @@ export class ConversationDO extends DurableObject<Env> {
 	}
 
 	private async appendMessage(request: Request): Promise<Response> {
-		const message = (await request.json()) as Message;
+		const decoded = await decodeJsonBody(
+			request,
+			TimelineMessageSchema,
+			8 * 1024 * 1024,
+		);
+		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
+		const message = decoded.value as Message;
 
 		// Idempotency: dedup by providerMessageId (webhook replays) and by message
 		// id (client retries / scheduled-message retries) before appending.
 		if (message.providerMessageId || message.id) {
 			const existing = this.sql
 				.exec(
-					"SELECT id FROM messages WHERE id = ? OR provider_message_id = ?",
+					"SELECT * FROM messages WHERE id = ? OR (channel != 'email' AND provider_message_id = ?)",
 					message.id,
 					message.providerMessageId,
 				)
 				.toArray()[0];
 			if (existing) {
+				const stored = {
+					...this.rowToMessage(existing),
+					conversationId: message.conversationId,
+				};
+				await this.syncProjection(stored);
+				await this.broadcast({ type: "message:new", message: stored });
 				return new Response("duplicate", { status: 200 });
 			}
 		}
@@ -125,8 +200,8 @@ export class ConversationDO extends DurableObject<Env> {
 		// client uses it to advance the read cursor (ADR 0015).
 		message.seq = seq;
 		this.sql.exec(
-			`INSERT INTO messages (id, seq, provider_message_id, kind, channel, sender_id, text, payload, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO messages (id, seq, provider_message_id, kind, channel, sender_id, text, payload, attachments, created_at)
+	       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			message.id,
 			seq,
 			message.providerMessageId,
@@ -135,46 +210,54 @@ export class ConversationDO extends DurableObject<Env> {
 			message.senderId,
 			message.text,
 			JSON.stringify(message.payload),
+			JSON.stringify(message.attachments),
 			message.createdAt,
 		);
 
-		// Summary sync (ADR 0004/0015): the DO is the single-threaded owner of the
-		// timeline, so it upserts the D1 summary projection here — one row per
-		// message for list/search plus the conversation's latest-seq/messageCount
-		// for per-agent unread.
-		await drizzle(this.env.DB)
-			.insert(messagesSummary)
-			.values({
-				id: message.id,
-				conversationId: message.conversationId,
-				seq,
-				direction: message.kind === "inbound" ? "inbound" : "outbound",
-				senderType: message.kind === "inbound" ? "contact" : "user",
-				senderId: message.senderId,
-				preview: message.text.slice(0, 200),
-				hasAttachments: message.attachments.length > 0,
-				sentAt: message.createdAt,
-				createdAt: message.createdAt,
-			})
-			.onConflictDoNothing()
-			.run();
-
-		await drizzle(this.env.DB)
-			.update(conversations)
-			.set({
-				lastMessagePreview: message.text.slice(0, 200),
-				lastMessageAt: message.createdAt,
-				messageCount: seq,
-			})
-			.where(eq(conversations.id, message.conversationId))
-			.run();
-
-		void this.broadcast({ type: "message:new", message });
+		await this.syncProjection(message);
+		await this.broadcast({ type: "message:new", message });
 		return new Response("ok", { status: 200 });
 	}
 
+	private async syncProjection(message: Message): Promise<void> {
+		const seq = message.seq ?? 0;
+		const db = drizzle(this.env.DB);
+		await db.batch([
+			db
+				.insert(messagesSummary)
+				.values({
+					id: message.id,
+					conversationId: message.conversationId,
+					seq,
+					direction: message.kind === "inbound" ? "inbound" : "outbound",
+					senderType: message.kind === "inbound" ? "contact" : "user",
+					senderId: message.senderId,
+					preview: message.text.slice(0, 200),
+					hasAttachments: message.attachments.length > 0,
+					sentAt: message.createdAt,
+					createdAt: message.createdAt,
+				})
+				.onConflictDoNothing(),
+			db
+				.update(conversations)
+				.set({
+					lastMessagePreview: message.text.slice(0, 200),
+					lastMessageAt: message.createdAt,
+					messageCount: seq,
+				})
+				.where(
+					and(
+						eq(conversations.id, message.conversationId),
+						lte(conversations.messageCount, seq),
+					),
+				),
+		]);
+	}
+
 	private async appendComment(request: Request): Promise<Response> {
-		const comment = (await request.json()) as Comment;
+		const decoded = await decodeJsonBody(request, TimelineCommentSchema);
+		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
+		const comment = decoded.value as Comment;
 		this.sql.exec(
 			"INSERT INTO comments (id, author_id, text, mentions, created_at) VALUES (?, ?, ?, ?, ?)",
 			comment.id,
@@ -184,6 +267,22 @@ export class ConversationDO extends DurableObject<Env> {
 			comment.createdAt,
 		);
 		void this.broadcast({ type: "comment:new", comment });
+		return new Response("ok", { status: 200 });
+	}
+
+	private async appendActivity(request: Request): Promise<Response> {
+		const decoded = await decodeJsonBody(request, TimelineActivitySchema);
+		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
+		const activity: Activity = decoded.value;
+		this.sql.exec(
+			"INSERT INTO activities (id, action, actor_id, details, created_at) VALUES (?, ?, ?, ?, ?)",
+			activity.id,
+			activity.action,
+			isCallActivity(activity) ? null : activity.actorId,
+			JSON.stringify(activity.details),
+			activity.createdAt,
+		);
+		void this.broadcast({ type: "activity:new", activity });
 		return new Response("ok", { status: 200 });
 	}
 
@@ -204,6 +303,29 @@ export class ConversationDO extends DurableObject<Env> {
 		);
 	}
 
+	private listComments(): Response {
+		const rows = this.sql
+			.exec("SELECT * FROM comments ORDER BY created_at ASC, id ASC")
+			.toArray();
+		return new Response(
+			JSON.stringify({ comments: rows.map((r) => this.rowToComment(r)) }),
+			{ headers: { "content-type": "application/json" } },
+		);
+	}
+
+	private listActivities(limit: number): Response {
+		const rows = this.sql
+			.exec(
+				"SELECT * FROM (SELECT * FROM activities ORDER BY created_at DESC, id DESC LIMIT ?) ORDER BY created_at ASC, id ASC",
+				limit,
+			)
+			.toArray();
+		return new Response(
+			JSON.stringify({ activities: rows.map((r) => this.rowToActivity(r)) }),
+			{ headers: { "content-type": "application/json" } },
+		);
+	}
+
 	/**
 	 * Relay a Worker-originated metadata event to connected agents (ADR 0004):
 	 * the Worker updates D1 first, then asks the DO to fan out the
@@ -211,15 +333,17 @@ export class ConversationDO extends DurableObject<Env> {
 	 * messages/comments go through their own append endpoints.
 	 */
 	private async broadcastEvent(request: Request): Promise<Response> {
-		const event = (await request.json()) as ConversationEvent;
-		if (event.type !== "conversation-updated") {
-			return new Response("invalid event", { status: 400 });
-		}
+		const decoded = await decodeJsonBody(
+			request,
+			ConversationUpdatedEventSchema,
+		);
+		if (!decoded.ok) return new Response(decoded.error, { status: 400 });
+		const event = decoded.value as ConversationEvent;
 		await this.broadcast(event);
 		return new Response("ok", { status: 200 });
 	}
 
-	/** Reconstruct a canonical Message from a stored row (attachments not stored yet). */
+	/** Reconstruct a canonical Message from a stored row. */
 	private rowToMessage(row: Record<string, unknown>): Message {
 		return {
 			id: row.id as string,
@@ -229,10 +353,45 @@ export class ConversationDO extends DurableObject<Env> {
 			providerMessageId: (row.provider_message_id as string | null) ?? null,
 			senderId: row.sender_id as string,
 			text: row.text as string,
-			payload: row.payload ? JSON.parse(row.payload as string) : null,
-			attachments: [],
+			payload: decodeStoredJson(row.payload, TimelinePayloadSchema, null),
+			attachments: [
+				...decodeStoredJson(row.attachments, TimelineAttachmentsSchema, []),
+			],
 			createdAt: row.created_at as string,
 			seq: row.seq as number,
+		};
+	}
+
+	private rowToComment(row: Record<string, unknown>): Comment {
+		return {
+			id: row.id as string,
+			conversationId: this.ctx.id.name ?? "",
+			authorId: row.author_id as string,
+			text: row.text as string,
+			mentions: [...decodeStoredJson(row.mentions, TimelineMentionsSchema, [])],
+			createdAt: row.created_at as string,
+		};
+	}
+
+	private rowToActivity(row: Record<string, unknown>): Activity {
+		const action = row.action as Activity["action"];
+		const base = {
+			id: row.id as string,
+			conversationId: this.ctx.id.name ?? "",
+			createdAt: row.created_at as string,
+		};
+		if (isCallActivityAction(action)) {
+			return {
+				...base,
+				action,
+				details: decodeStoredJson(row.details, CallActivityDetailsSchema, {}),
+			};
+		}
+		return {
+			...base,
+			action,
+			actorId: (row.actor_id as string | null) ?? null,
+			details: decodeStoredJson(row.details, TimelineActivityDetailsSchema, {}),
 		};
 	}
 
@@ -260,10 +419,42 @@ export class ConversationDO extends DurableObject<Env> {
 			}));
 	}
 
+	private async socketAuthorized(ws: WebSocket): Promise<boolean> {
+		try {
+			const identity = ws.deserializeAttachment() as
+				| WebSocketAttachment
+				| undefined;
+			if (
+				identity?.agentId &&
+				identity.conversationId &&
+				(await canReadConversation(
+					this.env,
+					identity.agentId,
+					identity.conversationId,
+				))
+			)
+				return true;
+			if (identity?.agentId)
+				this.sql.exec(
+					"DELETE FROM presence WHERE agent_id = ?",
+					identity.agentId,
+				);
+			ws.close(1008, "conversation access revoked");
+		} catch {
+			try {
+				ws.close(1011, "authorization unavailable");
+			} catch {
+				/* already closed */
+			}
+		}
+		return false;
+	}
+
 	private async broadcast(event: ConversationEvent): Promise<void> {
 		const payload = JSON.stringify(event);
 		for (const ws of this.ctx.getWebSockets()) {
 			try {
+				if (!(await this.socketAuthorized(ws))) continue;
 				ws.send(payload);
 			} catch {
 				// ignore a closed socket
@@ -276,18 +467,22 @@ export class ConversationDO extends DurableObject<Env> {
 		message: string | ArrayBuffer,
 	): Promise<void> {
 		if (typeof message !== "string") return;
+		if (!(await this.socketAuthorized(ws))) return;
 
 		const attachment = ws.deserializeAttachment() as
 			| WebSocketAttachment
 			| undefined;
 		const agentId = attachment?.agentId ?? "anonymous";
 
-		let event: { type: string; isTyping?: boolean };
+		let raw: unknown;
 		try {
-			event = JSON.parse(message);
+			raw = JSON.parse(message);
 		} catch {
 			return;
 		}
+		const decoded = Schema.decodeUnknownEither(WebSocketClientEventSchema)(raw);
+		if (Either.isLeft(decoded)) return;
+		const event = decoded.right;
 
 		switch (event.type) {
 			case "draft:opened":
@@ -328,5 +523,19 @@ export class ConversationDO extends DurableObject<Env> {
 
 	async webSocketError(_ws: WebSocket, _error: unknown): Promise<void> {
 		// no-op for the skeleton
+	}
+}
+
+function decodeStoredJson<A, I>(
+	value: unknown,
+	schema: Schema.Schema<A, I, never>,
+	fallback: A,
+): A {
+	if (typeof value !== "string") return fallback;
+	try {
+		const decoded = Schema.decodeUnknownEither(schema)(JSON.parse(value));
+		return Either.isRight(decoded) ? decoded.right : fallback;
+	} catch {
+		return fallback;
 	}
 }

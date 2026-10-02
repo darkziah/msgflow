@@ -50,6 +50,7 @@ const TRIGGER_TYPES = [
 ] as const;
 
 interface Props {
+	workspaceId: string;
 	/** Existing rule when editing; undefined when creating. */
 	initial?: RuleSummary;
 	onDone: () => void;
@@ -61,7 +62,7 @@ function rowKey(prefix: string, value: string, index: number): string {
 	return `${prefix}-${index}-${value}`;
 }
 
-export function RuleForm({ initial, onDone, onCancel }: Props) {
+export function RuleForm({ workspaceId, initial, onDone, onCancel }: Props) {
 	const queryClient = useQueryClient();
 	const [name, setName] = useState(initial?.name ?? "");
 	const [triggerType, setTriggerType] = useState<
@@ -81,23 +82,23 @@ export function RuleForm({ initial, onDone, onCancel }: Props) {
 	);
 
 	const { data: usersData } = useQuery({
-		queryKey: ["users"],
-		queryFn: () => api.listUsers(),
+		queryKey: ["users", workspaceId],
+		queryFn: () => api.listUsers(workspaceId),
 	});
 	const { data: tagsData } = useQuery({
-		queryKey: ["tags"],
-		queryFn: () => api.listTags(),
+		queryKey: ["tags", workspaceId],
+		queryFn: () => api.listTags(workspaceId),
 	});
 	const { data: repliesData } = useQuery({
-		queryKey: ["canned-replies"],
-		queryFn: () => api.listCannedReplies(),
+		queryKey: ["canned-replies", workspaceId],
+		queryFn: () => api.listCannedReplies(workspaceId),
 	});
 
 	const { mutate: save, isPending } = useMutation({
 		mutationFn: (body: RuleWriteRequest) =>
-			initial ? api.updateRule(initial.id, body) : api.createRule(body),
+			initial ? api.updateRule(workspaceId, initial.id, body) : api.createRule(workspaceId, body),
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["rules"] });
+			queryClient.invalidateQueries({ queryKey: ["rules", workspaceId] });
 			onDone();
 		},
 		onError: (err) => {

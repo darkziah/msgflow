@@ -34,3 +34,20 @@ export async function verifyFacebookSignature(
 	}
 	return diff === 0;
 }
+
+/**
+ * Verifies a Messenger delivery against one of the configured Meta App secrets.
+ * The caller must limit secrets to the Page identities named in the raw delivery;
+ * this avoids treating an installation-wide legacy secret as an authorization
+ * boundary once several Meta Apps are configured.
+ */
+export async function verifyFacebookSignatureForSecrets(
+	body: string,
+	signature: string | null | undefined,
+	appSecrets: readonly string[],
+): Promise<boolean> {
+	for (const appSecret of appSecrets) {
+		if (await verifyFacebookSignature(body, signature, appSecret)) return true;
+	}
+	return false;
+}

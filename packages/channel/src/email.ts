@@ -1,19 +1,14 @@
-import { emailConversationId } from "@msgflow/contracts";
+import type { Attachment } from "@msgflow/contracts";
+import { emailConversationId, ParsedEmailSchema } from "@msgflow/contracts";
+import { Either, Schema } from "effect";
 import type {
 	ChannelAdapter,
 	NormalizedInbound,
 	OutboundContext,
 	OutboundMessage,
 	ProviderSendResult,
+	StructuredEmail,
 } from "./types";
-
-/**
- * Email adapter (Cloudflare Email Service). Normalizes a parsed inbound email
- * into a canonical message and sends outbound replies through the Worker's
- * SendEmail binding. Threading is derived from RFC 822 headers — there is no
- * provider threadId (per ADR 0014).
- */
-
 export interface ParsedEmail {
 	from: string;
 	to: string;
@@ -22,27 +17,14 @@ export interface ParsedEmail {
 	inReplyTo: string | null;
 	references: string[] | null;
 	text: string;
-	mailbox: string; // e.g. support@yehey.com
+	attachments: Attachment[];
+	mailbox: string;
 	receivedAt: string;
 }
-
-function deriveThreadKey(email: ParsedEmail): string {
-	// Root thread key: first References entry, else In-Reply-To, else own Message-ID.
-	const firstReference = email.references?.[0];
-	return (
-		firstReference ??
-		email.inReplyTo ??
-		email.messageId ??
-		email.messageId ??
-		"orphan"
-	);
-}
-
 export function normalizeEmailMessage(
 	email: ParsedEmail,
 ): NormalizedInbound | null {
-	if (!email.text && !email.subject) return null;
-	const threadKey = deriveThreadKey(email);
+	const threadKey = email.messageId ?? crypto.randomUUID();
 	return {
 		conversationId: emailConversationId(email.mailbox, threadKey),
 		channel: "email",
@@ -51,86 +33,110 @@ export function normalizeEmailMessage(
 		text: email.text,
 		createdAt: email.receivedAt,
 		payload: { subject: email.subject, to: email.to, threadKey },
+		attachments: email.attachments,
 	};
 }
-
-// Build a raw RFC 5322 message. The thread key is the root Message-ID from the
-// inbound chain; replying with In-Reply-To/References pointing at it keeps the
-// whole thread together in the customer's mail client.
-export function buildEmailRaw(input: {
-	from: string;
-	to: string;
-	subject: string;
-	threadKey: string;
-	text: string;
-}): string {
-	const wrapMessageId = (id: string): string =>
-		id.startsWith("<") ? id : `<${id}>`;
-	// Headers must be single-line ASCII; strip CR/LF so a hostile subject can't
-	// inject extra headers.
-	const cleanSubject = input.subject.replace(/[\r\n]+/g, " ").trim();
-	const cleanText = input.text.replace(/\r\n/g, "\n").trimEnd();
-
-	const headers = [
-		`From: ${input.from}`,
-		`To: ${input.to}`,
-		cleanSubject ? `Subject: ${cleanSubject}` : "Subject:",
-		`Date: ${new Date().toUTCString()}`,
-		`Message-ID: <${crypto.randomUUID()}@msgflow>`,
-		`In-Reply-To: ${wrapMessageId(input.threadKey)}`,
-		`References: ${wrapMessageId(input.threadKey)}`,
-		"Content-Type: text/plain; charset=utf-8",
-		"MIME-Version: 1.0",
-	].join("\r\n");
-
-	return `${headers}\r\n\r\n${cleanText}\r\n`;
+export function safeRfcId(id: string): string {
+	if (!id || /[\r\n]/.test(id)) throw new Error("invalid RFC message id");
+	return id.startsWith("<") ? id : `<${id}>`;
 }
-
+/** Provider owns Date, Message-ID and MIME framing. */
+export async function buildStructuredEmail(
+	ctx: OutboundContext,
+	message: OutboundMessage,
+): Promise<StructuredEmail> {
+	if (!ctx.from) throw new Error("missing From identity");
+	const headers: Record<string, string> = {};
+	if (ctx.inReplyTo) headers["In-Reply-To"] = safeRfcId(ctx.inReplyTo);
+	if (ctx.references?.length)
+		headers.References = ctx.references.map(safeRfcId).join(" ");
+	if (message.idempotencyKey) {
+		if (/[\r\n]/.test(message.idempotencyKey))
+			throw new Error("invalid correlation id");
+		headers["X-MsgFlow-Intent"] = message.idempotencyKey;
+	}
+	const attachments: StructuredEmail["attachments"] = [];
+	// Conservative MIME/base64 overhead allowance under the complete-message cap.
+	let size =
+		new TextEncoder().encode(
+			message.text + (message.subject ?? "") + JSON.stringify(headers),
+		).length + 4096;
+	for (const attachment of message.attachments ?? []) {
+		if (
+			![
+				"application/pdf",
+				"image/png",
+				"image/jpeg",
+				"image/gif",
+				"image/webp",
+			].includes(attachment.type)
+		)
+			throw new Error("unsupported attachment type");
+		const content = await ctx.attachmentReader?.read(attachment);
+		if (!content) throw new Error("attachment unavailable");
+		size +=
+			Math.ceil(content.byteLength / 3) * 4 +
+			Math.ceil(content.byteLength / 57) * 2 +
+			1024;
+		if (size > 5 * 1024 * 1024) throw new Error("message exceeds 5 MiB");
+		attachments.push({
+			content,
+			filename: attachment.name.replace(/[\r\n"\\]/g, "-"),
+			type: attachment.type,
+			disposition: "attachment",
+		});
+	}
+	if (size > 5 * 1024 * 1024) throw new Error("message exceeds 5 MiB");
+	return {
+		from: ctx.from,
+		to: message.to,
+		subject: message.subject ?? "",
+		text: message.text,
+		headers,
+		attachments,
+	};
+}
 export const emailAdapter: ChannelAdapter = {
 	channel: "email",
-	// The email() handler passes a parsed ParsedEmail; unlike Facebook there is no
-	// array of events per payload, so wrap the single result.
 	normalizeInbound(raw: unknown): NormalizedInbound[] {
-		const parsed = raw as ParsedEmail;
-		const result = normalizeEmailMessage(parsed);
+		const decoded = Schema.decodeUnknownEither(ParsedEmailSchema)(raw);
+		if (Either.isLeft(decoded)) return [];
+		const result = normalizeEmailMessage(decoded.right as ParsedEmail);
 		return result ? [result] : [];
 	},
 	async sendOutbound(
 		ctx: OutboundContext,
 		message: OutboundMessage,
 	): Promise<ProviderSendResult> {
-		if (!ctx.emailSender || !ctx.from || !ctx.threadKey) {
+		if (!ctx.emailSender)
 			return {
 				ok: false,
 				providerMessageId: null,
-				error: "missing email send context",
+				error: "missing email provider",
 			};
-		}
-		const text = message.text.trim();
-		if (!text) {
-			return { ok: false, providerMessageId: null, error: "empty message" };
-		}
-
-		const raw = buildEmailRaw({
-			from: ctx.from,
-			to: message.to,
-			subject: message.subject ?? "",
-			threadKey: ctx.threadKey,
-			text,
-		});
-
+		let payload: StructuredEmail;
 		try {
-			await ctx.emailSender.send(ctx.from, message.to, raw);
-		} catch (err) {
+			payload = await buildStructuredEmail(ctx, message);
+		} catch (error) {
 			return {
 				ok: false,
 				providerMessageId: null,
-				error: `email send failed: ${err instanceof Error ? err.message : String(err)}`,
+				error: String(error),
+				failureKind: "definitive",
 			};
 		}
-
-		// The Message-ID we generated is our own provider message id.
-		const match = /Message-ID: <([^>]+)>/.exec(raw);
-		return { ok: true, providerMessageId: match?.[1] ?? null };
+		try {
+			const result = await ctx.emailSender.send(payload);
+			if (!result.messageId)
+				throw new Error("provider acknowledgement missing id");
+			return { ok: true, providerMessageId: result.messageId };
+		} catch {
+			return {
+				ok: false,
+				providerMessageId: null,
+				error: "email provider outcome uncertain",
+				failureKind: "uncertain",
+			};
+		}
 	},
 };
