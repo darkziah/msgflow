@@ -87,6 +87,12 @@ async function graphSend(token: string, body: unknown): Promise<ProviderSendResu
 	return { ok: true, providerMessageId: json.message_id };
 }
 
+function messageType(humanAgent: boolean) {
+	return humanAgent
+		? { messaging_type: "MESSAGE_TAG" as const, tag: "HUMAN_AGENT" as const }
+		: {};
+}
+
 export const facebookAdapter: ChannelAdapter = {
 	channel: "facebook",
 	normalizeInbound: normalizeFacebookWebhook,
@@ -96,9 +102,14 @@ export const facebookAdapter: ChannelAdapter = {
 		if (!text && !(message.attachments?.length)) return { ok: false, providerMessageId: null, error: "empty message" };
 		if (text.length > 2000) return { ok: false, providerMessageId: null, error: "message exceeds 2000 characters" };
 		let lastProviderMessageId: string | null = null;
+		const type = messageType(message.humanAgent === true);
 		// Deterministic sequence: text first (when present), then every image.
 		if (text) {
-			const sent = await graphSend(ctx.pageAccessToken, { recipient: { id: message.to }, message: { text } });
+			const sent = await graphSend(ctx.pageAccessToken, {
+				recipient: { id: message.to },
+				message: { text },
+				...type,
+			});
 			if (!sent.ok) return sent;
 			lastProviderMessageId = sent.providerMessageId;
 		}
@@ -106,6 +117,7 @@ export const facebookAdapter: ChannelAdapter = {
 			const sent = await graphSend(ctx.pageAccessToken, {
 				recipient: { id: message.to },
 				message: { attachment: { type: "image", payload: { url: attachment.url, is_reusable: true } } },
+				...type,
 			});
 			if (!sent.ok) return sent;
 			lastProviderMessageId = sent.providerMessageId;

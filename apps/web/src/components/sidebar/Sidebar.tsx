@@ -80,6 +80,7 @@ export function Sidebar({
 				"flex h-full shrink-0 flex-col border-r bg-muted/30 transition-[width]",
 				compact ? "w-14" : "w-[232px]",
 			)}
+			data-onboarding-target="sidebar"
 		>
 			{tree ? (
 				<SidebarTree

@@ -3,6 +3,7 @@ import type {
 	ConversationUpdateRequest,
 } from "@msgflow/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useState } from "react";
 import {
 	Archive,
 	ArchiveRestore,
@@ -55,11 +56,34 @@ function snoozeTarget(kind: string): string {
 export function ConversationActions({
 	conversation,
 	workspaceId,
+	onArchiveChange,
+	onAssignChange,
+	onMoveChange,
+	onSnoozeChange,
+	assignOpen,
+	onAssignOpenChange,
+	moveOpen,
+	onMoveOpenChange,
+	snoozeOpen,
+	onSnoozeOpenChange,
 }: {
 	conversation: ConversationSummary;
 	workspaceId: string;
+	onArchiveChange?: (archive: (() => boolean) | null) => void;
+	onAssignChange?: (open: (() => boolean) | null) => void;
+	onMoveChange?: (open: (() => boolean) | null) => void;
+	onSnoozeChange?: (open: (() => boolean) | null) => void;
+	assignOpen?: boolean;
+	onAssignOpenChange?: (open: boolean) => void;
+	moveOpen?: boolean;
+	onMoveOpenChange?: (open: boolean) => void;
+	snoozeOpen?: boolean;
+	onSnoozeOpenChange?: (open: boolean) => void;
 }) {
 	const queryClient = useQueryClient();
+	const [uncontrolledAssignOpen, setUncontrolledAssignOpen] = useState(false);
+	const [uncontrolledMoveOpen, setUncontrolledMoveOpen] = useState(false);
+	const [uncontrolledSnoozeOpen, setUncontrolledSnoozeOpen] = useState(false);
 	const { data: usersData } = useQuery({
 		queryKey: ["users", workspaceId],
 		queryFn: () => api.listUsers(workspaceId),
@@ -85,6 +109,53 @@ export function ConversationActions({
 	const isSnoozed =
 		conversation.snoozedUntil !== null &&
 		new Date(conversation.snoozedUntil).getTime() > Date.now();
+	const archive = useCallback(() => {
+		if (isPending) return false;
+		update({ status: conversation.status === "open" ? "archived" : "open" });
+		return true;
+	}, [conversation.status, isPending, update]);
+	const resolvedAssignOpen = assignOpen ?? uncontrolledAssignOpen;
+	const resolvedMoveOpen = moveOpen ?? uncontrolledMoveOpen;
+	const resolvedSnoozeOpen = snoozeOpen ?? uncontrolledSnoozeOpen;
+	const setAssignOpen = onAssignOpenChange ?? setUncontrolledAssignOpen;
+	const setMoveOpen = onMoveOpenChange ?? setUncontrolledMoveOpen;
+	const setSnoozeOpen = onSnoozeOpenChange ?? setUncontrolledSnoozeOpen;
+	const openAssign = useCallback(() => {
+		if (isPending) return false;
+		setAssignOpen(true);
+		return true;
+	}, [isPending, setAssignOpen]);
+	const openMove = useCallback(() => {
+		if (isPending) return false;
+		setMoveOpen(true);
+		return true;
+	}, [isPending, setMoveOpen]);
+	const openSnooze = useCallback(() => {
+		if (isPending) return false;
+		setSnoozeOpen(true);
+		return true;
+	}, [isPending, setSnoozeOpen]);
+	useEffect(() => {
+		onArchiveChange?.(archive);
+		onAssignChange?.(openAssign);
+		onMoveChange?.(openMove);
+		onSnoozeChange?.(openSnooze);
+		return () => {
+			onArchiveChange?.(null);
+			onAssignChange?.(null);
+			onMoveChange?.(null);
+			onSnoozeChange?.(null);
+		};
+	}, [
+		archive,
+		onArchiveChange,
+		onAssignChange,
+		onMoveChange,
+		onSnoozeChange,
+		openAssign,
+		openMove,
+		openSnooze,
+	]);
 
 	return (
 		<fieldset
@@ -103,11 +174,7 @@ export function ConversationActions({
 								? "Archive conversation"
 								: "Reopen conversation"
 						}
-						onClick={() =>
-							update({
-								status: conversation.status === "open" ? "archived" : "open",
-							})
-						}
+						onClick={archive}
 					>
 						{conversation.status === "open" ? <Archive /> : <ArchiveRestore />}
 					</Button>
@@ -118,7 +185,7 @@ export function ConversationActions({
 						: "Reopen conversation"}
 				</TooltipContent>
 			</Tooltip>
-			<DropdownMenu>
+			<DropdownMenu open={resolvedAssignOpen} onOpenChange={setAssignOpen}>
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<DropdownMenuTrigger asChild>
@@ -153,7 +220,7 @@ export function ConversationActions({
 					</DropdownMenuGroup>
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<DropdownMenu>
+			<DropdownMenu open={resolvedMoveOpen} onOpenChange={setMoveOpen}>
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<DropdownMenuTrigger asChild>
@@ -185,7 +252,7 @@ export function ConversationActions({
 					</DropdownMenuGroup>
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<DropdownMenu>
+			<DropdownMenu open={resolvedSnoozeOpen} onOpenChange={setSnoozeOpen}>
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<DropdownMenuTrigger asChild>

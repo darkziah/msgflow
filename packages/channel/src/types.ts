@@ -36,6 +36,12 @@ export interface OutboundMessage {
 	subject?: string;
 	/** Stable client key, used by providers that support request idempotency. */
 	idempotencyKey?: string;
+	/**
+	 * Set only for a live reply written by an authenticated support agent after
+	 * the standard Messenger window has elapsed. Scheduled/automated sends must
+	 * never set this because Meta's HUMAN_AGENT tag is manual-support only.
+	 */
+	humanAgent?: boolean;
 	attachments?: Attachment[];
 }
 

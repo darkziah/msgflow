@@ -40,6 +40,10 @@ export interface SendParams {
 	clientMessageId?: string;
 	mailboxId?: string;
 	confirmPrivateIdentity?: boolean;
+	/** Server-set only for a live reply from an authenticated support agent. */
+	humanAgent?: boolean;
+	/** Server-derived metadata for a new outbound email; never client supplied. */
+	emailMetadata?: Omit<EmailOutboundMetadata, "intent_id" | "created_at">;
 }
 
 export type SendResult =
@@ -51,6 +55,23 @@ export interface SendOptions {
 	retryDefinitiveFailure?: boolean;
 	/** Permit a queued send-later intent to cross the provider boundary. */
 	allowQueued?: boolean;
+}
+
+export const STANDARD_MESSAGING_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const HUMAN_AGENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Meta permits HUMAN_AGENT only after 24h and no later than 7 days after a customer message. */
+export function isHumanAgentWindow(
+	lastInboundAt: string | null,
+	now = Date.now(),
+): boolean {
+	if (!lastInboundAt) return false;
+	const lastInboundMs = Date.parse(lastInboundAt);
+	if (!Number.isFinite(lastInboundMs)) return false;
+	const elapsed = now - lastInboundMs;
+	return (
+		elapsed >= STANDARD_MESSAGING_WINDOW_MS && elapsed <= HUMAN_AGENT_WINDOW_MS
+	);
 }
 
 /**
@@ -86,13 +107,15 @@ export async function sendOutbound(
 	> | null = null;
 	if (parsed.channel === "email") {
 		try {
-			emailMeta = await resolveEmailReplyMetadata(
-				env,
-				params.conversationId,
-				params.senderId,
-				params.mailboxId,
-				params.confirmPrivateIdentity,
-			);
+			emailMeta =
+				params.emailMetadata ??
+				(await resolveEmailReplyMetadata(
+					env,
+					params.conversationId,
+					params.senderId,
+					params.mailboxId,
+					params.confirmPrivateIdentity,
+				));
 		} catch (error) {
 			await auditEmailDenial(env, params);
 			return { ok: false, error: errorMessage(error), retryable: false };
@@ -235,12 +258,17 @@ export async function sendOutbound(
 		await markIntent(db, id, "failed", context.error);
 		return { ok: false, error: context.error, retryable: true };
 	}
+	const humanAgent =
+		parsed.channel === "facebook" &&
+		params.humanAgent === true &&
+		(await isHumanAgentEligible(env, intent.conversationId));
 
 	const result = context.send({
 		to: context.to,
 		text: intent.text,
 		subject: intent.subject ?? undefined,
 		idempotencyKey: id,
+		humanAgent,
 		attachments: parseStoredAttachments(intent.attachmentsJson),
 	});
 	const provider = await result;
@@ -299,10 +327,11 @@ export async function scheduleOutbound(
 				)
 			: null;
 	const db = drizzle(env.DB);
-	const id = params.clientMessageId ?? crypto.randomUUID();
+	const scheduledParams = { ...params, humanAgent: false };
+	const id = scheduledParams.clientMessageId ?? crypto.randomUUID();
 	const now = new Date().toISOString();
-	await insertBoundIntent(env, id, params, "queued", now, emailMeta);
-	if (!(await intentMatchesCommand(env, id, params)))
+	await insertBoundIntent(env, id, scheduledParams, "queued", now, emailMeta);
+	if (!(await intentMatchesCommand(env, id, scheduledParams)))
 		throw new Error(
 			"client message id is already bound to a different command",
 		);
@@ -325,7 +354,7 @@ export async function scheduleOutbound(
 		})
 		.onConflictDoNothing()
 		.run();
-	return params.sendAt;
+	return scheduledParams.sendAt;
 }
 
 export async function reconcileProviderSent(
@@ -565,6 +594,7 @@ export function outboundCommand(params: SendParams): string {
 		})),
 		mailboxId: params.mailboxId ?? null,
 		confirmPrivateIdentity: params.confirmPrivateIdentity === true,
+		humanAgent: params.humanAgent === true,
 	});
 }
 export async function intentMatchesCommand(
@@ -594,8 +624,21 @@ export async function intentMatchesCommand(
 		JSON.stringify(parseStoredAttachments(row.attachments_json)) ===
 			JSON.stringify(params.attachments ?? []) &&
 		!params.mailboxId &&
-		!params.confirmPrivateIdentity
+		!params.confirmPrivateIdentity &&
+		!params.humanAgent
 	);
+}
+
+async function isHumanAgentEligible(
+	env: Env,
+	conversationId: string,
+): Promise<boolean> {
+	const latestInbound = await env.DB.prepare(
+		"SELECT MAX(sent_at) AS sentAt FROM messages_summary WHERE conversation_id=? AND direction='inbound'",
+	)
+		.bind(conversationId)
+		.first<{ sentAt: string | null }>();
+	return isHumanAgentWindow(latestInbound?.sentAt ?? null);
 }
 async function insertBoundIntent(
 	env: Env,

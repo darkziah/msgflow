@@ -222,6 +222,21 @@ export const api = {
 			body: JSON.stringify({ ...body, workspaceId }),
 		});
 	},
+	composeEmail(
+		workspaceId: string,
+		body: {
+			to: string;
+			subject: string;
+			text: string;
+			mailboxId: string;
+			clientMessageId: string;
+		},
+	) {
+		return request<{ success: true; conversationId: string }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/email/compose`,
+			{ method: "POST", body: JSON.stringify(body) },
+		);
+	},
 	uploadAttachments(workspaceId: string, files: File[]) {
 		const form = new FormData();
 		form.append("workspaceId", workspaceId);
@@ -385,6 +400,14 @@ export const api = {
 
 	listWorkspaces() {
 		return request<{ workspaces: WorkspaceSummary[] }>("/api/workspaces");
+	},
+	getFirstSignInWalkthrough() {
+		return request<{ completed: boolean }>("/api/onboarding/first-sign-in");
+	},
+	completeFirstSignInWalkthrough() {
+		return request<{ completed: true }>("/api/onboarding/first-sign-in", {
+			method: "POST",
+		});
 	},
 	createWorkspace(
 		sourceWorkspaceId: string,

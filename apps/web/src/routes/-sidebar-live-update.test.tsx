@@ -3,6 +3,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationThread } from "@/components/inbox/ConversationThread";
+import { KeyboardShortcutsProvider } from "@/components/inbox/KeyboardShortcutsProvider";
 import { api } from "@/lib/api";
 import { emailApi } from "@/lib/email-api";
 import { invalidateWorkspaceConversationViews } from "@/lib/sidebar-live-update";
@@ -23,7 +24,9 @@ vi.mock("@/lib/email-api", () => ({
 
 function withQueryClient(ui: ReactNode, queryClient: QueryClient) {
 	return render(
-		<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
+		<QueryClientProvider client={queryClient}>
+			<KeyboardShortcutsProvider>{ui}</KeyboardShortcutsProvider>
+		</QueryClientProvider>,
 	);
 }
 

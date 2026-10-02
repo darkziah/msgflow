@@ -76,7 +76,8 @@ export async function startMetaOAuth(
 		redirect_uri: redirectUri,
 		state,
 		response_type: "code",
-		scope: "pages_show_list,pages_messaging,pages_manage_metadata",
+		scope:
+			"pages_show_list,pages_manage_metadata,pages_messaging,pages_read_engagement,business_management",
 	}).toString();
 	return { authorizationUrl: url.toString() };
 }

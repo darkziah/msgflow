@@ -14,6 +14,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppMobileHeader } from "@/components/layout/AppMobileHeader";
 import { AppShell } from "@/components/layout/AppShell";
+
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { emailApi } from "@/lib/email-api";
@@ -27,19 +28,28 @@ import { Composer } from "./Composer";
 import { ConversationActions } from "./ConversationActions";
 import { ConversationList } from "./ConversationList";
 import { ConversationThread } from "./ConversationThread";
+import { KeyboardShortcutsProvider } from "./KeyboardShortcutsProvider";
 import { activeFilterCount, SearchBar } from "./SearchBar";
 import { TagPicker } from "./TagPicker";
 
+const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }));
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+	HTMLElement.prototype,
+	"scrollIntoView",
+);
+
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@tanstack/react-router")>()),
-	useNavigate: () => vi.fn(),
+	useNavigate: () => navigate,
 }));
 
 vi.mock("@/lib/api", () => ({
 	api: {
 		createComment: vi.fn(),
+		completeFirstSignInWalkthrough: vi.fn(),
 		addConversationTag: vi.fn(),
 		getConversation: vi.fn(),
+		getFirstSignInWalkthrough: vi.fn(),
 		getMessages: vi.fn(),
 		listConversations: vi.fn(),
 		listCannedReplies: vi.fn(),
@@ -123,6 +133,29 @@ function renderWithQueryClient(ui: ReactNode) {
 	);
 }
 
+function renderThreadWithShortcuts(threadConversation = conversation) {
+	vi.mocked(api.getConversation).mockResolvedValue(threadConversation);
+	vi.mocked(api.getMessages).mockResolvedValue({
+		messages: [],
+		comments: [],
+		activities: [],
+	} as never);
+	return renderWithQueryClient(
+		<KeyboardShortcutsProvider>
+			<ConversationThread
+				conversationId={threadConversation.id}
+				workspaceId="workspace-1"
+			/>
+		</KeyboardShortcutsProvider>,
+	);
+}
+
+const shortcutConversation: ConversationSummary = {
+	...conversation,
+	channel: "facebook",
+	channelDisplayName: "Messenger",
+};
+
 describe("inbox UI contracts", () => {
 	beforeEach(() => {
 		vi.stubGlobal(
@@ -184,6 +217,9 @@ describe("inbox UI contracts", () => {
 				},
 			],
 		});
+		vi.mocked(api.getFirstSignInWalkthrough).mockResolvedValue({
+			completed: true,
+		});
 		vi.mocked(api.listConversations).mockResolvedValue({ conversations: [] });
 		vi.mocked(api.updateConversation).mockResolvedValue({
 			success: true,
@@ -191,7 +227,21 @@ describe("inbox UI contracts", () => {
 		});
 	});
 
-	afterEach(() => vi.clearAllMocks());
+	afterEach(() => {
+		localStorage.clear();
+		vi.clearAllMocks();
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+		if (originalScrollIntoView) {
+			Object.defineProperty(
+				HTMLElement.prototype,
+				"scrollIntoView",
+				originalScrollIntoView,
+			);
+		} else {
+			Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+		}
+	});
 
 	it("renders selected contact, preview, channel, unread count, and tags", () => {
 		render(
@@ -206,6 +256,8 @@ describe("inbox UI contracts", () => {
 			name: /avery chen/i,
 		});
 		expect(selectedConversation).toHaveClass("bg-primary/10");
+		expect(selectedConversation).toHaveAttribute("aria-pressed", "true");
+		expect(selectedConversation).toHaveAttribute("aria-current", "true");
 		expect(
 			within(selectedConversation).getByText("Avery Chen"),
 		).toBeInTheDocument();
@@ -316,10 +368,12 @@ describe("inbox UI contracts", () => {
 		vi.mocked(api.getConversation).mockReturnValue(new Promise(() => {}));
 		vi.mocked(api.getMessages).mockReturnValue(new Promise(() => {}));
 		renderWithQueryClient(
-			<ConversationThread
-				conversationId={conversation.id}
-				workspaceId="workspace-1"
-			/>,
+			<KeyboardShortcutsProvider>
+				<ConversationThread
+					conversationId={conversation.id}
+					workspaceId="workspace-1"
+				/>
+			</KeyboardShortcutsProvider>,
 		);
 		expect(screen.getByLabelText("Loading conversation")).toBeInTheDocument();
 	});
@@ -332,10 +386,12 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread
-				conversationId={conversation.id}
-				workspaceId="workspace-1"
-			/>,
+			<KeyboardShortcutsProvider>
+				<ConversationThread
+					conversationId={conversation.id}
+					workspaceId="workspace-1"
+				/>
+			</KeyboardShortcutsProvider>,
 		);
 
 		expect(
@@ -343,6 +399,181 @@ describe("inbox UI contracts", () => {
 		).toBeInTheDocument();
 		expect(screen.getByText("Support")).toBeInTheDocument();
 		expect(screen.getByText("Billing question")).toBeInTheDocument();
+	});
+
+	it("archives through the thread shortcut with the exact existing payload", async () => {
+		renderThreadWithShortcuts(shortcutConversation);
+
+		await screen.findByRole("heading", { name: "Avery Chen" });
+		fireEvent.keyDown(document, { key: "e", cancelable: true });
+
+		await waitFor(() => {
+			expect(api.updateConversation).toHaveBeenCalledWith(conversation.id, {
+				status: "archived",
+				workspaceId: "workspace-1",
+			});
+		});
+	});
+
+	it("focuses the reply composer through the R shortcut", async () => {
+		renderThreadWithShortcuts(shortcutConversation);
+
+		await screen.findByRole("heading", { name: "Avery Chen" });
+		fireEvent.click(screen.getByRole("radio", { name: "Comment" }));
+		fireEvent.keyDown(document, { key: "r", cancelable: true });
+
+		const reply = await screen.findByRole("textbox", { name: "Reply text" });
+		await waitFor(() => expect(reply).toHaveFocus());
+	});
+
+	it("switches to and focuses the comment composer through Cmd/Ctrl+.", async () => {
+		renderThreadWithShortcuts(shortcutConversation);
+
+		await screen.findByRole("heading", { name: "Avery Chen" });
+		fireEvent.keyDown(document, { key: ".", metaKey: true, cancelable: true });
+
+		const comment = await screen.findByRole("textbox", { name: "Comment text" });
+		await waitFor(() => expect(comment).toHaveFocus());
+	});
+
+	it("opens saved replies through Cmd/Ctrl+Shift+O only in Reply mode", async () => {
+		vi.mocked(api.listCannedReplies).mockResolvedValue({
+			cannedReplies: [
+				{
+					id: "reply_billing",
+					name: "Billing follow-up",
+					body: "I will send your invoice today.",
+					createdAt: "2026-09-26T12:00:00.000Z",
+					updatedAt: "2026-09-26T12:00:00.000Z",
+				},
+			],
+		});
+		renderThreadWithShortcuts(shortcutConversation);
+
+		await screen.findByRole("button", { name: "Saved replies" });
+		fireEvent.keyDown(document, {
+			key: "o",
+			metaKey: true,
+			shiftKey: true,
+			cancelable: true,
+		});
+		expect(
+			await screen.findByRole("dialog", { name: "Saved replies" }),
+		).toBeInTheDocument();
+		fireEvent.keyDown(document, { key: "Escape", cancelable: true });
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Saved replies" }),
+			).not.toBeInTheDocument(),
+		);
+		fireEvent.click(screen.getByRole("radio", { name: "Comment" }));
+		const commentSavedReplies = new KeyboardEvent("keydown", {
+			key: "o",
+			metaKey: true,
+			shiftKey: true,
+			cancelable: true,
+		});
+		document.dispatchEvent(commentSavedReplies);
+		expect(commentSavedReplies.defaultPrevented).toBe(false);
+		expect(
+			screen.queryByRole("dialog", { name: "Saved replies" }),
+		).not.toBeInTheDocument();
+	});
+
+	it("submits the existing composer payload through Cmd/Ctrl+Enter without archiving", async () => {
+		vi.mocked(api.sendMessage).mockResolvedValue({
+			success: true,
+			sent: true,
+			message: {},
+		} as never);
+		renderThreadWithShortcuts(shortcutConversation);
+
+		const reply = await screen.findByRole("textbox", { name: "Reply text" });
+		fireEvent.change(reply, { target: { value: "  I can help with that.  " } });
+		fireEvent.keyDown(reply, {
+			key: "Enter",
+			metaKey: true,
+			cancelable: true,
+		});
+
+		await waitFor(() => {
+			expect(api.sendMessage).toHaveBeenCalledWith(
+				conversation.id,
+				"workspace-1",
+					expect.objectContaining({ text: "I can help with that." }),
+			);
+		});
+		expect(api.updateConversation).not.toHaveBeenCalled();
+	});
+
+	it("keeps ordinary Enter on the composer submit path", async () => {
+		vi.mocked(api.sendMessage).mockResolvedValue({
+			success: true,
+			sent: true,
+			message: {},
+		} as never);
+		renderThreadWithShortcuts(shortcutConversation);
+
+		const reply = await screen.findByRole("textbox", { name: "Reply text" });
+		fireEvent.change(reply, { target: { value: "I can help with that." } });
+		fireEvent.keyDown(reply, { key: "Enter", cancelable: true });
+
+		await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+	});
+
+	it("opens the existing tag picker and action menus through thread shortcuts", async () => {
+		renderThreadWithShortcuts(shortcutConversation);
+
+		await screen.findByRole("heading", { name: "Avery Chen" });
+		fireEvent.keyDown(document, { key: "t", cancelable: true });
+		expect(
+			await screen.findByRole("dialog", { name: "Add a tag" }),
+		).toBeInTheDocument();
+		expect(api.addConversationTag).not.toHaveBeenCalled();
+		fireEvent.keyDown(document, { key: "Escape", cancelable: true });
+
+		fireEvent.keyDown(document, { key: "A", shiftKey: true, cancelable: true });
+		expect(
+			await screen.findByRole("menu", { name: "Assign conversation" }),
+		).toBeInTheDocument();
+		fireEvent.keyDown(document, { key: "Escape", cancelable: true });
+
+		fireEvent.keyDown(document, { key: "M", shiftKey: true, cancelable: true });
+		expect(
+			await screen.findByRole("menu", { name: "Move conversation" }),
+		).toBeInTheDocument();
+		fireEvent.keyDown(document, { key: "Escape", cancelable: true });
+
+		fireEvent.keyDown(document, { key: "s", cancelable: true });
+		expect(
+			await screen.findByRole("menu", { name: "Snooze conversation" }),
+		).toBeInTheDocument();
+	});
+
+	it("does not archive while the tag picker or an action menu is open", async () => {
+		renderThreadWithShortcuts(shortcutConversation);
+
+		await screen.findByRole("heading", { name: "Avery Chen" });
+		fireEvent.keyDown(document, { key: "t", cancelable: true });
+		await screen.findByRole("dialog", { name: "Add a tag" });
+		const tagArchiveEvent = new KeyboardEvent("keydown", {
+			key: "e",
+			cancelable: true,
+		});
+		document.dispatchEvent(tagArchiveEvent);
+		expect(tagArchiveEvent.defaultPrevented).toBe(false);
+		expect(api.updateConversation).not.toHaveBeenCalled();
+		fireEvent.keyDown(document, { key: "Escape", cancelable: true });
+
+		fireEvent.keyDown(document, { key: "A", shiftKey: true, cancelable: true });
+		await screen.findByRole("menu", { name: "Assign conversation" });
+		const assignArchiveEvent = new KeyboardEvent("keydown", {
+			key: "e",
+			cancelable: true,
+		});
+		document.dispatchEvent(assignArchiveEvent);
+		expect(assignArchiveEvent.defaultPrevented).toBe(false);
+		expect(api.updateConversation).not.toHaveBeenCalled();
 	});
 
 	it("collapses earlier emails while keeping the newest email open", async () => {
@@ -371,10 +602,12 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread
-				conversationId={conversation.id}
-				workspaceId="workspace-1"
-			/>,
+			<KeyboardShortcutsProvider>
+				<ConversationThread
+					conversationId={conversation.id}
+					workspaceId="workspace-1"
+				/>
+			</KeyboardShortcutsProvider>,
 		);
 
 		const earlierEmail = await screen.findByText("Earlier email body");
@@ -600,10 +833,12 @@ describe("inbox UI contracts", () => {
 			activities: [],
 		} as never);
 		renderWithQueryClient(
-			<ConversationThread
-				conversationId={conversation.id}
-				workspaceId="workspace-1"
-			/>,
+			<KeyboardShortcutsProvider>
+				<ConversationThread
+					conversationId={conversation.id}
+					workspaceId="workspace-1"
+				/>
+			</KeyboardShortcutsProvider>,
 		);
 
 		fireEvent.click(await screen.findByRole("button", { name: "Activity" }));
@@ -625,6 +860,233 @@ describe("inbox UI contracts", () => {
 
 		fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
 		expect(onChange).toHaveBeenCalledWith({ q: "invoice" });
+	});
+
+	it("syncs the visible search query after an external filter reset", async () => {
+		const onChange = vi.fn();
+		const view = renderWithQueryClient(
+			<SearchBar
+				filters={{ q: "invoice" }}
+				workspaceId="workspace-1"
+				onChange={onChange}
+			/>,
+		);
+		const input = screen.getByRole("textbox", { name: "Search conversations" });
+		expect(input).toHaveValue("invoice");
+
+		view.rerender(
+			<QueryClientProvider client={new QueryClient()}>
+				<TooltipProvider>
+					<SearchBar
+						filters={{}}
+						workspaceId="workspace-1"
+						onChange={onChange}
+					/>
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+
+		await waitFor(() => expect(input).toHaveValue(""));
+		expect(onChange).not.toHaveBeenCalled();
+	});
+
+	it("focuses search and navigates visible conversations with inbox shortcuts", async () => {
+		const conversations = [
+			conversation,
+			{
+				...conversation,
+				id: "conv_456",
+				contact: { ...conversation.contact, displayName: "Blair Fox" },
+			},
+			{
+				...conversation,
+				id: "conv_789",
+				contact: { ...conversation.contact, displayName: "Casey Rowe" },
+			},
+		];
+		let search: { workspace?: string; c?: string } = {};
+		const useSearch = vi
+			.spyOn(Route, "useSearch")
+			.mockImplementation(() => search);
+		navigate.mockImplementation(({ search: nextSearch }) => {
+			search = nextSearch;
+		});
+		vi.mocked(api.listConversations).mockResolvedValue({ conversations });
+		const queryClient = new QueryClient({
+			defaultOptions: { queries: { retry: false } },
+		});
+		const view = render(
+			<QueryClientProvider client={queryClient}>
+				<TooltipProvider>
+					<Inbox />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+
+		const searchInputs = await screen.findAllByRole("textbox", {
+			name: "Search conversations",
+		});
+		await screen.findAllByRole("button", { name: /avery chen/i });
+		navigate.mockClear();
+		const focusSearchEvent = new KeyboardEvent("keydown", {
+			bubbles: true,
+			cancelable: true,
+			key: "f",
+			ctrlKey: true,
+			shiftKey: true,
+		});
+		document.dispatchEvent(focusSearchEvent);
+		expect(searchInputs).toContain(document.activeElement);
+		expect(focusSearchEvent.defaultPrevented).toBe(true);
+
+		if (document.activeElement instanceof HTMLElement)
+			document.activeElement.blur();
+
+		search = { workspace: "workspace_123" };
+		view.rerender(
+			<QueryClientProvider client={queryClient}>
+				<TooltipProvider>
+					<Inbox />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+		navigate.mockClear();
+		fireEvent.keyDown(document, { key: "ArrowUp" });
+		await waitFor(() =>
+			expect(navigate).toHaveBeenLastCalledWith({
+				to: "/",
+				search: { workspace: "workspace_123", c: "conv_789" },
+			}),
+		);
+
+		search = { workspace: "workspace_123" };
+		view.rerender(
+			<QueryClientProvider client={queryClient}>
+				<TooltipProvider>
+					<Inbox />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+		navigate.mockClear();
+		const firstNextEvent = new KeyboardEvent("keydown", {
+			bubbles: true,
+			cancelable: true,
+			key: "ArrowDown",
+		});
+		document.dispatchEvent(firstNextEvent);
+		await waitFor(() =>
+			expect(navigate).toHaveBeenLastCalledWith({
+				to: "/",
+				search: { workspace: "workspace_123", c: "conv_123" },
+			}),
+		);
+		expect(firstNextEvent.defaultPrevented).toBe(true);
+
+		view.rerender(
+			<QueryClientProvider client={queryClient}>
+				<TooltipProvider>
+					<Inbox />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+		fireEvent.keyDown(document, { key: "ArrowDown" });
+		await waitFor(() =>
+			expect(navigate).toHaveBeenLastCalledWith({
+				to: "/",
+				search: { workspace: "workspace_123", c: "conv_456" },
+			}),
+		);
+
+		view.rerender(
+			<QueryClientProvider client={queryClient}>
+				<TooltipProvider>
+					<Inbox />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+		fireEvent.keyDown(document, { key: "ArrowDown" });
+		await waitFor(() =>
+			expect(navigate).toHaveBeenLastCalledWith({
+				to: "/",
+				search: { workspace: "workspace_123", c: "conv_789" },
+			}),
+		);
+
+		const callCountAtBoundary = navigate.mock.calls.length;
+		view.rerender(
+			<QueryClientProvider client={queryClient}>
+				<TooltipProvider>
+					<Inbox />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+		const boundaryEvent = new KeyboardEvent("keydown", {
+			bubbles: true,
+			cancelable: true,
+			key: "ArrowDown",
+		});
+		document.dispatchEvent(boundaryEvent);
+		expect(navigate).toHaveBeenCalledTimes(callCountAtBoundary);
+		expect(boundaryEvent.defaultPrevented).toBe(false);
+
+		const typingInput = screen.getAllByRole("textbox", {
+			name: "Search conversations",
+		})[0];
+		fireEvent.focus(typingInput);
+		const typingEvent = new KeyboardEvent("keydown", {
+			bubbles: true,
+			cancelable: true,
+			key: "ArrowUp",
+		});
+		typingInput.dispatchEvent(typingEvent);
+		expect(navigate).toHaveBeenCalledTimes(callCountAtBoundary);
+		expect(typingEvent.defaultPrevented).toBe(false);
+		useSearch.mockRestore();
+	});
+
+	it("leaves ArrowUp and ArrowDown unhandled when there are no conversations", async () => {
+		const useSearch = vi
+			.spyOn(Route, "useSearch")
+			.mockReturnValue({ workspace: "workspace_123" });
+		vi.mocked(api.listConversations).mockResolvedValue({ conversations: [] });
+		renderWithQueryClient(<Inbox />);
+
+		await screen.findAllByText("No conversations here yet.");
+		navigate.mockClear();
+		for (const key of ["ArrowUp", "ArrowDown"]) {
+			const event = new KeyboardEvent("keydown", {
+				bubbles: true,
+				cancelable: true,
+				key,
+			});
+			document.dispatchEvent(event);
+			expect(event.defaultPrevented).toBe(false);
+		}
+		expect(navigate).not.toHaveBeenCalled();
+		useSearch.mockRestore();
+	});
+
+	it("leaves ArrowUp unhandled at the first conversation", async () => {
+		const useSearch = vi.spyOn(Route, "useSearch").mockReturnValue({
+			workspace: "workspace_123",
+			c: conversation.id,
+		});
+		vi.mocked(api.listConversations).mockResolvedValue({
+			conversations: [conversation],
+		});
+		renderWithQueryClient(<Inbox />);
+
+		await screen.findByRole("button", { name: /avery chen/i });
+		navigate.mockClear();
+		const event = new KeyboardEvent("keydown", {
+			bubbles: true,
+			cancelable: true,
+			key: "ArrowUp",
+		});
+		document.dispatchEvent(event);
+		expect(navigate).not.toHaveBeenCalled();
+		expect(event.defaultPrevented).toBe(false);
+		useSearch.mockRestore();
 	});
 
 	it("clears all search filters", () => {

@@ -1,6 +1,7 @@
 import type { TagSummary, UserSummary } from "@msgflow/contracts";
+import { useQuery } from "@tanstack/react-query";
 import { Filter, Search, X } from "lucide-react";
-import { useState } from "react";
+import { type RefObject, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -19,7 +20,6 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import { useQuery } from "@tanstack/react-query";
 
 export interface SearchFilters {
 	q?: string;
@@ -38,12 +38,17 @@ export function SearchBar({
 	filters,
 	onChange,
 	workspaceId,
+	inputRef,
 }: {
 	filters: SearchFilters;
 	onChange: (filters: SearchFilters) => void;
 	workspaceId: string;
+	inputRef?: RefObject<HTMLInputElement | null>;
 }) {
 	const [text, setText] = useState(filters.q ?? "");
+	useEffect(() => {
+		setText(filters.q ?? "");
+	}, [filters.q]);
 	const { data: usersData } = useQuery({
 		queryKey: ["users", workspaceId],
 		queryFn: () => api.listUsers(workspaceId),
@@ -73,6 +78,7 @@ export function SearchBar({
 					className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
 				/>
 				<Input
+					ref={inputRef}
 					value={text}
 					onChange={(event) => setText(event.target.value)}
 					onKeyDown={(event) => {

@@ -1,6 +1,7 @@
 import type { TagSummary } from "@msgflow/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Tag as TagIcon } from "lucide-react";
+import { useCallback, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import {
 	Popover,
@@ -19,10 +20,16 @@ export function TagPicker({
 	conversationId,
 	workspaceId,
 	tags,
+	open,
+	onOpenChange,
+	onOpenRequestChange,
 }: {
 	conversationId: string;
 	workspaceId: string;
 	tags: TagSummary[];
+	open?: boolean;
+	onOpenChange?: (open: boolean) => void;
+	onOpenRequestChange?: (open: (() => boolean) | null) => void;
 }) {
 	const queryClient = useQueryClient();
 
@@ -56,9 +63,18 @@ export function TagPicker({
 	const available = (tagsData?.tags ?? []).filter(
 		(tag) => !attached.has(tag.id),
 	);
+	const requestOpen = useCallback(() => {
+		if (adding) return false;
+		onOpenChange?.(true);
+		return Boolean(onOpenChange);
+	}, [adding, onOpenChange]);
+	useEffect(() => {
+		onOpenRequestChange?.(requestOpen);
+		return () => onOpenRequestChange?.(null);
+	}, [onOpenRequestChange, requestOpen]);
 
 	return (
-		<Popover>
+		<Popover open={open} onOpenChange={onOpenChange}>
 			<div className="flex items-center gap-1">
 				{tags.map((tag) => (
 					<TagChip key={tag.id} tag={tag} onRemove={() => removeTag(tag.id)} />

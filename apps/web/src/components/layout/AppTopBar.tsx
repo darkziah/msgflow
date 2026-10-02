@@ -100,7 +100,7 @@ export function AppTopBar({
 			<span className="text-sm font-bold tracking-tight">MsgFlow</span>
 			<Dialog open={workspacePickerOpen} onOpenChange={setWorkspacePickerOpen}>
 				<DialogTrigger asChild>
-					<Button type="button" variant="outline" size="sm" className="max-w-[min(12rem,38vw)] truncate" aria-label="Choose workspace">
+					<Button type="button" variant="outline" size="sm" className="min-w-0 max-w-[min(12rem,38vw)] shrink truncate" aria-label="Choose workspace">
 						{activeWorkspace?.name ?? "Choose workspace"}
 					</Button>
 				</DialogTrigger>
@@ -118,9 +118,9 @@ export function AppTopBar({
 										<CardTitle className="text-base">{workspace.name}</CardTitle>
 										<CardDescription>/{workspace.slug}</CardDescription>
 									</CardHeader>
-									<CardContent className="flex items-center justify-between gap-3">
-										<Badge variant={workspace.role === "owner" ? "default" : "secondary"} className="capitalize">{workspace.role}</Badge>
-										<Button type="button" size="sm" variant={active ? "secondary" : "default"} disabled={active} onClick={() => { onChangeWorkspace(workspace.id); setWorkspacePickerOpen(false); }}>
+									<CardContent className="flex flex-wrap items-center gap-2">
+										<Badge variant={workspace.role === "owner" ? "default" : "secondary"} className="shrink-0 capitalize">{workspace.role}</Badge>
+										<Button className="ml-auto shrink-0" type="button" size="sm" variant={active ? "secondary" : "default"} disabled={active} onClick={() => { onChangeWorkspace(workspace.id); setWorkspacePickerOpen(false); }}>
 											{active ? "Current workspace" : "Switch"}
 										</Button>
 									</CardContent>
@@ -173,7 +173,7 @@ export function AppTopBar({
 				</Tooltip>
 				<Tooltip>
 					<TooltipTrigger asChild>
-						<Button type="button" variant="ghost" size="icon" onClick={() => navigate({ to: "/settings", search: { workspace: workspaceId } })} aria-label="Settings"><Settings /></Button>
+						<Button data-onboarding-target="settings" type="button" variant="ghost" size="icon" onClick={() => navigate({ to: "/settings", search: { workspace: workspaceId } })} aria-label="Settings"><Settings /></Button>
 					</TooltipTrigger>
 					<TooltipContent>Settings</TooltipContent>
 				</Tooltip>

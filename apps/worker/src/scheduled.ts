@@ -55,6 +55,7 @@ export async function deliverScheduledMessages(
 				attachments: parseStoredAttachments(row.attachmentsJson),
 				senderId: row.createdBy ?? "system",
 				clientMessageId: row.id,
+				humanAgent: false,
 			},
 			{ allowQueued: true, retryDefinitiveFailure: true },
 		);

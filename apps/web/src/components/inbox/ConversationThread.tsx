@@ -7,7 +7,7 @@ import type {
 } from "@msgflow/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronUp } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,9 +30,10 @@ import { emailApi } from "@/lib/email-api";
 import { contactName, timeAgo } from "@/lib/format";
 import { invalidateWorkspaceConversationViews } from "@/lib/sidebar-live-update";
 import { cn } from "@/lib/utils";
-import { Composer } from "./Composer";
+import { Composer, type ComposerShortcutHandler } from "./Composer";
 import { ContactAvatar } from "./ContactAvatar";
 import { ConversationActions } from "./ConversationActions";
+import { useKeyboardShortcut } from "./KeyboardShortcutsProvider";
 import { TagPicker } from "./TagPicker";
 
 const ACTIVITY_DISPLAY_LIMIT = 50;
@@ -50,6 +51,16 @@ export function ConversationThread({
 	const [liveActivities, setLiveActivities] = useState<Activity[]>([]);
 	const [activityOpen, setActivityOpen] = useState(false);
 	const [presence, setPresence] = useState<PresenceEntry[]>([]);
+	const [tagOpen, setTagOpen] = useState(false);
+	const [assignOpen, setAssignOpen] = useState(false);
+	const [moveOpen, setMoveOpen] = useState(false);
+	const [snoozeOpen, setSnoozeOpen] = useState(false);
+	const archiveRef = useRef<(() => boolean) | null>(null);
+	const assignRef = useRef<(() => boolean) | null>(null);
+	const moveRef = useRef<(() => boolean) | null>(null);
+	const snoozeRef = useRef<(() => boolean) | null>(null);
+	const tagRef = useRef<(() => boolean) | null>(null);
+	const composerShortcutRef = useRef<ComposerShortcutHandler | null>(null);
 	const [expandedEmailIds, setExpandedEmailIds] = useState<Set<string>>(
 		() => new Set(),
 	);
@@ -73,6 +84,63 @@ export function ConversationThread({
 		queryKey: ["users", workspaceId],
 		queryFn: () => api.listUsers(workspaceId),
 	});
+	const onArchiveChange = useCallback((archive: (() => boolean) | null) => {
+		archiveRef.current = archive;
+	}, []);
+	const onAssignChange = useCallback((open: (() => boolean) | null) => {
+		assignRef.current = open;
+	}, []);
+	const onMoveChange = useCallback((open: (() => boolean) | null) => {
+		moveRef.current = open;
+	}, []);
+	const onSnoozeChange = useCallback((open: (() => boolean) | null) => {
+		snoozeRef.current = open;
+	}, []);
+	const onTagOpenRequestChange = useCallback(
+		(open: (() => boolean) | null) => {
+			tagRef.current = open;
+		},
+		[],
+	);
+	const onComposerShortcutRequestChange = useCallback(
+		(handler: ComposerShortcutHandler | null) => {
+			composerShortcutRef.current = handler;
+		},
+		[],
+	);
+
+	useKeyboardShortcut("archive", () => {
+		if (tagOpen || assignOpen || moveOpen || snoozeOpen) return false;
+		return archiveRef.current?.() ?? false;
+	});
+	useKeyboardShortcut("tag", () => {
+		if (tagOpen) return false;
+		return tagRef.current?.() ?? false;
+	});
+	useKeyboardShortcut("assign", () => {
+		if (assignOpen) return false;
+		return assignRef.current?.() ?? false;
+	});
+	useKeyboardShortcut("move", () => {
+		if (moveOpen) return false;
+		return moveRef.current?.() ?? false;
+	});
+	useKeyboardShortcut("snooze", () => {
+		if (snoozeOpen) return false;
+		return snoozeRef.current?.() ?? false;
+	});
+	useKeyboardShortcut("focus-reply", () =>
+		composerShortcutRef.current?.("focus-reply") ?? false,
+	);
+	useKeyboardShortcut("focus-comment", () =>
+		composerShortcutRef.current?.("focus-comment") ?? false,
+	);
+	useKeyboardShortcut("saved-replies", () =>
+		composerShortcutRef.current?.("saved-replies") ?? false,
+	);
+	useKeyboardShortcut("submit-composer", () =>
+		composerShortcutRef.current?.("submit-composer") ?? false,
+	);
 
 	// Reset per-conversation live state when switching threads — handled by the
 	// `key={conversationId}` remount in the parent; nothing to do here.
@@ -235,7 +303,14 @@ export function ConversationThread({
 					</div>
 				</div>
 				<div className="flex min-w-0 items-center justify-between gap-1 sm:justify-end">
-						<TagPicker conversationId={conversationId} workspaceId={workspaceId} tags={conversation.tags} />
+						<TagPicker
+							conversationId={conversationId}
+							workspaceId={workspaceId}
+							tags={conversation.tags}
+							open={tagOpen}
+							onOpenChange={setTagOpen}
+							onOpenRequestChange={onTagOpenRequestChange}
+						/>
 					<Separator orientation="vertical" className="hidden h-6 sm:block" />
 					<Button
 						type="button"
@@ -245,7 +320,20 @@ export function ConversationThread({
 					>
 						Activity
 					</Button>
-					<ConversationActions conversation={conversation} workspaceId={workspaceId} />
+					<ConversationActions
+						conversation={conversation}
+						workspaceId={workspaceId}
+						onArchiveChange={onArchiveChange}
+						onAssignChange={onAssignChange}
+						onMoveChange={onMoveChange}
+						onSnoozeChange={onSnoozeChange}
+						assignOpen={assignOpen}
+						onAssignOpenChange={setAssignOpen}
+						moveOpen={moveOpen}
+						onMoveOpenChange={setMoveOpen}
+						snoozeOpen={snoozeOpen}
+						onSnoozeOpenChange={setSnoozeOpen}
+					/>
 				</div>
 			</header>
 
@@ -355,6 +443,7 @@ export function ConversationThread({
 								: [...prev, comment],
 						)
 					}
+					onShortcutRequestChange={onComposerShortcutRequestChange}
 				/>
 			</div>
 			{activityOpen ? (

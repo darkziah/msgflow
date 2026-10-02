@@ -44,25 +44,25 @@ interface FacebookProfile {
  * never breaks because a name lookup failed. Channels without a page
  * access token (lazily-created, never connected) simply skip this.
  */
-async function fetchFacebookProfile(
+export async function fetchFacebookProfile(
 	psid: string,
 	accessToken: string,
 ): Promise<FacebookProfile | null> {
 	try {
 		const url =
 			`https://graph.facebook.com/v21.0/${encodeURIComponent(psid)}` +
-			`?fields=name,picture.type(large)&access_token=${encodeURIComponent(accessToken)}`;
+			`?fields=name,profile_pic&access_token=${encodeURIComponent(accessToken)}`;
 		const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
 		if (!response.ok) return null;
 		const data = (await response.json()) as {
 			name?: string;
-			picture?: { data?: { url?: string } };
+			profile_pic?: string;
 			error?: { message?: string };
 		};
 		if (data.error) return null;
 		return {
 			displayName: data.name ?? null,
-			avatarUrl: data.picture?.data?.url ?? null,
+			avatarUrl: data.profile_pic ?? null,
 		};
 	} catch {
 		return null;

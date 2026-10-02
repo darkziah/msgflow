@@ -12,6 +12,9 @@ export const user = sqliteTable("user", {
 		.default(false)
 		.notNull(),
 	image: text("image"),
+	onboardingTourCompletedAt: integer("onboarding_tour_completed_at", {
+		mode: "timestamp_ms",
+	}),
 	createdAt: integer("created_at", { mode: "timestamp_ms" })
 		.default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
 		.notNull(),

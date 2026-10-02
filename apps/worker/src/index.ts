@@ -56,6 +56,7 @@ import {
 	CallRejectRequestSchema,
 	CallTerminateRequestSchema,
 	CallMetricsRequestSchema,
+	ComposeEmailRequestSchema,
 } from "@msgflow/contracts";
 import { createAuth } from "@msgflow/auth";
 import { drizzle } from "drizzle-orm/d1";
@@ -151,6 +152,7 @@ import {
 	startMetaOAuth,
 } from "./meta-oauth";
 import { scheduleOutbound, sendOutbound } from "./outbound";
+import { composeEmail } from "./email-compose";
 import { getConversation, listConversations } from "./queries";
 import { getReadableInboxIds } from "./inbox-tree";
 import { handleInboxTreeMove } from "./inbox-tree-route";
@@ -180,6 +182,7 @@ import {
 import { handleInboundEmail } from "./email-ingress";
 import { emailApi, validatePrivateEmailAttachments } from "./email-api";
 import { onboardingApi } from "./onboarding-api";
+import { firstSignInWalkthroughApi } from "./first-sign-in-walkthrough-api";
 import { workspaceApi } from "./workspace-api-route";
 import { teamApi } from "./team-api";
 import {
@@ -224,6 +227,7 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => {
 	return createAuth(c.env).handler(c.req.raw);
 });
 app.route("/api", onboardingApi);
+app.route("/api", firstSignInWalkthroughApi);
 app.route("/api", workspaceApi);
 app.route("/api", teamApi);
 
@@ -399,6 +403,7 @@ app.post("/api/conversations/:id/messages", async (c) => {
 				sendAt: sendAt.toISOString(),
 				mailboxId: body.mailboxId,
 				confirmPrivateIdentity: body.confirmPrivateIdentity,
+				humanAgent: false,
 			});
 			return c.json({
 				success: true,
@@ -419,6 +424,7 @@ app.post("/api/conversations/:id/messages", async (c) => {
 			clientMessageId: body.clientMessageId,
 			mailboxId: body.mailboxId,
 			confirmPrivateIdentity: body.confirmPrivateIdentity,
+			humanAgent: true,
 		},
 		{ retryDefinitiveFailure: true },
 	);
@@ -432,6 +438,38 @@ app.post("/api/conversations/:id/messages", async (c) => {
 		...(isEmail ? { deliveryState: "accepted" as const } : {}),
 		message: result.message,
 	} satisfies SendMessageResult);
+});
+
+// POST /api/workspaces/:workspaceId/email/compose — create and send a new email.
+app.post("/api/workspaces/:workspaceId/email/compose", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const workspaceId = c.req.param("workspaceId");
+	const decoded = await decodeJsonBody(c.req.raw, ComposeEmailRequestSchema);
+	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
+	try {
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
+		const result = await composeEmail(c.env, {
+			...decoded.value,
+			workspaceId,
+			actorId: session.user.id,
+		});
+		if (!result.ok) return c.json({ success: false, error: result.error }, 502);
+		return c.json(
+			{
+				success: true,
+				conversationId: result.conversationId,
+				message: result.message,
+			},
+			201,
+		);
+	} catch (error) {
+		return manageError(c, error);
+	}
 });
 
 // GET /api/conversations — inbox list (D1 read; ADR 0015 unread counts).

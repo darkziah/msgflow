@@ -60,6 +60,7 @@ export function ConversationList({
 							type="button"
 							onClick={() => onSelect(conversation.id)}
 							aria-pressed={selected}
+							aria-current={selected ? "true" : undefined}
 							className={cn(
 								"flex w-full items-start gap-3 px-3 py-3 text-left transition-colors",
 								selected ? "bg-primary/10" : "hover:bg-accent",

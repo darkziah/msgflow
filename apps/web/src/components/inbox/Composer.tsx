@@ -45,7 +45,16 @@ interface Props {
 	showSubject?: boolean;
 	onSent?: () => void;
 	onCommentCreated?: (comment: Comment) => void;
+	onShortcutRequestChange?: (handler: ComposerShortcutHandler | null) => void;
 }
+export type ComposerShortcutRequest =
+	| "focus-reply"
+	| "focus-comment"
+	| "saved-replies"
+	| "submit-composer";
+export type ComposerShortcutHandler = (
+	request: ComposerShortcutRequest,
+) => boolean;
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 const EMAIL_TYPES = [...IMAGE_TYPES, "application/pdf"];
 type Draft = Omit<SendMessageRequest, "workspaceId">;
@@ -60,6 +69,7 @@ export function Composer({
 	showSubject = false,
 	onSent,
 	onCommentCreated,
+	onShortcutRequestChange,
 	noteOnly,
 	attachmentUnavailable = false,
 }: Props) {
@@ -81,6 +91,7 @@ export function Composer({
 	const attachmentInputRef = useRef<HTMLInputElement>(null);
 	const replyInputRef = useRef<HTMLTextAreaElement>(null);
 	const busyRef = useRef(false);
+	const submitRef = useRef<() => Promise<void>>(async () => {});
 	const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
 	const revision = useRef(0);
 	const serverRevision = useRef(0);
@@ -317,8 +328,8 @@ export function Composer({
 			input?.setSelectionRange(cursor, cursor);
 		});
 	}
-	async function submit(event: React.FormEvent) {
-		event.preventDefault();
+	async function submit(event?: React.FormEvent) {
+		event?.preventDefault();
 		if (
 			busyRef.current ||
 			(!text.trim() && (isNote || !draft.attachments?.length))
@@ -399,6 +410,7 @@ export function Composer({
 			if (showSubject) void context.refetch();
 		}
 	}
+	submitRef.current = () => submit();
 	const canSend = isNote
 		? !!note.trim()
 		: (!!draft.text.trim() || !!draft.attachments?.length) &&
@@ -410,6 +422,52 @@ export function Composer({
 					!!context.data?.recipient &&
 					!context.isError &&
 					(!privateOverride || !!draft.confirmPrivateIdentity)));
+	useEffect(() => {
+		if (!onShortcutRequestChange) return;
+
+		onShortcutRequestChange((request) => {
+			if (request === "focus-reply") {
+				if (busy || noteOnly) return false;
+				setMode("reply");
+				requestAnimationFrame(() => replyInputRef.current?.focus());
+				return true;
+			}
+			if (request === "focus-comment") {
+				if (busy) return false;
+				setMode("note");
+				requestAnimationFrame(() => replyInputRef.current?.focus());
+				return true;
+			}
+			if (request === "saved-replies") {
+				if (
+					isNote ||
+					!cannedReplies.length ||
+					busy ||
+					locked ||
+					attachmentsUnavailable
+				)
+					return false;
+				setCannedReplyDialogOpen(true);
+				return true;
+			}
+			if (request === "submit-composer") {
+				if (busy || !canSend) return false;
+				void submitRef.current();
+				return true;
+			}
+			return false;
+		});
+		return () => onShortcutRequestChange(null);
+	}, [
+		attachmentsUnavailable,
+		busy,
+		canSend,
+		cannedReplies.length,
+		isNote,
+		locked,
+		noteOnly,
+		onShortcutRequestChange,
+	]);
 	return (
 		<form onSubmit={submit} className="flex flex-col gap-2">
 			<FieldGroup className="gap-2">
@@ -714,6 +772,15 @@ export function Composer({
 									: edit({ text: e.target.value })
 							}
 							onKeyDown={(e) => {
+								if (
+									e.key === "Enter" &&
+									(e.metaKey || e.ctrlKey) &&
+									!e.nativeEvent.isComposing
+								) {
+									e.preventDefault();
+									if (canSend && !busy) void submit(e);
+									return;
+								}
 								if (
 									e.key === "Enter" &&
 									!e.shiftKey &&

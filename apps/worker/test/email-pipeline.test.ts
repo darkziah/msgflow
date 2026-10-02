@@ -15,6 +15,7 @@ import {
 } from "../src/email-storage";
 import type { Env } from "../src/env";
 import { scheduleOutbound, sendOutbound } from "../src/outbound";
+import { composeEmail } from "../src/email-compose";
 import { deliverScheduledMessages } from "../src/scheduled";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
 
@@ -156,6 +157,41 @@ function mime(
 ) {
 	return `From: Customer <customer@example.net>\r\nTo: support@example.com\r\nSubject: Pilot\r\nMessage-ID: <${id}>\r\n${extra}MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=demo\r\n\r\n--demo\r\nContent-Type: text/html; charset=utf-8\r\n\r\n${body}\r\n--demo\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=test.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n--demo--\r\n`;
 }
+
+test("new outbound email creates its conversation and sends without reply metadata", async () => {
+	const { workspaceId, messages, payloads, calls } = await fixture();
+	const result = await composeEmail(ctx.env, {
+		workspaceId,
+		actorId: "actor",
+		to: "new.customer@example.net",
+		subject: "Welcome",
+		text: "Hello from MsgFlow",
+		mailboxId: "mailbox",
+		clientMessageId: "new-email-1",
+	});
+	expect(result.ok).toBe(true);
+	if (!result.ok) return;
+	expect(result.conversationId).toStartWith("email:support@example.com:");
+	expect(messages.get("new-email-1")).toMatchObject({
+		conversationId: result.conversationId,
+		kind: "outbound",
+		text: "Hello from MsgFlow",
+	});
+	expect(calls()).toBe(1);
+	expect(payloads).toHaveLength(1);
+	const metadata = await ctx.env.DB.prepare(
+		"SELECT from_address,to_address,in_reply_to,references_json FROM email_outbound_metadata WHERE intent_id=?",
+	)
+		.bind("new-email-1")
+		.first();
+	expect(metadata).toEqual({
+		from_address: "support@example.com",
+		to_address: "new.customer@example.net",
+		in_reply_to: null,
+		references_json: "[]",
+	});
+});
+
 async function inbound(raw = mime()) {
 	await handleInboundEmail(ctx.env, {
 		to: "support@example.com",
