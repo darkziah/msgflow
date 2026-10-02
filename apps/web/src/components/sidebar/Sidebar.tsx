@@ -10,7 +10,6 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
-import { useOnlineStatus } from "@/lib/use-online-status";
 import { cn } from "@/lib/utils";
 import { InboxSettingsDrawer } from "./InboxSettingsDrawer";
 import { type SidebarFilters, SidebarTree } from "./SidebarTree";
@@ -34,7 +33,6 @@ export function Sidebar({
 	onToggleCompact,
 }: SidebarProps) {
 	const queryClient = useQueryClient();
-	const isOnline = useOnlineStatus();
 	const [drawer, setDrawer] = useState<
 		{ mode: "create" } | { mode: "edit"; inboxId: string } | null
 	>(null);
@@ -42,7 +40,6 @@ export function Sidebar({
 	const { data: tree } = useQuery({
 		queryKey: ["sidebar", workspaceId],
 		queryFn: () => api.getSidebar(workspaceId),
-		refetchInterval: isOnline ? 5000 : false,
 	});
 
 	function patchPreferences(patch: Partial<SidebarPreferences>) {

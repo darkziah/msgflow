@@ -133,9 +133,9 @@ describe("scheduled snooze revival", () => {
 			snoozed.workspaceId,
 		);
 
-		expect(standard.map((conversation) => conversation.id)).toEqual([]);
-		expect(snoozedQueue.map((conversation) => conversation.id)).toEqual([snoozed.id]);
-		expect(all.map((conversation) => conversation.id)).toEqual([
+		expect(standard.conversations.map((conversation) => conversation.id)).toEqual([]);
+		expect(snoozedQueue.conversations.map((conversation) => conversation.id)).toEqual([snoozed.id]);
+		expect(all.conversations.map((conversation) => conversation.id)).toEqual([
 			"archived-with-stale-snooze",
 		]);
 	});

@@ -260,20 +260,20 @@ test("private provisioning routes, preserves CHECK, grants and immutable audit; 
 		await listReadableMailboxes(ctx.env, workspaceId, "alice"),
 	).toMatchObject([{ openCount: 1, totalCount: 1 }]);
 	expect(
-		await listConversations(
+		(await listConversations(
 			ctx.env,
 			"owner",
 			{ mailboxId: mailbox.id },
 			workspaceId,
-		),
+		)).conversations,
 	).toHaveLength(0);
 	expect(
-		await listConversations(
+		(await listConversations(
 			ctx.env,
 			"alice",
 			{ mailboxId: mailbox.id },
 			workspaceId,
-		),
+		)).conversations,
 	).toHaveLength(1);
 	expect(
 		JSON.stringify(await getSidebar(ctx.env, workspaceId, "owner")),
@@ -307,7 +307,7 @@ test("private provisioning routes, preserves CHECK, grants and immutable audit; 
 		await resolveInboundEmailRoute(ctx.env, mailbox.canonicalAddress),
 	).toMatchObject({ ok: false });
 	expect(
-		await listConversations(ctx.env, "alice", {}, workspaceId),
+		(await listConversations(ctx.env, "alice", {}, workspaceId)).conversations,
 	).toHaveLength(1);
 	await expect(
 		ctx.env.DB.prepare("UPDATE email_audit SET action = 'tamper'").run(),
@@ -470,7 +470,7 @@ test("privacy filters precede the list limit and provisioning collisions roll ba
 		"2000-01-01T00:00:00Z",
 	).run();
 	expect(
-		(await listConversations(ctx.env, "bob", {}, workspaceId)).map(
+		(await listConversations(ctx.env, "bob", {}, workspaceId)).conversations.map(
 			(row) => row.id,
 		),
 	).toEqual(["visible-old"]);

@@ -212,10 +212,10 @@ describe("logical mailbox transport gates", () => {
 			await authorizeEmailOutbound(ctx.env, seeded.conversationId, "member"),
 		).toMatchObject({ ok: false });
 		expect(
-			await listConversations(ctx.env, "member", {}, seeded.workspaceId),
+			(await listConversations(ctx.env, "member", {}, seeded.workspaceId)).conversations,
 		).toEqual([]);
 		expect(
-			(await listConversations(ctx.env, "owner", {}, seeded.workspaceId)).map(
+			(await listConversations(ctx.env, "owner", {}, seeded.workspaceId)).conversations.map(
 				(conversation) => conversation.id,
 			),
 		).toEqual([seeded.conversationId]);
@@ -225,13 +225,13 @@ describe("logical mailbox transport gates", () => {
 			await authorizeEmailOutbound(ctx.env, seeded.conversationId, "member"),
 		).toMatchObject({ ok: false });
 		expect(
-			await listConversations(ctx.env, "member", {}, seeded.workspaceId),
+			(await listConversations(ctx.env, "member", {}, seeded.workspaceId)).conversations,
 		).toEqual([]);
 		expect(
 			await authorizeEmailOutbound(ctx.env, seeded.conversationId, "owner"),
 		).toMatchObject({ ok: true });
 		expect(
-			(await listConversations(ctx.env, "owner", {}, seeded.workspaceId)).map(
+			(await listConversations(ctx.env, "owner", {}, seeded.workspaceId)).conversations.map(
 				(conversation) => conversation.id,
 			),
 		).toEqual([seeded.conversationId]);
@@ -283,10 +283,10 @@ describe("logical mailbox transport gates", () => {
 		expect(ownerAccess.get("support@example.com")).toBe(true);
 
 		expect(
-			await listConversations(ctx.env, "member", {}, seeded.workspaceId),
+			(await listConversations(ctx.env, "member", {}, seeded.workspaceId)).conversations,
 		).toEqual([]);
 		expect(
-			(await listConversations(ctx.env, "owner", {}, seeded.workspaceId)).map(
+			(await listConversations(ctx.env, "owner", {}, seeded.workspaceId)).conversations.map(
 				(conversation) => conversation.id,
 			),
 		).toEqual([seeded.conversationId]);

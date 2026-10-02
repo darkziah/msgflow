@@ -1,4 +1,8 @@
-import type { ConversationSummary, TagSummary } from "@msgflow/contracts";
+import type {
+	ConversationListResponse,
+	ConversationSummary,
+	TagSummary,
+} from "@msgflow/contracts";
 import {
 	channels,
 	contacts,
@@ -23,8 +27,9 @@ import {
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { canReadConversation } from "./conversation-permissions";
-import { getMailboxAccessByAddress } from "./email-transport";
+import { conversationReadPredicate } from "./email-transport";
 import type { Env } from "./env";
+import { ManageError } from "./errors";
 import { getInboxDescendantIds, getReadableInboxIds } from "./inbox-tree";
 
 // Fields shared by the list and single-conversation queries. The unread count
@@ -112,6 +117,10 @@ function toSummary(
 
 /** Faceted search filters (ADR 0013): q, assignee, channel, tag, date range. */
 export interface ConversationListOptions {
+	/** Opaque keyset cursor for the last returned conversation. */
+	cursor?: string;
+	/** Page size, constrained to 1..100 (defaults to 50). */
+	limit?: number;
 	mailboxId?: string;
 	status?: "open" | "archived" | "all";
 	inboxId?: string;
@@ -143,16 +152,19 @@ export async function listConversations(
 	agentId: string,
 	opts: ConversationListOptions = {},
 	workspaceId?: string,
-): Promise<ConversationSummary[]> {
+): Promise<ConversationListResponse> {
 	const db = drizzle(env.DB);
-	if (!workspaceId) return [];
+	const pageSize = validatePageSize(opts.limit);
+	const initialCursor = opts.cursor === undefined ? undefined : decodeCursor(opts.cursor);
+	if (!workspaceId) return { conversations: [], nextCursor: null };
 	const readableInboxIds = await getReadableInboxIds(db, workspaceId, agentId);
 	const readableInboxSet = new Set(readableInboxIds);
 	let scopedInboxIds = readableInboxIds;
 	if (opts.inboxId) {
 		// A guessed, foreign, or inaccessible node has the same empty result as an
 		// empty filter, so list selection cannot reveal hierarchy membership.
-		if (!readableInboxSet.has(opts.inboxId)) return [];
+		if (!readableInboxSet.has(opts.inboxId))
+			return { conversations: [], nextCursor: null };
 		scopedInboxIds =
 			opts.inboxScope === "descendants"
 				? await getInboxDescendantIds(
@@ -231,40 +243,97 @@ export async function listConversations(
 			: undefined,
 		opts.dateFrom ? gte(conversations.lastMessageAt, opts.dateFrom) : undefined,
 		opts.dateTo ? lte(conversations.lastMessageAt, opts.dateTo) : undefined,
+		conversationReadPredicate(agentId),
 	];
 
 	const rows = await db
-		.select(conversationColumns)
-		.from(conversations)
-		.innerJoin(channels, eq(conversations.channelId, channels.id))
-		.innerJoin(contacts, eq(conversations.contactId, contacts.id))
-		.leftJoin(
-			conversationReads,
-			and(
-				eq(conversationReads.conversationId, conversations.id),
-				eq(conversationReads.agentId, agentId),
-			),
-		)
-		.where(and(...conditions))
-		.orderBy(
-			sql`${conversations.lastMessageAt} IS NULL`,
-			desc(conversations.lastMessageAt),
-		)
-		.limit(200)
-		.all();
-
-	const visibleRows = await filterMailboxAccess(
-		env,
-		agentId,
-		workspaceId,
-		rows,
-	);
+			.select(conversationColumns)
+			.from(conversations)
+			.innerJoin(channels, eq(conversations.channelId, channels.id))
+			.innerJoin(contacts, eq(conversations.contactId, contacts.id))
+			.leftJoin(
+				conversationReads,
+				and(
+					eq(conversationReads.conversationId, conversations.id),
+					eq(conversationReads.agentId, agentId),
+				),
+			)
+			.where(
+				and(
+					...conditions,
+					initialCursor ? conversationCursorPredicate(initialCursor) : undefined,
+				),
+			)
+			.orderBy(
+				sql`${conversations.lastMessageAt} IS NULL`,
+				desc(conversations.lastMessageAt),
+				desc(conversations.id),
+			)
+			.limit(pageSize + 1)
+			.all();
+	const hasMore = rows.length > pageSize;
+	const visibleRows = rows.slice(0, pageSize);
 	const tagsByConversation = await loadTagsForConversations(
 		db,
 		visibleRows.map((row) => row.id),
 	);
-	return visibleRows.map((row) =>
-		toSummary(row, tagsByConversation[row.id] ?? []),
+	return {
+		conversations: visibleRows.map((row) =>
+			toSummary(row, tagsByConversation[row.id] ?? []),
+		),
+		nextCursor: hasMore ? encodeCursor(toCursor(visibleRows.at(-1)!)) : null,
+	};
+}
+
+interface ConversationCursor {
+	lastMessageAt: string | null;
+	id: string;
+}
+
+function validatePageSize(limit: number | undefined): number {
+	if (limit === undefined) return 50;
+	if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+		throw new ManageError("limit must be an integer between 1 and 100", 400);
+	return limit;
+}
+
+function toCursor(row: Pick<ConversationRow, "lastMessageAt" | "id">): ConversationCursor {
+	return { lastMessageAt: row.lastMessageAt, id: row.id };
+}
+
+function encodeCursor(cursor: ConversationCursor): string {
+	const bytes = new TextEncoder().encode(JSON.stringify(cursor));
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function decodeCursor(value: string): ConversationCursor {
+	try {
+		if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid base64url");
+		const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+		const binary = atob(padded);
+		const parsed: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0))));
+		if (
+			typeof parsed !== "object" || parsed === null ||
+			Object.keys(parsed).length !== 2 ||
+			!("id" in parsed) || !("lastMessageAt" in parsed) ||
+			typeof parsed.id !== "string" || parsed.id.length === 0 ||
+			!(typeof parsed.lastMessageAt === "string" || parsed.lastMessageAt === null)
+		) throw new Error("invalid cursor shape");
+		return { id: parsed.id, lastMessageAt: parsed.lastMessageAt };
+	} catch {
+		throw new ManageError("invalid conversation cursor", 400);
+	}
+}
+
+function conversationCursorPredicate(cursor: ConversationCursor) {
+	if (cursor.lastMessageAt === null)
+		return and(isNull(conversations.lastMessageAt), sql`${conversations.id} < ${cursor.id}`);
+	return or(
+		and(sql`${conversations.lastMessageAt} < ${cursor.lastMessageAt}`),
+		and(eq(conversations.lastMessageAt, cursor.lastMessageAt), sql`${conversations.id} < ${cursor.id}`),
+		isNull(conversations.lastMessageAt),
 	);
 }
 
@@ -304,31 +373,6 @@ export async function getConversation(
 	return toSummary(row, tagsByConversation[row.id] ?? []);
 }
 
-/**
- * Inbox scope is already enforced in the list SQL. Email rows additionally
- * intersect that scope with mailbox policy in a fixed number of queries.
- */
-async function filterMailboxAccess(
-	env: Env,
-	userId: string,
-	workspaceId: string,
-	rows: ConversationRow[],
-): Promise<ConversationRow[]> {
-	const mailboxAccess = await getMailboxAccessByAddress(
-		env,
-		workspaceId,
-		rows
-			.filter((row) => row.channelType === "email")
-			.map((row) => row.channelExternalId),
-		userId,
-	);
-	return rows.filter(
-		(row) =>
-			row.channelType !== "email" ||
-			!mailboxAccess.has(row.channelExternalId) ||
-			mailboxAccess.get(row.channelExternalId) === true,
-	);
-}
 
 /** Tags attached to the given conversations, keyed by conversation id. */
 async function loadTagsForConversations(
@@ -336,21 +380,30 @@ async function loadTagsForConversations(
 	conversationIds: string[],
 ): Promise<Record<string, TagSummary[]>> {
 	if (conversationIds.length === 0) return {};
-	const rows = await db
-		.select({
-			conversationId: conversationTags.conversationId,
-			id: tags.id,
-			name: tags.name,
-			color: tags.color,
-			visibility: tags.visibility,
-			parentTagId: tags.parentTagId,
-			ownerUserId: tags.ownerUserId,
-			createdAt: tags.createdAt,
-		})
-		.from(conversationTags)
-		.innerJoin(tags, eq(conversationTags.tagId, tags.id))
-		.where(inArray(conversationTags.conversationId, conversationIds))
-		.all();
+	// D1 rejects statements with more than 100 bound parameters. The inbox list
+	// intentionally returns up to 100 conversations, so its tag projection must
+	// be split before building the IN clause.
+	const rows = (
+		await Promise.all(
+			chunk(conversationIds, 100).map((ids) =>
+				db
+					.select({
+						conversationId: conversationTags.conversationId,
+						id: tags.id,
+						name: tags.name,
+						color: tags.color,
+						visibility: tags.visibility,
+						parentTagId: tags.parentTagId,
+						ownerUserId: tags.ownerUserId,
+						createdAt: tags.createdAt,
+					})
+					.from(conversationTags)
+					.innerJoin(tags, eq(conversationTags.tagId, tags.id))
+					.where(inArray(conversationTags.conversationId, ids))
+					.all(),
+			),
+		)
+	).flat();
 	const byConversation: Record<string, TagSummary[]> = {};
 	for (const row of rows) {
 		const list = byConversation[row.conversationId];
@@ -379,4 +432,12 @@ async function loadTagsForConversations(
 		}
 	}
 	return byConversation;
+}
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+	const chunks: T[][] = [];
+	for (let index = 0; index < items.length; index += size) {
+		chunks.push(items.slice(index, index + size));
+	}
+	return chunks;
 }

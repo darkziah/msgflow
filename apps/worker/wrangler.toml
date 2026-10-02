@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat"]
 [assets]
 directory = "../web/dist"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/health", "/webhooks/*", "/ws", "/ws/calling"]
+run_worker_first = ["/api/*", "/health", "/webhooks/*", "/ws", "/ws/calling", "/ws/workspace"]
 
 [observability]
 enabled = true
@@ -35,6 +35,10 @@ class_name = "CallDispatchDO"
 name = "CALL_SESSION_DO"
 class_name = "CallSessionDO"
 
+[[durable_objects.bindings]]
+name = "WORKSPACE_EVENTS_DO"
+class_name = "WorkspaceEventsDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ConversationDO"]
@@ -46,6 +50,10 @@ new_sqlite_classes = ["CallDispatchDO"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["CallSessionDO"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["WorkspaceEventsDO"]
 
 [[send_email]]
 name = "EMAIL"

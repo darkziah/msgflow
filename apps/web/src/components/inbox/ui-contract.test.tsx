@@ -10,7 +10,7 @@ import {
 	waitFor,
 	within,
 } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppMobileHeader } from "@/components/layout/AppMobileHeader";
 import { AppShell } from "@/components/layout/AppShell";
@@ -32,7 +32,13 @@ import { KeyboardShortcutsProvider } from "./KeyboardShortcutsProvider";
 import { activeFilterCount, SearchBar } from "./SearchBar";
 import { TagPicker } from "./TagPicker";
 
-const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }));
+const { navigate, sockets } = vi.hoisted(() => ({
+	navigate: vi.fn(),
+	sockets: [] as Array<{
+		onmessage: ((event: MessageEvent) => void) | null;
+		onopen: (() => void) | null;
+	}>,
+}));
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(
 	HTMLElement.prototype,
 	"scrollIntoView",
@@ -63,6 +69,7 @@ vi.mock("@/lib/api", () => ({
 		updateConversation: vi.fn(),
 	},
 	conversationSocketUrl: vi.fn(() => "ws://localhost/ws"),
+	workspaceSocketUrl: vi.fn(() => "ws://localhost/ws/workspace"),
 }));
 
 vi.mock("@/lib/email-api", () => ({
@@ -136,9 +143,8 @@ function renderWithQueryClient(ui: ReactNode) {
 function renderThreadWithShortcuts(threadConversation = conversation) {
 	vi.mocked(api.getConversation).mockResolvedValue(threadConversation);
 	vi.mocked(api.getMessages).mockResolvedValue({
-		messages: [],
-		comments: [],
-		activities: [],
+		items: [],
+		nextCursor: null,
 	} as never);
 	return renderWithQueryClient(
 		<KeyboardShortcutsProvider>
@@ -162,6 +168,10 @@ describe("inbox UI contracts", () => {
 			"WebSocket",
 			class {
 				onmessage: ((event: MessageEvent) => void) | null = null;
+				onopen: (() => void) | null = null;
+				constructor() {
+					sockets.push(this);
+				}
 				close() {}
 			},
 		);
@@ -220,7 +230,8 @@ describe("inbox UI contracts", () => {
 		vi.mocked(api.getFirstSignInWalkthrough).mockResolvedValue({
 			completed: true,
 		});
-		vi.mocked(api.listConversations).mockResolvedValue({ conversations: [] });
+		vi.mocked(api.markRead).mockResolvedValue({ success: true });
+		vi.mocked(api.listConversations).mockResolvedValue({ conversations: [], nextCursor: null });
 		vi.mocked(api.updateConversation).mockResolvedValue({
 			success: true,
 			conversation,
@@ -228,6 +239,7 @@ describe("inbox UI contracts", () => {
 	});
 
 	afterEach(() => {
+		sockets.length = 0;
 		localStorage.clear();
 		vi.clearAllMocks();
 		vi.restoreAllMocks();
@@ -381,9 +393,8 @@ describe("inbox UI contracts", () => {
 	it("renders the detail header with its contact and channel", async () => {
 		vi.mocked(api.getConversation).mockResolvedValue(conversation);
 		vi.mocked(api.getMessages).mockResolvedValue({
-			messages: [],
-			comments: [],
-			activities: [],
+			items: [],
+			nextCursor: null,
 		} as never);
 		renderWithQueryClient(
 			<KeyboardShortcutsProvider>
@@ -399,6 +410,180 @@ describe("inbox UI contracts", () => {
 		).toBeInTheDocument();
 		expect(screen.getByText("Support")).toBeInTheDocument();
 		expect(screen.getByText("Billing question")).toBeInTheDocument();
+	});
+
+	it("shows and retries an initial timeline load failure", async () => {
+		vi.mocked(api.getConversation).mockResolvedValue(shortcutConversation);
+		vi.mocked(api.getMessages)
+			.mockRejectedValueOnce(new Error("offline"))
+			.mockResolvedValueOnce({ items: [], nextCursor: null } as never);
+		renderWithQueryClient(
+			<KeyboardShortcutsProvider>
+				<ConversationThread conversationId={shortcutConversation.id} workspaceId="workspace-1" />
+			</KeyboardShortcutsProvider>,
+		);
+
+		expect(await screen.findByText("Messages could not be loaded")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+		await waitFor(() => expect(api.getMessages).toHaveBeenCalledTimes(2));
+	});
+
+	it("shows a retry action after loading an older timeline page fails", async () => {
+		const timelineConversation = { ...shortcutConversation, id: "conv_timeline_retry" };
+		vi.mocked(api.getConversation).mockResolvedValue(timelineConversation);
+		vi.mocked(api.getMessages).mockImplementation((_id, _workspaceId, params) =>
+			params?.cursor
+				? Promise.reject(new Error("offline"))
+				: Promise.resolve({ items: [], nextCursor: "older" } as never),
+		);
+		renderWithQueryClient(
+			<KeyboardShortcutsProvider>
+				<ConversationThread conversationId={timelineConversation.id} workspaceId="workspace-1" />
+			</KeyboardShortcutsProvider>,
+		);
+
+		const loadOlder = await screen.findByRole("button", { name: "Load older history" });
+		fireEvent.click(loadOlder);
+		expect(await screen.findByRole("button", { name: "Retry loading older history" })).toBeEnabled();
+	});
+
+	it("loads the first timeline page, prepends older history at the top, and deduplicates live events", async () => {
+		const timelineConversation = { ...shortcutConversation, id: "conv_timeline" };
+		const newest = {
+			id: "message_newest",
+			kind: "inbound",
+			seq: 2,
+			text: "Newest timeline message",
+			attachments: [],
+			createdAt: "2026-09-26T12:00:00.000Z",
+		};
+		const oldest = {
+			id: "message_oldest",
+			kind: "inbound",
+			seq: 1,
+			text: "Older timeline message",
+			attachments: [],
+			createdAt: "2026-09-25T12:00:00.000Z",
+		};
+		let resolveOlder: ((page: never) => void) | undefined;
+		vi.mocked(api.getMessages).mockImplementation((_id, _workspaceId, params) =>
+			params?.cursor
+				? new Promise<never>((resolve) => {
+						resolveOlder = resolve;
+					})
+				: Promise.resolve({
+						items: [{ type: "message", item: newest }],
+						nextCursor: "older",
+					} as never),
+		);
+		renderWithQueryClient(
+			<KeyboardShortcutsProvider>
+				<ConversationThread
+					conversationId={timelineConversation.id}
+					workspaceId="workspace-1"
+				/>
+			</KeyboardShortcutsProvider>,
+		);
+		expect(await screen.findByText("Newest timeline message")).toBeInTheDocument();
+		expect(api.getMessages).toHaveBeenCalledWith(timelineConversation.id, "workspace-1", {
+			cursor: undefined,
+			limit: 50,
+		});
+
+		const timeline = screen.getByLabelText("Conversation timeline");
+		let scrollHeight = 400;
+		Object.defineProperties(timeline, {
+			clientHeight: { configurable: true, value: 100 },
+			scrollHeight: { configurable: true, get: () => scrollHeight },
+			scrollTop: { configurable: true, value: 0, writable: true },
+		});
+		fireEvent.scroll(timeline);
+		await waitFor(() =>
+			expect(api.getMessages).toHaveBeenLastCalledWith(timelineConversation.id, "workspace-1", {
+				cursor: "older",
+				limit: 50,
+			}),
+		);
+		scrollHeight = 600;
+		resolveOlder?.({ items: [{ type: "message", item: oldest }], nextCursor: null } as never);
+		const olderMessage = await screen.findByText("Older timeline message");
+		const newestMessage = screen.getByText("Newest timeline message");
+		expect(
+			olderMessage.compareDocumentPosition(newestMessage) & Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
+		expect(timeline.scrollTop).toBe(200);
+
+		const live = { ...newest, id: "message_live", text: "Live timeline message", seq: 3 };
+		const socket = sockets.at(-1);
+		if (!socket?.onmessage) throw new Error("Expected conversation socket");
+		socket.onmessage({ data: JSON.stringify({ type: "message:new", message: live }) } as MessageEvent);
+		socket.onmessage({ data: JSON.stringify({ type: "message:new", message: live }) } as MessageEvent);
+		await screen.findByText("Live timeline message");
+		expect(screen.getAllByText("Live timeline message")).toHaveLength(1);
+	});
+
+	it("refetches the exact timeline query when its WebSocket subscription opens", async () => {
+		vi.mocked(api.getConversation).mockResolvedValue(shortcutConversation);
+		vi.mocked(api.getMessages).mockResolvedValue({ items: [], nextCursor: null } as never);
+		renderThreadWithShortcuts(shortcutConversation);
+		await waitFor(() => expect(api.getMessages).toHaveBeenCalledTimes(1));
+
+		const socket = sockets.at(-1);
+		if (!socket?.onopen) throw new Error("Expected conversation socket open handler");
+		socket.onopen();
+
+		await waitFor(() => expect(api.getMessages).toHaveBeenCalledTimes(2));
+		expect(api.getMessages).toHaveBeenLastCalledWith(shortcutConversation.id, "workspace-1", {
+			cursor: undefined,
+			limit: 50,
+		});
+	});
+
+	it("offers older history when the newest timeline page contains only activity", async () => {
+		const timelineConversation = { ...shortcutConversation, id: "conv_activity_only" };
+		const activity = {
+			id: "activity_newest",
+			conversationId: timelineConversation.id,
+			action: "conversation.updated",
+			actorId: "user_123",
+			details: {},
+			createdAt: "2026-09-26T12:00:00.000Z",
+		};
+		const olderMessage = {
+			id: "message_older",
+			kind: "inbound",
+			seq: 1,
+			text: "Message from older history",
+			attachments: [],
+			createdAt: "2026-09-25T12:00:00.000Z",
+		};
+		vi.mocked(api.getConversation).mockResolvedValue(timelineConversation);
+		vi.mocked(api.getMessages).mockImplementation((_id, _workspaceId, params) =>
+			Promise.resolve(
+				params?.cursor
+					? ({ items: [{ type: "message", item: olderMessage }], nextCursor: null } as never)
+					: ({ items: [{ type: "activity", item: activity }], nextCursor: "older" } as never),
+			),
+		);
+		renderWithQueryClient(
+			<KeyboardShortcutsProvider>
+				<ConversationThread
+					conversationId={timelineConversation.id}
+					workspaceId="workspace-1"
+				/>
+			</KeyboardShortcutsProvider>,
+		);
+
+		expect(await screen.findByText("No messages yet")).toBeInTheDocument();
+		const loadOlder = screen.getByRole("button", { name: "Load older history" });
+		expect(loadOlder).toBeVisible();
+		fireEvent.click(loadOlder);
+		expect(await screen.findByText("Message from older history")).toBeInTheDocument();
+		expect(screen.queryByText("No messages yet")).not.toBeInTheDocument();
+		expect(api.getMessages).toHaveBeenLastCalledWith(timelineConversation.id, "workspace-1", {
+			cursor: "older",
+			limit: 50,
+		});
 	});
 
 	it("archives through the thread shortcut with the exact existing payload", async () => {
@@ -578,28 +763,33 @@ describe("inbox UI contracts", () => {
 
 	it("collapses earlier emails while keeping the newest email open", async () => {
 		vi.mocked(api.getConversation).mockResolvedValue(conversation);
-		vi.mocked(api.markRead).mockResolvedValue(undefined as never);
+		vi.mocked(api.markRead).mockResolvedValue({ success: true });
 		vi.mocked(api.getMessages).mockResolvedValue({
-			messages: [
+			items: [
 				{
-					id: "message_old",
-					kind: "inbound",
-					seq: 1,
-					text: "Earlier email body",
-					attachments: [],
-					createdAt: "2026-09-25T12:00:00.000Z",
+					type: "message",
+					item: {
+						id: "message_old",
+						kind: "inbound",
+						seq: 1,
+						text: "Earlier email body",
+						attachments: [],
+						createdAt: "2026-09-25T12:00:00.000Z",
+					},
 				},
 				{
-					id: "message_latest",
-					kind: "outbound",
-					seq: 2,
-					text: "Latest email body",
-					attachments: [],
-					createdAt: "2026-09-26T12:00:00.000Z",
+					type: "message",
+					item: {
+						id: "message_latest",
+						kind: "outbound",
+						seq: 2,
+						text: "Latest email body",
+						attachments: [],
+						createdAt: "2026-09-26T12:00:00.000Z",
+					},
 				},
 			],
-			comments: [],
-			activities: [],
+			nextCursor: null,
 		} as never);
 		renderWithQueryClient(
 			<KeyboardShortcutsProvider>
@@ -828,9 +1018,8 @@ describe("inbox UI contracts", () => {
 	it("opens the activity dialog with its accessible name", async () => {
 		vi.mocked(api.getConversation).mockResolvedValue(conversation);
 		vi.mocked(api.getMessages).mockResolvedValue({
-			messages: [],
-			comments: [],
-			activities: [],
+			items: [],
+			nextCursor: null,
 		} as never);
 		renderWithQueryClient(
 			<KeyboardShortcutsProvider>
@@ -911,7 +1100,7 @@ describe("inbox UI contracts", () => {
 		navigate.mockImplementation(({ search: nextSearch }) => {
 			search = nextSearch;
 		});
-		vi.mocked(api.listConversations).mockResolvedValue({ conversations });
+		vi.mocked(api.listConversations).mockResolvedValue({ conversations, nextCursor: null });
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -1044,11 +1233,208 @@ describe("inbox UI contracts", () => {
 		useSearch.mockRestore();
 	});
 
+	it("loads subsequent inbox pages on list scroll and navigates the flattened results", async () => {
+		const secondPageConversation: ConversationSummary = {
+			...conversation,
+			id: "conv_page_2",
+			contact: { ...conversation.contact, displayName: "Devon Page Two" },
+		};
+		let search: { workspace?: string; c?: string } = {
+			workspace: "workspace_123",
+		};
+		const useSearch = vi
+			.spyOn(Route, "useSearch")
+			.mockImplementation(() => search);
+		navigate.mockImplementation(({ search: nextSearch }) => {
+			search = nextSearch;
+		});
+		vi.mocked(api.listConversations).mockImplementation((params) =>
+			Promise.resolve(
+				params.cursor
+					? { conversations: [secondPageConversation], nextCursor: null }
+					: { conversations: [conversation], nextCursor: "page_2" },
+			),
+		);
+		renderWithQueryClient(<Inbox />);
+
+		await screen.findAllByRole("button", { name: /avery chen/i });
+		const list = screen.getAllByRole("list", { name: "Conversations" })[0];
+		Object.defineProperties(list, {
+			clientHeight: { configurable: true, value: 100 },
+			scrollHeight: { configurable: true, value: 300 },
+			scrollTop: { configurable: true, value: 176, writable: true },
+		});
+		fireEvent.scroll(list);
+
+		await waitFor(() =>
+			expect(api.listConversations).toHaveBeenLastCalledWith(
+				expect.objectContaining({ cursor: "page_2", limit: 50 }),
+			),
+		);
+		expect(
+			await screen.findAllByRole("button", { name: /devon page two/i }),
+		).not.toHaveLength(0);
+
+		const callsAfterFinalPage = vi.mocked(api.listConversations).mock.calls.length;
+		fireEvent.scroll(list);
+		expect(api.listConversations).toHaveBeenCalledTimes(callsAfterFinalPage);
+
+		navigate.mockClear();
+		const previousEvent = new KeyboardEvent("keydown", {
+			bubbles: true,
+			cancelable: true,
+			key: "ArrowUp",
+		});
+		document.dispatchEvent(previousEvent);
+		await waitFor(() =>
+			expect(navigate).toHaveBeenLastCalledWith({
+				to: "/",
+				search: { workspace: "workspace_123", c: "conv_page_2" },
+			}),
+		);
+
+		const searchInput = screen.getAllByRole("textbox", {
+			name: "Search conversations",
+		})[0];
+		fireEvent.change(searchInput, { target: { value: "invoice" } });
+		fireEvent.keyDown(searchInput, { key: "Enter" });
+		await waitFor(() =>
+			expect(api.listConversations).toHaveBeenLastCalledWith(
+				expect.objectContaining({ cursor: undefined, limit: 50, q: "invoice" }),
+			),
+		);
+		useSearch.mockRestore();
+	});
+
+	it("automatically fills a non-overflowing list and retains the load-more fallback", async () => {
+		const secondPageConversation: ConversationSummary = {
+			...conversation,
+			id: "conv_non_overflow_page_2",
+			contact: { ...conversation.contact, displayName: "Devon Non Overflow" },
+		};
+		let scrollHeight = 160;
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(
+			function (this: HTMLElement) {
+				return this.getAttribute("aria-label") === "Conversations" ? 160 : 0;
+			},
+		);
+		vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(
+			function (this: HTMLElement) {
+				return this.getAttribute("aria-label") === "Conversations" ? scrollHeight : 0;
+			},
+		);
+		const onLoadMore = vi.fn();
+		const view = render(
+			<ConversationList
+				conversations={[conversation]}
+				hasNextPage
+				onLoadMore={onLoadMore}
+				onSelect={vi.fn()}
+			/>,
+		);
+
+		await waitFor(() => expect(onLoadMore).toHaveBeenCalledTimes(1));
+		expect(
+			screen.getByRole("button", { name: "Load more conversations" }),
+		).toBeEnabled();
+
+		view.rerender(
+			<ConversationList
+				conversations={[conversation]}
+				hasNextPage
+				isFetchingNextPage
+				onLoadMore={onLoadMore}
+				onSelect={vi.fn()}
+			/>,
+		);
+		view.rerender(
+			<ConversationList
+				conversations={[conversation, secondPageConversation]}
+				hasNextPage
+				onLoadMore={onLoadMore}
+				onSelect={vi.fn()}
+			/>,
+		);
+		await waitFor(() => expect(onLoadMore).toHaveBeenCalledTimes(2));
+
+		view.rerender(
+			<ConversationList
+				conversations={[conversation, secondPageConversation]}
+				hasNextPage
+				isFetchingNextPage
+				onLoadMore={onLoadMore}
+				onSelect={vi.fn()}
+			/>,
+		);
+		scrollHeight = 300;
+		view.rerender(
+			<ConversationList
+				conversations={[conversation, secondPageConversation]}
+				hasNextPage
+				onLoadMore={onLoadMore}
+				onSelect={vi.fn()}
+			/>,
+		);
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Load more conversations" }),
+		);
+		expect(onLoadMore).toHaveBeenCalledTimes(3);
+	});
+
+	it("guards repeated scroll and button requests while a next page is deferred", async () => {
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(
+			function (this: HTMLElement) {
+				return this.getAttribute("aria-label") === "Conversations" ? 100 : 0;
+			},
+		);
+		vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(
+			function (this: HTMLElement) {
+				return this.getAttribute("aria-label") === "Conversations" ? 300 : 0;
+			},
+		);
+		let resolvePage: (() => void) | undefined;
+		const nextPage = new Promise<void>((resolve) => {
+			resolvePage = resolve;
+		});
+		const requestPage = vi.fn();
+		function DeferredConversationList() {
+			const [isFetchingNextPage, setIsFetchingNextPage] = useState(false);
+			return (
+				<ConversationList
+					conversations={[conversation]}
+					hasNextPage
+					isFetchingNextPage={isFetchingNextPage}
+					onLoadMore={() => {
+						requestPage();
+						setIsFetchingNextPage(true);
+						void nextPage.finally(() => setIsFetchingNextPage(false));
+					}}
+					onSelect={vi.fn()}
+				/>
+			);
+		}
+
+		render(<DeferredConversationList />);
+		const list = screen.getByRole("list", { name: "Conversations" });
+		Object.defineProperty(list, "scrollTop", { configurable: true, value: 200 });
+		const loadMore = screen.getByRole("button", { name: "Load more conversations" });
+		fireEvent.scroll(list);
+		fireEvent.click(loadMore);
+		fireEvent.scroll(list);
+
+		await waitFor(() => expect(requestPage).toHaveBeenCalledTimes(1));
+		expect(
+			screen.getByRole("button", { name: "Loading more conversations…" }),
+		).toBeDisabled();
+		resolvePage?.();
+	});
+
 	it("leaves ArrowUp and ArrowDown unhandled when there are no conversations", async () => {
 		const useSearch = vi
 			.spyOn(Route, "useSearch")
 			.mockReturnValue({ workspace: "workspace_123" });
-		vi.mocked(api.listConversations).mockResolvedValue({ conversations: [] });
+		vi.mocked(api.listConversations).mockResolvedValue({ conversations: [], nextCursor: null });
 		renderWithQueryClient(<Inbox />);
 
 		await screen.findAllByText("No conversations here yet.");
@@ -1073,6 +1459,7 @@ describe("inbox UI contracts", () => {
 		});
 		vi.mocked(api.listConversations).mockResolvedValue({
 			conversations: [conversation],
+			nextCursor: null,
 		});
 		renderWithQueryClient(<Inbox />);
 

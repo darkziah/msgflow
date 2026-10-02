@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { Either, Schema } from "effect";
 import type { Context } from "hono";
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type {
 	ApiResponse,
 	Attachment,
@@ -15,7 +15,7 @@ import type {
 	SavedFilterCreateRequest,
 	SendMessageResult,
 	SidebarPreferencesUpdate,
-	TimelineResponse,
+	TimelinePageResponse,
 	UserSummary,
 } from "@msgflow/contracts";
 import {
@@ -78,7 +78,12 @@ import {
 	normalizeWhatsAppWebhook,
 } from "@msgflow/channel";
 import { ConversationDO } from "./conversation-do";
-import { CallDispatchDO, callDispatchInternalHeaders } from "./call-dispatch-do";
+import { WorkspaceEventsDO } from "./workspace-events-do";
+import { notifyWorkspaceConversationChange } from "./workspace-events";
+import {
+	CallDispatchDO,
+	callDispatchInternalHeaders,
+} from "./call-dispatch-do";
 import { CallSessionDO } from "./call-session-do";
 import type { Env } from "./env";
 import { routeInbound } from "./ingest";
@@ -200,7 +205,7 @@ import {
 	updateRingGroup,
 } from "./calling-config";
 
-export { ConversationDO, CallDispatchDO, CallSessionDO };
+export { ConversationDO, CallDispatchDO, CallSessionDO, WorkspaceEventsDO };
 
 const app = new Hono<{ Bindings: Env }>();
 app.use("/api/*", async (c, next) => {
@@ -499,42 +504,53 @@ app.get("/api/conversations", async (c) => {
 					savedViewId,
 				)
 			: undefined;
+		const limitParam = c.req.query("limit");
 		const conversations = await listConversations(
 			c.env,
 			session.user.id,
 			{
-				status: savedViewFilters?.status ??
+				cursor: c.req.query("cursor") ?? undefined,
+				limit: limitParam === undefined ? undefined : Number(limitParam),
+				status:
+					savedViewFilters?.status ??
 					(statusParam === "archived" || statusParam === "all"
 						? statusParam
 						: "open"),
 				inboxId: savedViewFilters?.inboxId ?? inboxId,
-				inboxScope:
-					savedViewFilters?.inboxId
-						? "exact"
-						:
-					c.req.query("inboxScope") === "descendants"
+				inboxScope: savedViewFilters?.inboxId
+					? "exact"
+					: c.req.query("inboxScope") === "descendants"
 						? "descendants"
 						: "exact",
 				q: savedViewFilters?.q ?? c.req.query("q") ?? undefined,
 				mailboxId: c.req.query("mailboxId") ?? undefined,
-				assigneeId: savedViewFilters?.assigneeId ?? c.req.query("assigneeId") ?? undefined,
-				unassigned: savedViewFilters?.unassigned ?? (c.req.query("unassigned") === "true" || undefined),
-				snoozed: savedViewFilters?.snoozed ?? (c.req.query("snoozed") === "true" || undefined),
+				assigneeId:
+					savedViewFilters?.assigneeId ??
+					c.req.query("assigneeId") ??
+					undefined,
+				unassigned:
+					savedViewFilters?.unassigned ??
+					(c.req.query("unassigned") === "true" || undefined),
+				snoozed:
+					savedViewFilters?.snoozed ??
+					(c.req.query("snoozed") === "true" || undefined),
 				channel:
 					savedViewFilters?.channel ??
-					((c.req.query("channel") === "facebook" ||
-						c.req.query("channel") === "email" ||
-						c.req.query("channel") === "whatsapp")
+					(c.req.query("channel") === "facebook" ||
+					c.req.query("channel") === "email" ||
+					c.req.query("channel") === "whatsapp"
 						? (c.req.query("channel") as "facebook" | "email" | "whatsapp")
 						: undefined),
-				channelId: savedViewFilters?.channelId ?? c.req.query("channelId") ?? undefined,
+				channelId:
+					savedViewFilters?.channelId ?? c.req.query("channelId") ?? undefined,
 				tagId: savedViewFilters?.tagId ?? c.req.query("tagId") ?? undefined,
-				dateFrom: savedViewFilters?.dateFrom ?? c.req.query("dateFrom") ?? undefined,
+				dateFrom:
+					savedViewFilters?.dateFrom ?? c.req.query("dateFrom") ?? undefined,
 				dateTo: savedViewFilters?.dateTo ?? c.req.query("dateTo") ?? undefined,
 			},
 			workspaceId,
 		);
-		return c.json({ conversations });
+		return c.json(conversations);
 	} catch (err) {
 		return manageError(c, err);
 	}
@@ -594,29 +610,60 @@ app.get("/api/conversations/:id/messages", async (c) => {
 		);
 		if (!conversation)
 			return c.json({ success: false, error: "not found" }, 404);
+		const timelineQuery = new URLSearchParams();
+		const limitValues = c.req.queries("limit") ?? [];
+		const limitValue = limitValues[0];
+		if (
+			limitValues.length > 1 ||
+			(limitValues.length === 1 &&
+				(limitValue === undefined || !/^[1-9]\d*$/.test(limitValue)))
+		)
+			return c.json(
+				{ success: false, error: "limit must be an integer between 1 and 100" },
+				400,
+			);
+		if (limitValues.length === 1 && limitValue !== undefined) {
+			const limit = Number(limitValue);
+			if (!Number.isSafeInteger(limit) || limit > 100)
+				return c.json(
+					{
+						success: false,
+						error: "limit must be an integer between 1 and 100",
+					},
+					400,
+				);
+			timelineQuery.set("limit", limitValue);
+		}
+		const cursorValues = c.req.queries("cursor") ?? [];
+		const cursorValue = cursorValues[0];
+		if (
+			cursorValues.length > 1 ||
+			(cursorValues.length === 1 &&
+				(cursorValue === undefined || cursorValue === ""))
+		)
+			return c.json({ success: false, error: "invalid timeline cursor" }, 400);
+		if (cursorValues.length === 1 && cursorValue !== undefined)
+			timelineQuery.set("cursor", cursorValue);
 		const stub = c.env.CONVERSATION_DO.get(
 			c.env.CONVERSATION_DO.idFromName(conversationId),
 		);
-		const [messagesRes, commentsRes, activitiesRes] = await Promise.all([
-			stub.fetch("https://do/messages"),
-			stub.fetch("https://do/comments"),
-			stub.fetch("https://do/activities?limit=50"),
-		]);
-		if (!messagesRes.ok || !commentsRes.ok || !activitiesRes.ok) {
+		let timelineRes: Response;
+		try {
+			timelineRes = await stub.fetch(
+				`https://do/timeline${timelineQuery.size ? `?${timelineQuery}` : ""}`,
+			);
+		} catch {
 			return c.json({ success: false, error: "timeline unavailable" }, 502);
 		}
-		const [{ messages }, { comments }, { activities }] = await Promise.all([
-			messagesRes.json() as Promise<{ messages: TimelineResponse["messages"] }>,
-			commentsRes.json() as Promise<{ comments: TimelineResponse["comments"] }>,
-			activitiesRes.json() as Promise<{
-				activities: TimelineResponse["activities"];
-			}>,
-		]);
-		return c.json({
-			messages,
-			comments,
-			activities,
-		} satisfies TimelineResponse);
+		if (timelineRes.status === 400) {
+			return c.json(
+				{ success: false, error: "invalid timeline pagination" },
+				400,
+			);
+		}
+		if (!timelineRes.ok)
+			return c.json({ success: false, error: "timeline unavailable" }, 502);
+		return c.json((await timelineRes.json()) as TimelinePageResponse);
 	} catch (err) {
 		return manageError(c, err);
 	}
@@ -852,7 +899,9 @@ app.post("/api/conversations/:id/read", async (c) => {
 			})
 			.onConflictDoUpdate({
 				target: [conversationReads.conversationId, conversationReads.agentId],
-				set: { lastReadSeq: body.lastReadSeq },
+				set: {
+					lastReadSeq: sql`MAX(${conversationReads.lastReadSeq}, excluded.last_read_seq)`,
+				},
 			})
 			.run();
 		return c.json({ success: true });
@@ -1006,6 +1055,7 @@ app.patch("/api/conversations/:id", async (c) => {
 
 		// Best-effort relay to connected agents; the D1 write already succeeded.
 		await broadcastUpdate(c.env, id, { ...patch, updatedAt });
+		await notifyWorkspaceConversationChange(c.env, workspaceId);
 		if (Object.keys(changes).length > 0) {
 			await appendActivity(c.env, {
 				conversationId: id,
@@ -1184,21 +1234,39 @@ app.post("/api/workspaces/:workspaceId/meta-apps", async (c) => {
 	const decoded = await decodeJsonBody(c.req.raw, MetaAppCreateRequestSchema);
 	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
 	try {
-		return c.json(await createMetaApp(c.env, c.req.param("workspaceId"), decoded.value, session.user.id), 201);
+		return c.json(
+			await createMetaApp(
+				c.env,
+				c.req.param("workspaceId"),
+				decoded.value,
+				session.user.id,
+			),
+			201,
+		);
 	} catch (err) {
 		return manageError(c, err);
 	}
 });
 
-app.post("/api/workspaces/:workspaceId/meta-apps/:metaAppId/webhook-token", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		return c.json(await recreateMetaAppWebhookToken(c.env, c.req.param("workspaceId"), c.req.param("metaAppId"), session.user.id));
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
+app.post(
+	"/api/workspaces/:workspaceId/meta-apps/:metaAppId/webhook-token",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			return c.json(
+				await recreateMetaAppWebhookToken(
+					c.env,
+					c.req.param("workspaceId"),
+					c.req.param("metaAppId"),
+					session.user.id,
+				),
+			);
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
 
 // This is an explicit Owner attestation, not evidence inferred from an App ID.
 app.post(
@@ -1519,24 +1587,25 @@ async function verifyWhatsAppSignature(
 	const phoneNumberIds = [
 		...new Set(
 			(payload as { entry: unknown[] }).entry.flatMap((entry) =>
-				entry && typeof entry === "object" &&
+				entry &&
+				typeof entry === "object" &&
 				Array.isArray((entry as { changes?: unknown }).changes)
 					? (entry as { changes: unknown[] }).changes.flatMap((change) => {
-						const value =
-							change && typeof change === "object"
-								? (change as { value?: unknown }).value
-								: null;
-						const metadata =
-							value && typeof value === "object"
-								? (value as { metadata?: unknown }).metadata
-								: null;
-						return metadata &&
-							typeof metadata === "object" &&
-							typeof (metadata as { phone_number_id?: unknown })
-								.phone_number_id === "string"
-							? [(metadata as { phone_number_id: string }).phone_number_id]
-							: [];
-					})
+							const value =
+								change && typeof change === "object"
+									? (change as { value?: unknown }).value
+									: null;
+							const metadata =
+								value && typeof value === "object"
+									? (value as { metadata?: unknown }).metadata
+									: null;
+							return metadata &&
+								typeof metadata === "object" &&
+								typeof (metadata as { phone_number_id?: unknown })
+									.phone_number_id === "string"
+								? [(metadata as { phone_number_id: string }).phone_number_id]
+								: [];
+						})
 					: [],
 			),
 		),
@@ -1566,16 +1635,18 @@ async function verifyWhatsAppSignature(
 		return false;
 	}
 	const secrets = await Promise.all(
-		[...new Set(matches.map((match) => match.appSecret))].map(async (ciphertext) => {
-			try {
-				return await decryptChannelToken(
-					ciphertext,
-					env.CHANNEL_TOKEN_ENCRYPTION_KEY,
-				);
-			} catch {
-				return null;
-			}
-		}),
+		[...new Set(matches.map((match) => match.appSecret))].map(
+			async (ciphertext) => {
+				try {
+					return await decryptChannelToken(
+						ciphertext,
+						env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+					);
+				} catch {
+					return null;
+				}
+			},
+		),
 	);
 	return verifyFacebookSignatureForSecrets(
 		rawBody,
@@ -1675,21 +1746,24 @@ app.patch(
 	},
 );
 
-app.delete("/api/workspaces/:workspaceId/email-domains/:domainId", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		await deleteEmailDomain(
-			c.env,
-			c.req.param("workspaceId"),
-			c.req.param("domainId"),
-			session.user.id,
-		);
-		return c.json({ success: true });
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
+app.delete(
+	"/api/workspaces/:workspaceId/email-domains/:domainId",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			await deleteEmailDomain(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("domainId"),
+				session.user.id,
+			);
+			return c.json({ success: true });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
 
 app.get("/api/workspaces/:workspaceId/mailboxes", async (c) => {
 	const session = await getSession(c);
@@ -1829,13 +1903,13 @@ app.get("/api/workspaces/:workspaceId/inboxes", async (c) => {
 	if (!session) return unauthorized(c);
 	try {
 		const workspaceId = c.req.param("workspaceId");
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 		return c.json({
-			inboxes: await listInboxes(
-				c.env,
-				workspaceId,
-				session.user.id,
-			),
+			inboxes: await listInboxes(c.env, workspaceId, session.user.id),
 		});
 	} catch (err) {
 		return manageError(c, err);
@@ -2296,8 +2370,9 @@ app.post("/api/workspaces/:workspaceId/conversations/:id/tags", async (c) => {
 			})
 			.onConflictDoNothing()
 			.run();
-		await broadcastUpdate(c.env, id);
 		if ((tagInsert.meta.changes ?? 0) > 0) {
+			await broadcastUpdate(c.env, id);
+			await notifyWorkspaceConversationChange(c.env, workspaceId);
 			await appendActivity(c.env, {
 				conversationId: id,
 				action: "tag.added",
@@ -2312,63 +2387,67 @@ app.post("/api/workspaces/:workspaceId/conversations/:id/tags", async (c) => {
 });
 
 // Remove a tag from a conversation.
-app.delete("/api/workspaces/:workspaceId/conversations/:id/tags/:tagId", async (c) => {
-	const session = await getSession(c);
-	if (!session) return unauthorized(c);
-	try {
-		const access = await requireWorkspaceAccess(
-			drizzle(c.env.DB),
-			c.req.param("workspaceId"),
-			session.user.id,
-		);
-		const { workspaceId } = access;
-		const id = c.req.param("id");
-		const conversation = await getConversation(
-			c.env,
-			session.user.id,
-			id,
-			workspaceId,
-		);
-		if (!conversation)
-			return c.json({ success: false, error: "not found" }, 404);
+app.delete(
+	"/api/workspaces/:workspaceId/conversations/:id/tags/:tagId",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			const access = await requireWorkspaceAccess(
+				drizzle(c.env.DB),
+				c.req.param("workspaceId"),
+				session.user.id,
+			);
+			const { workspaceId } = access;
+			const id = c.req.param("id");
+			const conversation = await getConversation(
+				c.env,
+				session.user.id,
+				id,
+				workspaceId,
+			);
+			if (!conversation)
+				return c.json({ success: false, error: "not found" }, 404);
 
-		const tagId = c.req.param("tagId");
-		const tag = await drizzle(c.env.DB)
-			.select({ visibility: tags.visibility, ownerUserId: tags.ownerUserId })
-			.from(tags)
-			.where(and(eq(tags.id, tagId), eq(tags.workspaceId, workspaceId)))
-			.get();
-		if (
-			!tag ||
-			(!access.isAdmin &&
-				tag.visibility === "private" &&
-				tag.ownerUserId !== session.user.id)
-		) {
-			return c.json({ success: false, error: "tag not found" }, 404);
+			const tagId = c.req.param("tagId");
+			const tag = await drizzle(c.env.DB)
+				.select({ visibility: tags.visibility, ownerUserId: tags.ownerUserId })
+				.from(tags)
+				.where(and(eq(tags.id, tagId), eq(tags.workspaceId, workspaceId)))
+				.get();
+			if (
+				!tag ||
+				(!access.isAdmin &&
+					tag.visibility === "private" &&
+					tag.ownerUserId !== session.user.id)
+			) {
+				return c.json({ success: false, error: "tag not found" }, 404);
+			}
+			const tagDelete = await drizzle(c.env.DB)
+				.delete(conversationTags)
+				.where(
+					and(
+						eq(conversationTags.conversationId, id),
+						eq(conversationTags.tagId, tagId),
+					),
+				)
+				.run();
+			if ((tagDelete.meta.changes ?? 0) > 0) {
+				await broadcastUpdate(c.env, id);
+				await notifyWorkspaceConversationChange(c.env, workspaceId);
+				await appendActivity(c.env, {
+					conversationId: id,
+					action: "tag.removed",
+					actorId: session.user.id,
+					details: { tagId },
+				});
+			}
+			return c.json({ success: true });
+		} catch (err) {
+			return manageError(c, err);
 		}
-		const tagDelete = await drizzle(c.env.DB)
-			.delete(conversationTags)
-			.where(
-				and(
-					eq(conversationTags.conversationId, id),
-					eq(conversationTags.tagId, tagId),
-				),
-			)
-			.run();
-		await broadcastUpdate(c.env, id);
-		if ((tagDelete.meta.changes ?? 0) > 0) {
-			await appendActivity(c.env, {
-				conversationId: id,
-				action: "tag.removed",
-				actorId: session.user.id,
-				details: { tagId },
-			});
-		}
-		return c.json({ success: true });
-	} catch (err) {
-		return manageError(c, err);
-	}
-});
+	},
+);
 
 // ---------------------------------------------------------------------------
 // RULES (ADR 0009): management CRUD. Evaluation runs in ingest (rules.ts).
@@ -2694,6 +2773,9 @@ export default {
 		if (url.pathname === "/ws/calling") {
 			return handleCallingWebSocket(request, env);
 		}
+		if (url.pathname === "/ws/workspace") {
+			return handleWorkspaceWebSocket(request, env);
+		}
 		if (url.pathname === "/ws") {
 			return handleWebSocket(request, env);
 		}
@@ -2764,18 +2846,57 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 	return stub.fetch(upgraded);
 }
 
-async function handleCallingWebSocket(request: Request, env: Env): Promise<Response> {
+async function handleWorkspaceWebSocket(
+	request: Request,
+	env: Env,
+): Promise<Response> {
 	const workspaceId = new URL(request.url).searchParams.get("workspaceId");
 	if (!workspaceId) return new Response("missing workspaceId", { status: 400 });
 	const session = await createAuth(env).api.getSession({ headers: request.headers });
 	if (!session) return new Response("unauthorized", { status: 401 });
+	const agentId = session.user.id;
 	try {
-		await requireWorkspaceAccess(drizzle(env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(drizzle(env.DB), workspaceId, agentId);
 	} catch (error) {
 		if (error instanceof ManageError) return new Response("forbidden", { status: 403 });
 		throw error;
 	}
-	const headers = await callDispatchInternalHeaders(env.BETTER_AUTH_SECRET, "GET", "/ws", workspaceId, session.user.id);
+	const headers = new Headers(request.headers);
+	// Identity crosses this boundary only from the verified session and D1
+	// authorization, never from a browser query parameter or header.
+	headers.set("x-agent-id", agentId);
+	headers.set("x-workspace-id", workspaceId);
+	const dispatchUrl = new URL(request.url);
+	dispatchUrl.pathname = "/ws";
+	return env.WORKSPACE_EVENTS_DO
+		.get(env.WORKSPACE_EVENTS_DO.idFromName(workspaceId))
+		.fetch(new Request(dispatchUrl.toString(), { method: "GET", headers }));
+}
+
+async function handleCallingWebSocket(
+	request: Request,
+	env: Env,
+): Promise<Response> {
+	const workspaceId = new URL(request.url).searchParams.get("workspaceId");
+	if (!workspaceId) return new Response("missing workspaceId", { status: 400 });
+	const session = await createAuth(env).api.getSession({
+		headers: request.headers,
+	});
+	if (!session) return new Response("unauthorized", { status: 401 });
+	try {
+		await requireWorkspaceAccess(drizzle(env.DB), workspaceId, session.user.id);
+	} catch (error) {
+		if (error instanceof ManageError)
+			return new Response("forbidden", { status: 403 });
+		throw error;
+	}
+	const headers = await callDispatchInternalHeaders(
+		env.BETTER_AUTH_SECRET,
+		"GET",
+		"/ws",
+		workspaceId,
+		session.user.id,
+	);
 	// Identity crosses this boundary only from the verified session, never query
 	// parameters or browser-provided user identifiers.
 	headers.set("x-authenticated-workspace-id", workspaceId);
@@ -2785,83 +2906,171 @@ async function handleCallingWebSocket(request: Request, env: Env): Promise<Respo
 	headers.set("Upgrade", "websocket");
 	const dispatchUrl = new URL(request.url);
 	dispatchUrl.pathname = "/ws";
-	return env.CALL_DISPATCH_DO.get(env.CALL_DISPATCH_DO.idFromName(workspaceId)).fetch(
-		new Request(dispatchUrl.toString(), { method: "GET", headers }),
-	);
+	return env.CALL_DISPATCH_DO.get(
+		env.CALL_DISPATCH_DO.idFromName(workspaceId),
+	).fetch(new Request(dispatchUrl.toString(), { method: "GET", headers }));
 }
 
 app.patch("/api/workspaces/:workspaceId/calling/presence", async (c) => {
 	const session = await getSession(c);
 	if (!session) return unauthorized(c);
 	let body: unknown;
-	try { body = await c.req.json(); } catch { return c.json({ success: false, error: "invalid json" }, 400); }
-	if (!isExactRecord(body, ["status"])) return c.json({ success: false, error: "invalid presence" }, 400);
-	const status = typeof body === "object" && body !== null ? (body as { status?: unknown }).status : undefined;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false, error: "invalid json" }, 400);
+	}
+	if (!isExactRecord(body, ["status"]))
+		return c.json({ success: false, error: "invalid presence" }, 400);
+	const status =
+		typeof body === "object" && body !== null
+			? (body as { status?: unknown }).status
+			: undefined;
 	if (status !== "available" && status !== "away") {
-		return c.json({ success: false, error: "status must be available or away" }, 400);
+		return c.json(
+			{ success: false, error: "status must be available or away" },
+			400,
+		);
 	}
 	const workspaceId = c.req.param("workspaceId");
 	try {
-		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, session.user.id);
+		await requireWorkspaceAccess(
+			drizzle(c.env.DB),
+			workspaceId,
+			session.user.id,
+		);
 	} catch (error) {
-		if (error instanceof ManageError) return c.json({ success: false, error: "forbidden" }, 403);
+		if (error instanceof ManageError)
+			return c.json({ success: false, error: "forbidden" }, 403);
 		throw error;
 	}
 	const rawBody = JSON.stringify({ status });
-	const headers = await callDispatchInternalHeaders(c.env.BETTER_AUTH_SECRET, "PATCH", "/presence", workspaceId, session.user.id, rawBody);
+	const headers = await callDispatchInternalHeaders(
+		c.env.BETTER_AUTH_SECRET,
+		"PATCH",
+		"/presence",
+		workspaceId,
+		session.user.id,
+		rawBody,
+	);
 	headers.set("content-type", "application/json");
 	headers.set("x-authenticated-workspace-id", workspaceId);
 	headers.set("x-authenticated-user-id", session.user.id);
-	const response = await c.env.CALL_DISPATCH_DO.get(c.env.CALL_DISPATCH_DO.idFromName(workspaceId)).fetch(
-		new Request("https://call-dispatch/presence", { method: "PATCH", headers, body: rawBody }),
+	const response = await c.env.CALL_DISPATCH_DO.get(
+		c.env.CALL_DISPATCH_DO.idFromName(workspaceId),
+	).fetch(
+		new Request("https://call-dispatch/presence", {
+			method: "PATCH",
+			headers,
+			body: rawBody,
+		}),
 	);
-	return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
+	return new Response(response.body, {
+		status: response.status,
+		headers: { "content-type": "application/json" },
+	});
 });
 
 // Call commands cross the browser boundary only after session + workspace checks.
 // The session DO is authoritative for offered/winner authorization and serializes races.
-app.post("/api/workspaces/:workspaceId/calling/calls/:callId/accept", async (c) => {
-	const session = await getSession(c); if (!session) return unauthorized(c);
-	const decoded = await decodeJsonBody(c.req.raw, CallAcceptRequestSchema);
-	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
-	const result = await forwardCallCommand(c, session.user.id, "accept", { offerSdp: decoded.value.offerSdp });
-	return result;
-});
-app.post("/api/workspaces/:workspaceId/calling/calls/:callId/reject", async (c) => {
-	const session = await getSession(c); if (!session) return unauthorized(c);
-	const decoded = await decodeJsonBody(c.req.raw, CallRejectRequestSchema);
-	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
-	return forwardCallCommand(c, session.user.id, "reject", { reason: decoded.value.reason });
-});
-app.post("/api/workspaces/:workspaceId/calling/calls/:callId/terminate", async (c) => {
-	const session = await getSession(c); if (!session) return unauthorized(c);
-	const decoded = await decodeJsonBody(c.req.raw, CallTerminateRequestSchema);
-	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
-	return forwardCallCommand(c, session.user.id, "terminate", { reason: decoded.value.reason });
-});
-app.post("/api/workspaces/:workspaceId/calling/calls/:callId/metrics", async (c) => {
-	const session = await getSession(c); if (!session) return unauthorized(c);
-	const decoded = await decodeJsonBody(c.req.raw, CallMetricsRequestSchema);
-	if (!decoded.ok) return c.json({ success: false, error: decoded.error }, 400);
-	return forwardCallCommand(c, session.user.id, "metrics", decoded.value);
-});
+app.post(
+	"/api/workspaces/:workspaceId/calling/calls/:callId/accept",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		const decoded = await decodeJsonBody(c.req.raw, CallAcceptRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		const result = await forwardCallCommand(c, session.user.id, "accept", {
+			offerSdp: decoded.value.offerSdp,
+		});
+		return result;
+	},
+);
+app.post(
+	"/api/workspaces/:workspaceId/calling/calls/:callId/reject",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		const decoded = await decodeJsonBody(c.req.raw, CallRejectRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		return forwardCallCommand(c, session.user.id, "reject", {
+			reason: decoded.value.reason,
+		});
+	},
+);
+app.post(
+	"/api/workspaces/:workspaceId/calling/calls/:callId/terminate",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		const decoded = await decodeJsonBody(c.req.raw, CallTerminateRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		return forwardCallCommand(c, session.user.id, "terminate", {
+			reason: decoded.value.reason,
+		});
+	},
+);
+app.post(
+	"/api/workspaces/:workspaceId/calling/calls/:callId/metrics",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		const decoded = await decodeJsonBody(c.req.raw, CallMetricsRequestSchema);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		return forwardCallCommand(c, session.user.id, "metrics", decoded.value);
+	},
+);
 
-async function forwardCallCommand(c: Context<{ Bindings: Env }>, actorId: string, action: "accept" | "reject" | "terminate" | "metrics", body: Record<string, unknown>): Promise<Response> {
+async function forwardCallCommand(
+	c: Context<{ Bindings: Env }>,
+	actorId: string,
+	action: "accept" | "reject" | "terminate" | "metrics",
+	body: Record<string, unknown>,
+): Promise<Response> {
 	const workspaceId = c.req.param("workspaceId");
 	const callId = c.req.param("callId");
-	try { await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, actorId); } catch (error) {
-		if (error instanceof ManageError) return c.json({ success: false, error: "forbidden" }, 403);
+	try {
+		await requireWorkspaceAccess(drizzle(c.env.DB), workspaceId, actorId);
+	} catch (error) {
+		if (error instanceof ManageError)
+			return c.json({ success: false, error: "forbidden" }, 403);
 		throw error;
 	}
-	const owned = await c.env.DB.prepare("SELECT 1 FROM call_events WHERE workspace_id=? AND provider_call_id=? LIMIT 1").bind(workspaceId, callId).first();
+	const owned = await c.env.DB.prepare(
+		"SELECT 1 FROM call_events WHERE workspace_id=? AND provider_call_id=? LIMIT 1",
+	)
+		.bind(workspaceId, callId)
+		.first();
 	if (!owned) return c.json({ success: false, error: "not found" }, 404);
 	const rawBody = JSON.stringify({ ...body, actorId });
-	const headers = await callDispatchInternalHeaders(c.env.BETTER_AUTH_SECRET, "POST", `/${action}`, workspaceId, actorId, rawBody);
+	const headers = await callDispatchInternalHeaders(
+		c.env.BETTER_AUTH_SECRET,
+		"POST",
+		`/${action}`,
+		workspaceId,
+		actorId,
+		rawBody,
+	);
 	headers.set("content-type", "application/json");
 	headers.set("x-authenticated-workspace-id", workspaceId);
 	headers.set("x-authenticated-user-id", actorId);
-	const response = await c.env.CALL_SESSION_DO.get(c.env.CALL_SESSION_DO.idFromName(`facebook-call:${callId}`)).fetch(new Request(`https://call-session/${action}`, { method: "POST", headers, body: rawBody }));
-	return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
+	const response = await c.env.CALL_SESSION_DO.get(
+		c.env.CALL_SESSION_DO.idFromName(`facebook-call:${callId}`),
+	).fetch(
+		new Request(`https://call-session/${action}`, {
+			method: "POST",
+			headers,
+			body: rawBody,
+		}),
+	);
+	return new Response(response.body, {
+		status: response.status,
+		headers: { "content-type": "application/json" },
+	});
 }
 
 // Facebook Page calling configuration is workspace-admin only. The service owns all
@@ -3063,9 +3272,17 @@ function unauthorized(c: Context<{ Bindings: Env }>) {
 	return c.json({ success: false, error: "unauthorized" }, 401);
 }
 
-function isExactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value) &&
-		Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
+function isExactRecord(
+	value: unknown,
+	keys: readonly string[],
+): value is Record<string, unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.keys(value).length === keys.length &&
+		Object.keys(value).every((key) => keys.includes(key))
+	);
 }
 
 /** Map a ManageError (validation/not-found) to a JSON error response. */
@@ -3084,9 +3301,9 @@ function manageError(c: Context<{ Bindings: Env }>, err: unknown) {
 }
 
 /**
- * Relay a conversation-updated broadcast through the DO so open threads and
- * the inbox list update in real time (ADR 0004). Best-effort: the D1 write
- * already succeeded; a dead DO just means clients refetch on their poll.
+ * Relay a conversation-updated broadcast through the per-conversation DO for
+ * open threads (ADR 0004). Callers emit the separate workspace event for inbox
+ * lists. Both relays are best-effort after the authoritative D1 write.
  */
 async function broadcastUpdate(
 	env: Env,

@@ -12,6 +12,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { canonicalEnvelopeAddress, canAccessMailbox } from "./email-transport";
 import type { Env } from "./env";
 import { sendOutbound, type SendResult } from "./outbound";
+import { notifyWorkspaceConversationChange } from "./workspace-events";
 
 export interface ComposeEmailInput {
 	workspaceId: string;
@@ -154,6 +155,7 @@ export async function composeEmail(
 			updatedAt: now,
 		})
 		.run();
+	await notifyWorkspaceConversationChange(env, input.workspaceId);
 	const result = await sendOutbound(env, {
 		conversationId,
 		text: input.text,

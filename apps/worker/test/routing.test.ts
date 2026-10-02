@@ -2461,7 +2461,7 @@ describe("sidebar + preferences", () => {
 					{ channelId: channelA },
 					workspaceId,
 				)
-			).map((conversation) => conversation.id),
+			).conversations.map((conversation) => conversation.id),
 		).toEqual(["a"]);
 		const view = await createSavedFilter(ctx.env, workspaceId, ADMIN, {
 			name: "Only A",
@@ -2521,15 +2521,15 @@ describe("sidebar + preferences", () => {
 		const summaries = async (
 			channel: NonNullable<Parameters<typeof listConversations>[2]>["channel"],
 		) => listConversations(ctx.env, ADMIN, { channel }, workspaceId);
-		await expect(summaries("facebook")).resolves.toMatchObject([
+		await expect(summaries("facebook")).resolves.toMatchObject({ conversations: [
 			{ id: "facebook-conversation", channel: "facebook" },
-		]);
-		await expect(summaries("email")).resolves.toMatchObject([
+		] });
+		await expect(summaries("email")).resolves.toMatchObject({ conversations: [
 			{ id: "email-conversation", channel: "email" },
-		]);
-		await expect(summaries("whatsapp")).resolves.toMatchObject([
+		] });
+		await expect(summaries("whatsapp")).resolves.toMatchObject({ conversations: [
 			{ id: "whatsapp-conversation", channel: "whatsapp" },
-		]);
+		] });
 	});
 
 	test("a member cannot delete another member's saved filter", async () => {
@@ -3569,7 +3569,7 @@ describe("conversation inbox visibility scope", () => {
 
 		const ids = (
 			await listConversations(ctx.env, MEMBER, { status: "all" }, workspaceId)
-		).map((conversation) => conversation.id);
+		).conversations.map((conversation) => conversation.id);
 		expect(ids).toContain("team-one");
 		expect(ids).not.toContain("private-one");
 		expect(ids).not.toContain("private-two");
@@ -3641,15 +3641,15 @@ describe("conversation inbox visibility scope", () => {
 					{ inboxId: "scope-root", inboxScope: "descendants" },
 					workspaceId,
 				)
-			).map((conversation) => conversation.id),
+			).conversations.map((conversation) => conversation.id),
 		).toEqual(["scope-visible", "scope-team-visible"]);
 		expect(
-			await listConversations(
+			(await listConversations(
 				ctx.env,
 				MEMBER,
 				{ inboxId: "scope-private", inboxScope: "exact" },
 				workspaceId,
-			),
+			)).conversations,
 		).toEqual([]);
 		expect(
 			await getConversation(ctx.env, MEMBER, "scope-hidden", workspaceId),
@@ -3733,7 +3733,7 @@ describe("conversation inbox visibility scope", () => {
 			.run();
 
 		const ids = async (options: Parameters<typeof listConversations>[2]) =>
-			(await listConversations(ctx.env, MEMBER, options, workspaceId)).map(
+			(await listConversations(ctx.env, MEMBER, options, workspaceId)).conversations.map(
 				(conversation) => conversation.id,
 			);
 		expect(await ids({ status: "all" })).not.toContain("scope-hidden");
@@ -3747,5 +3747,46 @@ describe("conversation inbox visibility scope", () => {
 		expect(await ids({ snoozed: true })).toEqual(["scope-snoozed-visible"]);
 		expect(await ids({ channel: "email" })).not.toContain("scope-hidden");
 		expect(await ids({ tagId: "scope-tag" })).toEqual(["scope-visible"]);
+	});
+
+	test("loads tags for inbox lists with more than D1's 100 bind-parameter limit", async () => {
+		const { workspaceId } = await setup();
+		await insertTreeInbox(workspaceId, "large-list");
+		const channelId = await insertChannel(workspaceId);
+		const contactId = await insertContact(workspaceId);
+		const now = new Date().toISOString();
+		await ctx.env.DB.batch(
+			Array.from({ length: 101 }, (_, index) => {
+				const id = `large-list-${index}`;
+				return ctx.env.DB.prepare(
+					"INSERT INTO conversations (id, workspace_id, channel_id, inbox_id, contact_id, do_binding_id, status, message_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)",
+				).bind(id, workspaceId, channelId, "large-list", contactId, id, now, now);
+			}),
+		);
+		await ctx.db
+			.insert(tags)
+			.values({
+				id: "large-list-tag",
+				workspaceId,
+				name: "Large list",
+				visibility: "shared",
+				createdAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(conversationTags)
+			.values({
+				id: "large-list-tag-link",
+				conversationId: "large-list-100",
+				tagId: "large-list-tag",
+				createdAt: now,
+			})
+			.run();
+
+		const result = await listConversations(ctx.env, ADMIN, { limit: 100 }, workspaceId);
+		expect(result.conversations).toHaveLength(100);
+		expect(
+			result.conversations.find((conversation) => conversation.id === "large-list-100")?.tags,
+		).toMatchObject([{ id: "large-list-tag" }]);
 	});
 });

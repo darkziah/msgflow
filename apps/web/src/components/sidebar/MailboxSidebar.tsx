@@ -17,7 +17,6 @@ export function MailboxSidebar({
 	const query = useQuery({
 		queryKey: ["assigned-mailboxes", workspaceId, userId],
 		queryFn: () => emailApi.assigned(workspaceId),
-		refetchInterval: 5000,
 	});
 	return (
 		<section

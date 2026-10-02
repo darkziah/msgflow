@@ -4,6 +4,7 @@ import type {
 	CannedReplyWriteRequest,
 	ChannelSummary,
 	CommentNotificationsResponse,
+	ConversationListResponse,
 	ConversationSummary,
 	ConversationUpdateRequest,
 	ConversationUpdateResponse,
@@ -31,7 +32,7 @@ import type {
 	TagSummary,
 	TagUpdateRequest,
 	TeamSummary,
-	TimelineResponse,
+	TimelinePageResponse,
 	UserSummary,
 	WorkspaceSummary,
 } from "@msgflow/contracts";
@@ -161,6 +162,8 @@ export const api = {
 		dateFrom?: string;
 		dateTo?: string;
 		inboxScope?: "exact" | "descendants";
+		cursor?: string;
+		limit?: number;
 	}) {
 		const qs = new URLSearchParams();
 		if (params.mailboxId) qs.set("mailboxId", params.mailboxId);
@@ -178,8 +181,10 @@ export const api = {
 		if (params?.savedViewId) qs.set("savedViewId", params.savedViewId);
 		if (params?.dateFrom) qs.set("dateFrom", params.dateFrom);
 		if (params?.dateTo) qs.set("dateTo", params.dateTo);
+		if (params.cursor) qs.set("cursor", params.cursor);
+		if (params.limit !== undefined) qs.set("limit", String(params.limit));
 		const query = qs.toString();
-		return request<{ conversations: ConversationSummary[] }>(
+		return request<ConversationListResponse>(
 			`/api/conversations${query ? `?${query}` : ""}`,
 		);
 	},
@@ -188,9 +193,16 @@ export const api = {
 			`/api/conversations/${id}?workspaceId=${encodeURIComponent(workspaceId)}`,
 		);
 	},
-	getMessages(id: string, workspaceId: string) {
-		return request<TimelineResponse>(
-			`/api/conversations/${id}/messages?workspaceId=${encodeURIComponent(workspaceId)}`,
+	getMessages(
+		id: string,
+		workspaceId: string,
+		params: { cursor?: string; limit?: number } = {},
+	) {
+		const qs = new URLSearchParams({ workspaceId });
+		if (params.cursor) qs.set("cursor", params.cursor);
+		if (params.limit !== undefined) qs.set("limit", String(params.limit));
+		return request<TimelinePageResponse>(
+			`/api/conversations/${encodeURIComponent(id)}/messages?${qs.toString()}`,
 		);
 	},
 	createComment(id: string, body: CreateCommentRequest) {
@@ -623,4 +635,16 @@ export function conversationSocketUrl(
 	}
 	const proto = window.location.protocol === "https:" ? "wss" : "ws";
 	return `${proto}://${window.location.host}/ws?conversationId=${encodeURIComponent(conversationId)}&workspaceId=${encodeURIComponent(workspaceId)}`;
+}
+
+/** WebSocket URL for workspace-scoped inbox-list refresh signals. */
+export function workspaceSocketUrl(workspaceId: string): string {
+	const base = import.meta.env.VITE_SERVER_URL;
+	if (base) {
+		const url = new URL(base);
+		const proto = url.protocol === "https:" ? "wss" : "ws";
+		return `${proto}://${url.host}/ws/workspace?workspaceId=${encodeURIComponent(workspaceId)}`;
+	}
+	const proto = window.location.protocol === "https:" ? "wss" : "ws";
+	return `${proto}://${window.location.host}/ws/workspace?workspaceId=${encodeURIComponent(workspaceId)}`;
 }
