@@ -237,7 +237,7 @@ export const callEvents = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
-// 2. CHANNELS (Facebook Pages + email mailboxes)
+// 2. CHANNELS (Facebook Pages, Cloudflare mailboxes, and Gmail accounts)
 // ---------------------------------------------------------------------------
 
 export const channels = sqliteTable(
@@ -248,10 +248,11 @@ export const channels = sqliteTable(
 			.notNull()
 			.references(() => workspaces.id, { onDelete: "cascade" }),
 		type: text("type", {
-			enum: ["facebook_page", "email", "whatsapp_phone"],
+			enum: ["facebook_page", "email", "gmail", "whatsapp_phone"],
 		}).notNull(),
 		displayName: text("display_name").notNull(),
-		// Facebook: Page ID. Email: mailbox address. WhatsApp: immutable Meta Phone Number ID.
+		// Facebook: Page ID. Email: Cloudflare mailbox address. Gmail: account id.
+		// WhatsApp: immutable Meta Phone Number ID.
 		externalId: text("external_id").notNull(),
 		// Encrypted at rest; only the Worker/channel layer reads these.
 		accessToken: text("access_token"),
@@ -292,6 +293,92 @@ export const channels = sqliteTable(
 			),
 	],
 );
+
+// OAuth credentials for Gmail live here, never on generic channels. A Gmail
+// account has exactly one Channel and retains its own sync state and lease.
+export const gmailAccounts = sqliteTable(
+	"gmail_accounts",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+		ownerUserId: text("owner_user_id").notNull().references(() => user.id, { onDelete: "restrict" }),
+		accessMode: text("access_mode", { enum: ["private", "shared"] }).notNull(),
+		teamId: text("team_id").references(() => teams.id, { onDelete: "set null" }),
+		googleSub: text("google_sub").notNull(),
+		email: text("email").notNull(),
+		encryptedRefreshToken: text("encrypted_refresh_token").notNull(),
+		tokenKeyVersion: integer("token_key_version").notNull(),
+		historyId: text("history_id"),
+		watchExpirationAt: text("watch_expiration_at"),
+		syncState: text("sync_state", { enum: ["idle", "syncing", "error", "reconnect_required"] })
+			.notNull()
+			.default("idle"),
+		lastSyncedAt: text("last_synced_at"),
+		backfillDays: integer("backfill_days").notNull().default(30),
+		scopesJson: text("scopes_json").notNull(),
+		archiveRemovesInboxLabel: integer("archive_removes_inbox_label", { mode: "boolean" })
+			.notNull()
+			.default(false),
+		syncClaimToken: text("sync_claim_token"),
+		syncClaimedAt: text("sync_claimed_at"),
+		lastError: text("last_error"),
+		createdAt: text("created_at").notNull(),
+		updatedAt: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("idx_gmail_accounts_channel").on(table.channelId),
+		uniqueIndex("idx_gmail_accounts_google_sub").on(table.googleSub),
+		uniqueIndex("idx_gmail_accounts_workspace_email").on(table.workspaceId, table.email),
+		check("gmail_accounts_backfill_days_range", sql`${table.backfillDays} BETWEEN 1 AND 90`),
+	],
+);
+
+export const gmailAccountDelegates = sqliteTable(
+	"gmail_account_delegates",
+	{
+		accountId: text("account_id").notNull().references(() => gmailAccounts.id, { onDelete: "cascade" }),
+		userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [primaryKey({ columns: [table.accountId, table.userId] })],
+);
+
+export const gmailMessageRefs = sqliteTable(
+	"gmail_message_refs",
+	{
+		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+		gmailMessageId: text("gmail_message_id").notNull(),
+		gmailThreadId: text("gmail_thread_id").notNull(),
+		conversationId: text("conversation_id").notNull().references(() => conversations.id, { onDelete: "cascade" }),
+		direction: text("direction", { enum: ["inbound", "outbound"] }).notNull(),
+		rfcMessageId: text("rfc_message_id"),
+		inReplyTo: text("in_reply_to"),
+		referencesJson: text("references_json"),
+		labelIdsJson: text("label_ids_json"),
+		rawObjectKey: text("raw_object_key"),
+		processedAt: text("processed_at"),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("idx_gmail_message_refs_message").on(table.channelId, table.gmailMessageId),
+		uniqueIndex("idx_gmail_message_refs_thread").on(table.channelId, table.gmailThreadId),
+	],
+);
+
+export const gmailOauthSessions = sqliteTable("gmail_oauth_sessions", {
+	id: text("id").primaryKey(),
+	workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+	actorUserId: text("actor_user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+	inboxId: text("inbox_id").notNull().references(() => inboxes.id, { onDelete: "cascade" }),
+	accessMode: text("access_mode", { enum: ["private", "shared"] }).notNull(),
+	teamId: text("team_id").references(() => teams.id, { onDelete: "set null" }),
+	backfillDays: integer("backfill_days").notNull(),
+	encryptedState: text("encrypted_state").notNull(),
+	expiresAt: text("expires_at").notNull(),
+	consumedAt: text("consumed_at"),
+	createdAt: text("created_at").notNull(),
+});
 
 /** Installation-owned Meta Apps; each may authorize multiple Page Channels. */
 export const metaApps = sqliteTable(
@@ -447,7 +534,7 @@ export const contactIdentities = sqliteTable(
 			.notNull()
 			.references(() => channels.id, { onDelete: "cascade" }),
 		channelType: text("channel_type", {
-			enum: ["facebook_page", "email", "whatsapp_phone"],
+			enum: ["facebook_page", "email", "gmail", "whatsapp_phone"],
 		}).notNull(),
 		// Facebook: PSID. Email: sender address. WhatsApp: customer WhatsApp ID.
 		externalUserId: text("external_user_id").notNull(),
@@ -487,6 +574,8 @@ export const conversations = sqliteTable(
 			.references(() => contacts.id, { onDelete: "cascade" }),
 		// Durable Object instance name; derived as the conversation id itself.
 		doBindingId: text("do_binding_id").notNull(),
+		// Gmail's provider thread id; null for existing channel transports.
+		externalThreadId: text("external_thread_id"),
 		subject: text("subject"), // email subject, null for Facebook
 		// open | archived only — snoozing is orthogonal (snoozed_until) (ADR 0008).
 		status: text("status", { enum: ["open", "archived"] })
@@ -509,6 +598,9 @@ export const conversations = sqliteTable(
 			table.id,
 			table.workspaceId,
 		),
+		uniqueIndex("idx_conversations_channel_external_thread")
+			.on(table.channelId, table.externalThreadId)
+			.where(sql`${table.externalThreadId} IS NOT NULL`),
 		index("idx_conversations_assignee").on(table.assigneeId),
 		index("idx_conversations_contact").on(table.contactId),
 		index("idx_conversations_last_activity").on(table.lastMessageAt),

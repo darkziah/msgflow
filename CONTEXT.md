@@ -68,7 +68,11 @@ _Avoid_: user account, mailbox grant
 The human on the other end of a Conversation. May hold multiple channel identities (Facebook PSID, email address).
 
 **Channel**:
-The transport identity a Conversation flows through — a Facebook Messenger Page or an email Mailbox. A Conversation belongs to exactly one Channel. A Channel is connected explicitly only after first-use setup; it is never created by webhook ingress or a legacy route. Every Channel has one default Inbox, though an Inbox may hold multiple Channels.
+The transport identity a Conversation flows through — a Facebook Messenger Page, a Cloudflare logical Mailbox, or a Gmail Account. A Conversation belongs to exactly one Channel. A Channel is connected explicitly only after first-use setup; it is never created by webhook ingress or a legacy route. Every Channel has one default Inbox, though an Inbox may hold multiple Channels.
+
+**Gmail Account**:
+A Google mailbox connected through OAuth, represented by exactly one Gmail Channel and one default Inbox. It is not a Cloudflare Mailbox, Email Domain, or Reply Identity.
+_Avoid_: Mailbox, Google Workspace domain
 
 **Page**:
 A Facebook business Page (the business-side identity for Facebook conversations), represented by one Facebook Messenger Channel rather than an Email Domain or Mailbox. A verified Workspace Owner or Administrator connects it through the post-setup Channel wizard by selecting an installation-level Meta App connection, then selecting its existing Shared Inbox and Page through Facebook Login for Business. An installation may register multiple Meta Apps; each App ID and encrypted App secret is reusable only by its own Page Channels, while Page access tokens remain per Channel. While a Meta App is in development mode, the connecting person must be its Meta developer/tester and only Meta-authorized Pages are selectable; App Review/verification is not required for that developer-only connection. MsgFlow validates the selected Page token and requests its Page-level Messenger subscription before persisting the encrypted token. Tokens and App secrets are never returned after connection. The email analogue is a Mailbox (e.g. support@example.com).
@@ -118,6 +122,7 @@ _Avoid_: Google Workspace domain, shared DNS zone
 - A **Message** is either inbound or outbound.
 - A **Contact** may hold multiple channel identities across **Channels**.
 - A **Page** (or mailbox) hosts many **Conversations**.
+- A **Gmail Account** is represented by one Gmail **Channel**, which hosts Gmail-thread **Conversations**.
 - A **Mailbox** hosts many email **Conversations**.
 - A **Mailbox** is represented by one email **Channel**, which has one default **Inbox**.
 - A **Private Mailbox** has one owning **Agent** and zero or more explicitly granted delegate **Agents**.
@@ -162,4 +167,5 @@ _Avoid_: Google Workspace domain, shared DNS zone
 - "agent" / "user" / "teammate" were used interchangeably — resolved: **Agent** is the domain term; Better-auth's "user" maps to **Agent**.
 - "owner" vs "assignee" — resolved: **Assignee** (Front's term); a Conversation has at most one.
 - "closed" vs "archived" — resolved: **archived**; following Front, there is no distinct "closed" state.
+- "Mailbox" could refer to a Google mailbox — resolved: **Mailbox** remains the Cloudflare logical-email concept; use **Gmail Account** for OAuth-connected Google mail.
 - "company" tag type and tag nesting (`parent_id`) — deferred to Phase 2 (needs workspaces). Now implemented: `tags.visibility` (company/shared/private) + `parent_tag_id` in the Phase 2 schema (migration 0003).

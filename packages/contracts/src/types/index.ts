@@ -2,7 +2,7 @@
 
 import type { InboxAssignmentStrategy, InboxIconKey } from "../inbox-schema";
 
-export type Channel = "facebook" | "email" | "whatsapp";
+export type Channel = "facebook" | "email" | "gmail" | "whatsapp";
 
 export type MessageKind = "inbound" | "outbound";
 
@@ -378,7 +378,7 @@ export interface UserSummary {
 // state. Access tokens never leave the Worker; only hasToken is exposed.
 export interface ChannelSummary {
 	id: string;
-	type: "facebook_page" | "email" | "whatsapp_phone";
+	type: "facebook_page" | "email" | "gmail" | "whatsapp_phone";
 	displayName: string;
 	externalId: string;
 	status: "active" | "disconnected" | "error" | "deleted";
@@ -448,7 +448,7 @@ export interface InboxSummary {
 export interface InboxChannelLink {
 	channelId: string;
 	channelDisplayName: string;
-	channelType: "facebook_page" | "email" | "whatsapp_phone";
+	channelType: "facebook_page" | "email" | "gmail" | "whatsapp_phone";
 	/** True when this channel's default inbox is this inbox. */
 	isDefault: boolean;
 }
@@ -648,7 +648,7 @@ export interface SavedFilterFilters {
 	assigneeId?: string;
 	unassigned?: boolean;
 	snoozed?: boolean;
-	channel?: "facebook" | "email" | "whatsapp";
+	channel?: "facebook" | "email" | "gmail" | "whatsapp";
 	/** Exact authorized channel selection from a sidebar leaf. */
 	channelId?: string;
 	tagId?: string;

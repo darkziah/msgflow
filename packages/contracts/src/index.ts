@@ -6,6 +6,7 @@ export * from "./inbox-schema";
 export * from "./management-schema";
 export * from "./mailbox-schema";
 export * from "./email-api-schema";
+export * from "./gmail-schema";
 export * from "./provider-schema";
 export * from "./setup-schema";
 export * from "./team-management-schema";

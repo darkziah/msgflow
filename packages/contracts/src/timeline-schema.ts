@@ -76,7 +76,7 @@ export const TimelineMessageSchema = Schema.Struct({
 	id: Identifier,
 	conversationId: Identifier,
 	kind: Schema.Literal("inbound", "outbound"),
-	channel: Schema.Literal("facebook", "email", "whatsapp"),
+	channel: Schema.Literal("facebook", "email", "gmail", "whatsapp"),
 	providerMessageId: Schema.NullOr(Identifier),
 	senderId: Identifier,
 	text: Schema.String.pipe(Schema.maxLength(5 * 1024 * 1024)),
