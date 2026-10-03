@@ -114,6 +114,7 @@ describe("Gmail channel migration constraints", () => {
 				inboxId: "inbox-1",
 				contactId: "contact-1",
 				doBindingId: "conversation-1",
+				externalThreadId: "thread-1",
 				createdAt: now,
 				updatedAt: now,
 			})
@@ -128,8 +129,26 @@ describe("Gmail channel migration constraints", () => {
 			createdAt: now,
 		};
 		await ctx.db.insert(gmailMessageRefs).values(ref).run();
+		await ctx.db.insert(gmailMessageRefs).values({ ...ref, gmailMessageId: "message-2" }).run();
 		await expect(
-			ctx.db.insert(gmailMessageRefs).values({ ...ref, gmailMessageId: "message-2" }).run(),
+			ctx.db.insert(gmailMessageRefs).values(ref).run(),
+		).rejects.toThrow();
+
+		await expect(
+			ctx.db
+				.insert(conversations)
+				.values({
+					id: "conversation-2",
+					workspaceId,
+					channelId: "channel-1",
+					inboxId: "inbox-1",
+					contactId: "contact-1",
+					doBindingId: "conversation-2",
+					externalThreadId: "thread-1",
+					createdAt: now,
+					updatedAt: now,
+				})
+				.run(),
 		).rejects.toThrow();
 	});
 });

@@ -362,7 +362,7 @@ export const gmailMessageRefs = sqliteTable(
 	},
 	(table) => [
 		uniqueIndex("idx_gmail_message_refs_message").on(table.channelId, table.gmailMessageId),
-		uniqueIndex("idx_gmail_message_refs_thread").on(table.channelId, table.gmailThreadId),
+		index("idx_gmail_message_refs_thread").on(table.channelId, table.gmailThreadId),
 	],
 );
 
