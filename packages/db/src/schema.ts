@@ -369,19 +369,25 @@ export const gmailMessageRefs = sqliteTable(
 	],
 );
 
-export const gmailOauthSessions = sqliteTable("gmail_oauth_sessions", {
-	id: text("id").primaryKey(),
-	workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-	actorUserId: text("actor_user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
-	inboxId: text("inbox_id").notNull().references(() => inboxes.id, { onDelete: "cascade" }),
-	accessMode: text("access_mode", { enum: ["private", "shared"] }).notNull(),
-	teamId: text("team_id").references(() => teams.id, { onDelete: "set null" }),
-	backfillDays: integer("backfill_days").notNull(),
-	encryptedState: text("encrypted_state").notNull(),
-	expiresAt: text("expires_at").notNull(),
-	consumedAt: text("consumed_at"),
-	createdAt: text("created_at").notNull(),
-});
+export const gmailOauthSessions = sqliteTable(
+	"gmail_oauth_sessions",
+	{
+		id: text("id").primaryKey(),
+		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+		actorUserId: text("actor_user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+		inboxId: text("inbox_id").notNull().references(() => inboxes.id, { onDelete: "cascade" }),
+		accessMode: text("access_mode", { enum: ["private", "shared"] }).notNull(),
+		teamId: text("team_id").references(() => teams.id, { onDelete: "set null" }),
+		backfillDays: integer("backfill_days").notNull(),
+		encryptedState: text("encrypted_state").notNull(),
+		expiresAt: text("expires_at").notNull(),
+		consumedAt: text("consumed_at"),
+		createdAt: text("created_at").notNull(),
+	},
+	(table) => [
+		check("gmail_oauth_sessions_backfill_days_range", sql`${table.backfillDays} BETWEEN 1 AND 90`),
+	],
+);
 
 /** Installation-owned Meta Apps; each may authorize multiple Page Channels. */
 export const metaApps = sqliteTable(
