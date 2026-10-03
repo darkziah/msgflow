@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { eq } from "drizzle-orm";
 import {
 	channels,
 	contacts,
@@ -81,7 +82,38 @@ describe("Gmail channel migration constraints", () => {
 		await expect(insertGmailAccount(workspaceId, "channel-2", "google-sub-1")).rejects.toThrow();
 	});
 
-	test("enforces Gmail message and delegate mappings exactly once", async () => {
+	test("0032 permits a Gmail ref for a mismatched conversation", async () => {
+		ctx = await createTestDb({ throughMigration: "0032_gmail_message_refs_thread_lookup.sql" });
+		const { workspaceId } = await seedWorkspace(ctx);
+		await seedUser(ctx, "owner", "owner@example.test");
+		await insertGmailAccount(workspaceId, "channel-1", "google-sub-1");
+		const now = new Date().toISOString();
+
+		await ctx.db.insert(inboxes).values({ id: "inbox-1", workspaceId, name: "Gmail", createdAt: now }).run();
+		await ctx.db.insert(contacts).values({ id: "contact-1", workspaceId, createdAt: now, updatedAt: now }).run();
+		await ctx.db.insert(conversations).values({
+			id: "conversation-wrong-thread",
+			workspaceId,
+			channelId: "channel-1",
+			inboxId: "inbox-1",
+			contactId: "contact-1",
+			doBindingId: "conversation-wrong-thread",
+			externalThreadId: "thread-2",
+			createdAt: now,
+			updatedAt: now,
+		}).run();
+
+		await ctx.db.insert(gmailMessageRefs).values({
+			channelId: "channel-1",
+			gmailMessageId: "message-wrong-thread",
+			gmailThreadId: "thread-1",
+			conversationId: "conversation-wrong-thread",
+			direction: "inbound",
+			createdAt: now,
+		}).run();
+	});
+
+	test("enforces Gmail message, delegate, and channel/thread conversation mappings", async () => {
 		ctx = await createTestDb();
 		const { workspaceId } = await seedWorkspace(ctx);
 		await seedUser(ctx, "owner", "owner@example.test");
@@ -149,6 +181,75 @@ describe("Gmail channel migration constraints", () => {
 					updatedAt: now,
 				})
 				.run(),
+		).rejects.toThrow();
+
+		await insertGmailAccount(workspaceId, "channel-2", "google-sub-2");
+		await ctx.db
+			.insert(conversations)
+			.values({
+				id: "conversation-other-channel",
+				workspaceId,
+				channelId: "channel-2",
+				inboxId: "inbox-1",
+				contactId: "contact-1",
+				doBindingId: "conversation-other-channel",
+				externalThreadId: "thread-1",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(conversations)
+			.values({
+				id: "conversation-other-thread",
+				workspaceId,
+				channelId: "channel-1",
+				inboxId: "inbox-1",
+				contactId: "contact-1",
+				doBindingId: "conversation-other-thread",
+				externalThreadId: "thread-2",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(conversations)
+			.values({
+				id: "conversation-no-thread",
+				workspaceId,
+				channelId: "channel-1",
+				inboxId: "inbox-1",
+				contactId: "contact-1",
+				doBindingId: "conversation-no-thread",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+
+		await expect(
+			ctx.db.insert(gmailMessageRefs).values({
+				...ref,
+				gmailMessageId: "message-other-channel",
+				conversationId: "conversation-other-channel",
+			}).run(),
+		).rejects.toThrow();
+		await expect(
+			ctx.db.insert(gmailMessageRefs).values({
+				...ref,
+				gmailMessageId: "message-other-thread",
+				conversationId: "conversation-other-thread",
+			}).run(),
+		).rejects.toThrow();
+		await expect(
+			ctx.db.insert(gmailMessageRefs).values({
+				...ref,
+				gmailMessageId: "message-no-thread",
+				conversationId: "conversation-no-thread",
+			}).run(),
+		).rejects.toThrow();
+		await expect(
+			ctx.db.update(gmailMessageRefs).set({ conversationId: "conversation-other-thread" })
+				.where(eq(gmailMessageRefs.gmailMessageId, "message-2")).run(),
 		).rejects.toThrow();
 	});
 });

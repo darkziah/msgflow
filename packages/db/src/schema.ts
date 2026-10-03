@@ -346,6 +346,8 @@ export const gmailAccountDelegates = sqliteTable(
 
 export const gmailMessageRefs = sqliteTable(
 	"gmail_message_refs",
+	// Migration 0033 enforces that each ref's conversation has the same channel
+	// and external Gmail thread ID; SQLite triggers provide this cross-table invariant.
 	{
 		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
 		gmailMessageId: text("gmail_message_id").notNull(),
