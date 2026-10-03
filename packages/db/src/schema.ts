@@ -294,8 +294,9 @@ export const channels = sqliteTable(
 	],
 );
 
-// OAuth credentials for Gmail live here, never on generic channels. A Gmail
-// account has exactly one Channel and retains its own sync state and lease.
+// OAuth credentials for Gmail live here, never on generic channels. Migration
+// 0034 requires their channel to exist and remain type "gmail". A Gmail account
+// has exactly one Channel and retains its own sync state and lease.
 export const gmailAccounts = sqliteTable(
 	"gmail_accounts",
 	{
@@ -346,8 +347,8 @@ export const gmailAccountDelegates = sqliteTable(
 
 export const gmailMessageRefs = sqliteTable(
 	"gmail_message_refs",
-	// Migration 0033 enforces that each ref's conversation has the same channel
-	// and external Gmail thread ID; SQLite triggers provide this cross-table invariant.
+	// Migration 0034 requires each ref's channel to remain type "gmail"; it also
+	// prevents conversation channel/thread updates from orphaning this mapping.
 	{
 		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
 		gmailMessageId: text("gmail_message_id").notNull(),

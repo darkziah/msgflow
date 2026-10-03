@@ -239,6 +239,13 @@
 			"when": 1791043006833,
 			"tag": "0033_gmail_message_refs_conversation_thread_integrity",
 			"breakpoints": true
+		},
+		{
+			"idx": 34,
+			"version": "6",
+			"when": 1791052727303,
+			"tag": "0034_gmail_channel_mapping_update_integrity",
+			"breakpoints": true
 		}
 	]
 }

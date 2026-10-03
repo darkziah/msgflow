@@ -252,4 +252,113 @@ describe("Gmail channel migration constraints", () => {
 				.where(eq(gmailMessageRefs.gmailMessageId, "message-2")).run(),
 		).rejects.toThrow();
 	});
+
+	test("preserves Gmail-only channels and existing conversation thread refs across updates", async () => {
+		ctx = await createTestDb();
+		const { workspaceId } = await seedWorkspace(ctx);
+		await seedUser(ctx, "owner", "owner@example.test");
+		await insertGmailAccount(workspaceId, "gmail-channel", "google-sub-gmail");
+		const now = new Date().toISOString();
+
+		await ctx.db.insert(channels).values({
+			id: "email-channel",
+			workspaceId,
+			type: "email",
+			displayName: "Email",
+			externalId: "email:inbox@example.test",
+			createdAt: now,
+			updatedAt: now,
+		}).run();
+		await ctx.db.insert(inboxes).values({ id: "inbox-1", workspaceId, name: "Inbox", createdAt: now }).run();
+		await ctx.db.insert(contacts).values({ id: "contact-1", workspaceId, createdAt: now, updatedAt: now }).run();
+		await ctx.db.insert(conversations).values([
+			{
+				id: "gmail-conversation",
+				workspaceId,
+				channelId: "gmail-channel",
+				inboxId: "inbox-1",
+				contactId: "contact-1",
+				doBindingId: "gmail-conversation",
+				externalThreadId: "gmail-thread",
+				createdAt: now,
+				updatedAt: now,
+			},
+			{
+				id: "email-conversation",
+				workspaceId,
+				channelId: "email-channel",
+				inboxId: "inbox-1",
+				contactId: "contact-1",
+				doBindingId: "email-conversation",
+				externalThreadId: "email-thread",
+				createdAt: now,
+				updatedAt: now,
+			},
+		]).run();
+		const gmailRef = {
+			channelId: "gmail-channel",
+			gmailMessageId: "gmail-message",
+			gmailThreadId: "gmail-thread",
+			conversationId: "gmail-conversation",
+			direction: "inbound" as const,
+			createdAt: now,
+		};
+		await ctx.db.insert(gmailMessageRefs).values(gmailRef).run();
+
+		await expect(ctx.db.insert(gmailAccounts).values({
+			id: "email-account",
+			workspaceId,
+			channelId: "email-channel",
+			ownerUserId: "owner",
+			accessMode: "shared",
+			googleSub: "google-sub-email",
+			email: "email-account@example.test",
+			encryptedRefreshToken: "encrypted",
+			tokenKeyVersion: 1,
+			backfillDays: 30,
+			scopesJson: "[]",
+			createdAt: now,
+			updatedAt: now,
+		}).run()).rejects.toThrow();
+		await expect(
+			ctx.db.update(gmailAccounts).set({ channelId: "email-channel" })
+				.where(eq(gmailAccounts.id, "account-gmail-channel")).run(),
+		).rejects.toThrow();
+
+		await expect(ctx.db.insert(gmailMessageRefs).values({
+			channelId: "email-channel",
+			gmailMessageId: "email-message",
+			gmailThreadId: "email-thread",
+			conversationId: "email-conversation",
+			direction: "inbound",
+			createdAt: now,
+		}).run()).rejects.toThrow();
+		await expect(
+			ctx.db.update(gmailMessageRefs).set({
+				channelId: "email-channel",
+				gmailThreadId: "email-thread",
+				conversationId: "email-conversation",
+			}).where(eq(gmailMessageRefs.gmailMessageId, "gmail-message")).run(),
+		).rejects.toThrow();
+
+		await expect(
+			ctx.db.update(conversations).set({ externalThreadId: "other-thread" })
+				.where(eq(conversations.id, "gmail-conversation")).run(),
+		).rejects.toThrow();
+		await expect(
+			ctx.db.update(conversations).set({ channelId: "email-channel" })
+				.where(eq(conversations.id, "gmail-conversation")).run(),
+		).rejects.toThrow();
+		await expect(
+			ctx.db.update(channels).set({ type: "email" })
+				.where(eq(channels.id, "gmail-channel")).run(),
+		).rejects.toThrow();
+
+		await ctx.db.update(conversations).set({ subject: "Updated subject", status: "archived" })
+			.where(eq(conversations.id, "gmail-conversation")).run();
+		const updatedConversation = await ctx.db.select().from(conversations)
+			.where(eq(conversations.id, "gmail-conversation")).get();
+		expect(updatedConversation?.subject).toBe("Updated subject");
+		expect(updatedConversation?.status).toBe("archived");
+	});
 });
