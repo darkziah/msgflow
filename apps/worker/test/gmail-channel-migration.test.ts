@@ -25,6 +25,17 @@ async function insertGmailAccount(
 ) {
 	const now = new Date().toISOString();
 	await ctx.db
+		.insert(workspaceMembers)
+		.values({
+			id: `owner-membership-${workspaceId}`,
+			workspaceId,
+			userId: "owner",
+			role: "owner",
+			createdAt: now,
+		})
+		.onConflictDoNothing()
+		.run();
+	await ctx.db
 		.insert(channels)
 		.values({
 			id: channelId,
@@ -43,7 +54,7 @@ async function insertGmailAccount(
 			workspaceId,
 			channelId,
 			ownerUserId: "owner",
-			accessMode: "shared",
+			accessMode: "private",
 			googleSub,
 			email: `${channelId}@example.test`,
 			encryptedRefreshToken: "encrypted",
@@ -210,6 +221,74 @@ describe("Gmail channel migration constraints", () => {
 				.where(eq(gmailOauthSessions.id, session.id))
 				.run(),
 		).rejects.toThrow();
+
+		await insertGmailAccount(workspaceA, "gmail-channel-a", "google-subject-a");
+		await expect(
+			ctx.db
+				.insert(gmailAccounts)
+				.values({
+					id: "account-nonmember-owner",
+					workspaceId: workspaceA,
+					channelId: "gmail-channel-a",
+					ownerUserId: "nonmember",
+					accessMode: "private",
+					googleSub: "nonmember-owner-subject",
+					email: "nonmember-owner@example.test",
+					encryptedRefreshToken: "encrypted",
+					tokenKeyVersion: 1,
+					backfillDays: 30,
+					scopesJson: "[]",
+					createdAt: now,
+					updatedAt: now,
+				})
+				.run(),
+		).rejects.toThrow();
+		await expect(
+			ctx.db
+				.insert(gmailAccountDelegates)
+				.values({
+					accountId: "account-gmail-channel-a",
+					userId: "nonmember",
+					createdAt: now,
+				})
+				.run(),
+		).rejects.toThrow();
+		await ctx.db
+			.insert(contacts)
+			.values({
+				id: "contact-b",
+				workspaceId: "workspace-b",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(conversations)
+			.values({
+				id: "cross-workspace-conversation",
+				workspaceId: "workspace-b",
+				channelId: "gmail-channel-a",
+				inboxId: "inbox-b",
+				contactId: "contact-b",
+				doBindingId: "cross-workspace-conversation",
+				externalThreadId: "thread-a",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await expect(
+			ctx.db
+				.insert(gmailMessageRefs)
+				.values({
+					channelId: "gmail-channel-a",
+					gmailMessageId: "cross-workspace-message",
+					gmailThreadId: "thread-a",
+					conversationId: "cross-workspace-conversation",
+					direction: "inbound",
+					createdAt: now,
+				})
+				.run(),
+		).rejects.toThrow();
 	});
 
 	test("enforces one Gmail account per channel and globally unique Google subject", async () => {
@@ -298,6 +377,16 @@ describe("Gmail channel migration constraints", () => {
 		await insertGmailAccount(workspaceId, "channel-1", "google-sub-1");
 		const now = new Date().toISOString();
 		const accountId = "account-channel-1";
+		await ctx.db
+			.insert(workspaceMembers)
+			.values({
+				id: "delegate-membership",
+				workspaceId,
+				userId: "delegate",
+				role: "member",
+				createdAt: now,
+			})
+			.run();
 
 		await ctx.db
 			.insert(gmailAccountDelegates)

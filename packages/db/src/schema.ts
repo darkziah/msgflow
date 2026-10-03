@@ -299,6 +299,8 @@ export const channels = sqliteTable(
 // has exactly one Channel and retains its own sync state and lease.
 export const gmailAccounts = sqliteTable(
 	"gmail_accounts",
+	// Migrations 0035/0036 require the channel, owner, and optional team to
+	// belong to workspaceId, and encode the private/shared team relationship.
 	{
 		id: text("id").primaryKey(),
 		workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -337,6 +339,7 @@ export const gmailAccounts = sqliteTable(
 
 export const gmailAccountDelegates = sqliteTable(
 	"gmail_account_delegates",
+	// Migration 0036 requires every delegate to be a member of the account workspace.
 	{
 		accountId: text("account_id").notNull().references(() => gmailAccounts.id, { onDelete: "cascade" }),
 		userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
@@ -347,8 +350,8 @@ export const gmailAccountDelegates = sqliteTable(
 
 export const gmailMessageRefs = sqliteTable(
 	"gmail_message_refs",
-	// Migration 0034 requires each ref's channel to remain type "gmail"; it also
-	// prevents conversation channel/thread updates from orphaning this mapping.
+	// Migrations 0034/0036 require each ref channel to remain Gmail and its
+	// conversation to retain the same channel, thread, and workspace mapping.
 	{
 		channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
 		gmailMessageId: text("gmail_message_id").notNull(),
