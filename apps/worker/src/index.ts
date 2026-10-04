@@ -30,6 +30,7 @@ import {
 	MetaAppCreateRequestSchema,
 	MetaAppUpdateRequestSchema,
 	MetaOAuthStartRequestSchema,
+	GmailOAuthStartRequestSchema,
 	PrivateMailboxCreateRequestSchema,
 	SharedMailboxCreateRequestSchema,
 	ChannelConnectRequestSchema,
@@ -156,6 +157,11 @@ import {
 	listAuthorizedPages,
 	startMetaOAuth,
 } from "./meta-oauth";
+import {
+	beginGmailChannelOAuth,
+	completeGmailChannelOAuth,
+	disconnectGmailChannel,
+} from "./gmail-channel";
 import { scheduleOutbound, sendOutbound } from "./outbound";
 import { composeEmail } from "./email-compose";
 import { getConversation, listConversations } from "./queries";
@@ -1401,6 +1407,76 @@ app.get("/api/meta-oauth/callback", async (c) => {
 		return c.text("Facebook authorization failed", 400);
 	}
 });
+
+app.post(
+	"/api/workspaces/:workspaceId/gmail-channels/oauth/start",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		const decoded = await decodeJsonBody(
+			c.req.raw,
+			GmailOAuthStartRequestSchema,
+		);
+		if (!decoded.ok)
+			return c.json({ success: false, error: decoded.error }, 400);
+		try {
+			return c.json(
+				await beginGmailChannelOAuth(
+					c.env,
+					c.req.param("workspaceId"),
+					decoded.value,
+					session.user.id,
+					new URL(c.req.url).origin,
+				),
+			);
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+
+// OAuth state is bound to the current Better Auth principal before consumption.
+app.get("/api/gmail-oauth/callback", async (c) => {
+	const session = await getSession(c);
+	if (!session) return unauthorized(c);
+	const state = c.req.query("state");
+	const code = c.req.query("code");
+	if (!state || !code)
+		return c.json(
+			{ success: false, error: "missing Gmail authorization code or state" },
+			400,
+		);
+	try {
+		const result = await completeGmailChannelOAuth(
+			c.env,
+			state,
+			code,
+			session.user.id,
+		);
+		return c.json({ success: true, channelId: result.channelId });
+	} catch (err) {
+		return manageError(c, err);
+	}
+});
+
+app.post(
+	"/api/workspaces/:workspaceId/gmail-channels/:channelId/disconnect",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			await disconnectGmailChannel(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("channelId"),
+				session.user.id,
+			);
+			return c.json({ success: true });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
 
 // POST /api/workspaces/:workspaceId/channels/:id/token — store a Page access
 // token (dev-mode connect; the production flow will be a Meta OAuth callback).
@@ -3298,7 +3374,7 @@ function manageError(c: Context<{ Bindings: Env }>, err: unknown) {
 	if (err instanceof ManageError) {
 		return c.json(
 			{ success: false, error: err.message },
-			err.status as 400 | 403 | 404 | 409,
+			err.status as 400 | 403 | 404 | 409 | 503,
 		);
 	}
 	if (err instanceof SyntaxError) {
