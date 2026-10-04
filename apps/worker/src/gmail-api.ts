@@ -10,7 +10,11 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 export class GmailApiError extends Error {
 	constructor(
 		message: string,
-		readonly kind: "authentication" | "retryable" | "definitive",
+		readonly kind:
+			| "authentication"
+			| "retryable"
+			| "definitive"
+			| "historyExpired",
 	) {
 		super(message);
 	}
@@ -37,6 +41,15 @@ export type GmailThread = {
 	id: string;
 	historyId: string | null;
 	messages: GmailMessage[];
+};
+
+export type GmailHistoryPage = {
+	history: {
+		id: string;
+		messagesAdded: { id: string; threadId: string }[];
+	}[];
+	nextPageToken: string | null;
+	historyId: string | null;
 };
 
 /**
@@ -134,7 +147,50 @@ export class GmailApi {
 		};
 	}
 
-	private async get(path: string): Promise<Record<string, unknown>> {
+	async listHistory(
+		startHistoryId: string,
+		pageToken?: string,
+	): Promise<GmailHistoryPage> {
+		const params = new URLSearchParams({ startHistoryId, maxResults: "100" });
+		if (pageToken) params.set("pageToken", pageToken);
+		const value = await this.get(`/history?${params}`, true);
+		const history = Array.isArray(value.history)
+			? value.history.flatMap((entry) => {
+					if (!entry || typeof entry !== "object") return [];
+					const item = entry as { id?: unknown; messagesAdded?: unknown };
+					if (typeof item.id !== "string") return [];
+					const messagesAdded = Array.isArray(item.messagesAdded)
+						? item.messagesAdded.flatMap((added) => {
+								const message =
+									added && typeof added === "object"
+										? (added as { message?: unknown }).message
+										: null;
+								if (!message || typeof message !== "object") return [];
+								const candidate = message as {
+									id?: unknown;
+									threadId?: unknown;
+								};
+								return typeof candidate.id === "string" &&
+									typeof candidate.threadId === "string"
+									? [{ id: candidate.id, threadId: candidate.threadId }]
+									: [];
+							})
+						: [];
+					return [{ id: item.id, messagesAdded }];
+				})
+			: [];
+		return {
+			history,
+			nextPageToken:
+				typeof value.nextPageToken === "string" ? value.nextPageToken : null,
+			historyId: typeof value.historyId === "string" ? value.historyId : null,
+		};
+	}
+
+	private async get(
+		path: string,
+		historyNotFound = false,
+	): Promise<Record<string, unknown>> {
 		const accessToken = await this.refreshAccessToken();
 		let response: Response;
 		try {
@@ -151,6 +207,11 @@ export class GmailApi {
 		if (!response.ok) {
 			if (response.status === 401 || response.status === 403)
 				await this.markReconnectRequired();
+			if (response.status === 404 && historyNotFound)
+				throw new GmailApiError(
+					"Gmail history cursor expired",
+					"historyExpired",
+				);
 			throw this.requestError(response.status);
 		}
 		try {

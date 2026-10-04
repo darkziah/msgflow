@@ -13,6 +13,7 @@ import type { Env } from "../src/env";
 import {
 	backfillGmailInbox,
 	backfillPendingGmailInboxes,
+	reconcileGmailHistory,
 } from "../src/gmail-sync";
 import { createTestDb, seedWorkspace, type TestCtx } from "./helpers";
 
@@ -226,5 +227,145 @@ describe("Gmail initial inbox sync", () => {
 		mockGmail([message("one", "customer@example.test")]);
 		await backfillGmailInbox(env, "gmail");
 		expect(await ctx.db.select().from(gmailMessageRefs).all()).toHaveLength(1);
+	});
+});
+
+describe("Gmail History reconciliation", () => {
+	async function historyEnv(historyId = "10") {
+		const env = await setup();
+		await ctx.env.DB.prepare(
+			"UPDATE gmail_accounts SET history_id=? WHERE channel_id='gmail'",
+		)
+			.bind(historyId)
+			.run();
+		return env;
+	}
+	function mockHistory(
+		pages: Record<string, unknown>,
+		threadMessages = [message("new", "customer@example.test")],
+	) {
+		globalThis.fetch = (async (url) => {
+			const value = String(url);
+			if (value.includes("/token"))
+				return Response.json({ access_token: "access" });
+			if (value.includes("/history?")) {
+				const token = new URL(value).searchParams.get("pageToken") ?? "first";
+				const page = pages[token];
+				if (page instanceof Response) return page;
+				return Response.json(page);
+			}
+			if (value.includes("/threads/thread"))
+				return Response.json({ id: "thread", messages: threadMessages });
+			if (value.includes("/threads?"))
+				return Response.json({ threads: [{ id: "thread" }] });
+			if (value.includes("/profile"))
+				return Response.json({
+					emailAddress: "owner@example.test",
+					historyId: "99",
+				});
+			throw new Error(`unexpected ${value}`);
+		}) as typeof fetch;
+	}
+	test("commits each completed history page in order", async () => {
+		const env = await historyEnv();
+		mockHistory({
+			first: {
+				history: [
+					{
+						id: "11",
+						messagesAdded: [{ message: { id: "new", threadId: "thread" } }],
+					},
+				],
+				nextPageToken: "second",
+			},
+			second: { history: [{ id: "12", messagesAdded: [] }], historyId: "12" },
+		});
+		await reconcileGmailHistory(env, "gmail");
+		expect(
+			(
+				await ctx.db
+					.select()
+					.from(gmailAccounts)
+					.where(eq(gmailAccounts.channelId, "gmail"))
+					.get()
+			)?.historyId,
+		).toBe("12");
+		expect(await ctx.db.select().from(gmailMessageRefs).all()).toHaveLength(1);
+	});
+	test("deduplicates out-of-order added messages and never regresses for a stale requested ID", async () => {
+		const env = await historyEnv("20");
+		mockHistory({
+			first: {
+				history: [
+					{
+						id: "21",
+						messagesAdded: [
+							{ message: { id: "new", threadId: "thread" } },
+							{ message: { id: "new", threadId: "thread" } },
+						],
+					},
+				],
+				historyId: "21",
+			},
+		});
+		await reconcileGmailHistory(env, "gmail", "1");
+		expect(await ctx.db.select().from(gmailMessageRefs).all()).toHaveLength(1);
+		expect(
+			(
+				await ctx.db
+					.select()
+					.from(gmailAccounts)
+					.where(eq(gmailAccounts.channelId, "gmail"))
+					.get()
+			)?.historyId,
+		).toBe("21");
+	});
+	test("clears an expired history cursor and performs bounded backfill recovery", async () => {
+		const env = await historyEnv();
+		mockHistory({ first: new Response("expired", { status: 404 }) });
+		await reconcileGmailHistory(env, "gmail");
+		expect(
+			(
+				await ctx.db
+					.select()
+					.from(gmailAccounts)
+					.where(eq(gmailAccounts.channelId, "gmail"))
+					.get()
+			)?.historyId,
+		).toBe("99");
+		expect(await ctx.db.select().from(gmailMessageRefs).all()).toHaveLength(1);
+	});
+	test("leaves the history cursor unchanged when durable projection fails", async () => {
+		const env = await historyEnv();
+		ctx.env.CONVERSATION_DO = {
+			idFromName: (id: string) => id,
+			get: () => ({
+				fetch: async () => new Response("unavailable", { status: 503 }),
+			}),
+		} as Env["CONVERSATION_DO"];
+		env.CONVERSATION_DO = ctx.env.CONVERSATION_DO;
+		mockHistory({
+			first: {
+				history: [
+					{
+						id: "11",
+						messagesAdded: [{ message: { id: "new", threadId: "thread" } }],
+					},
+				],
+				historyId: "11",
+			},
+		});
+		await expect(reconcileGmailHistory(env, "gmail")).rejects.toThrow(
+			"append failed",
+		);
+		expect(
+			(
+				await ctx.db
+					.select()
+					.from(gmailAccounts)
+					.where(eq(gmailAccounts.channelId, "gmail"))
+					.get()
+			)?.historyId,
+		).toBe("10");
 	});
 });

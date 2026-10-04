@@ -3,7 +3,7 @@ import { and, eq, isNull, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { Env } from "./env";
 import type { GmailMessage } from "./gmail-api";
-import { GmailApi } from "./gmail-api";
+import { GmailApi, GmailApiError } from "./gmail-api";
 import { routeInbound } from "./ingest";
 
 const MAX_BACKFILL_THREADS = 5_000;
@@ -49,7 +49,167 @@ export async function backfillPendingGmailInboxes(env: Env): Promise<void> {
 	}
 }
 
-/** Imports a bounded Inbox snapshot under a renewable compare-and-set lease. */
+export type GmailHistorySyncResult = {
+	messages: number;
+	recovered: boolean;
+};
+
+/** Reconciles a stored Gmail history cursor; requested IDs only trigger work. */
+export async function reconcileGmailHistory(
+	env: Env,
+	channelId: string,
+	_requestedHistoryId?: string,
+): Promise<GmailHistorySyncResult> {
+	const db = drizzle(env.DB);
+	const account = await db
+		.select({
+			email: gmailAccounts.email,
+			historyId: gmailAccounts.historyId,
+			backfillDays: gmailAccounts.backfillDays,
+		})
+		.from(gmailAccounts)
+		.innerJoin(channels, eq(gmailAccounts.channelId, channels.id))
+		.where(
+			and(
+				eq(gmailAccounts.channelId, channelId),
+				eq(channels.type, "gmail"),
+				eq(channels.status, "active"),
+			),
+		)
+		.get();
+	if (!account) throw new Error("Gmail channel is unavailable");
+	if (!account.historyId) {
+		await backfillGmailInbox(env, channelId);
+		return { messages: 0, recovered: true };
+	}
+	const claimToken = crypto.randomUUID();
+	const now = new Date().toISOString();
+	const expired = new Date(Date.now() - SYNC_LEASE_MS).toISOString();
+	const claim = await env.DB.prepare(
+		`UPDATE gmail_accounts SET sync_claim_token=?, sync_claimed_at=?, sync_state='syncing', updated_at=?
+		 WHERE channel_id=? AND (sync_claim_token IS NULL OR sync_claimed_at < ?)
+		 AND sync_state <> 'reconnect_required'`,
+	)
+		.bind(claimToken, now, now, channelId, expired)
+		.run();
+	if (claim.meta.changes !== 1)
+		throw new LostGmailSyncLeaseError(
+			"Gmail sync is already running or requires reconnection",
+		);
+	let recover = false;
+	try {
+		const gmail = await GmailApi.forChannel(env, channelId, claimToken);
+		const cutoff = Date.now() - account.backfillDays * 86_400_000;
+		let pageToken: string | undefined;
+		let messages = 0;
+		do {
+			await renewLease(env, channelId, claimToken);
+			const page = await gmail.listHistory(account.historyId, pageToken);
+			const threadIds = new Set<string>();
+			for (const event of page.history)
+				for (const added of event.messagesAdded)
+					if (isGmailId(added.id) && isGmailId(added.threadId))
+						threadIds.add(added.threadId);
+			for (const threadId of threadIds) {
+				const projected = await projectGmailThread({
+					env,
+					db,
+					gmail,
+					channelId,
+					claimToken,
+					threadId,
+					accountEmail: account.email,
+					cutoff,
+				});
+				messages += projected?.messages ?? 0;
+			}
+			const pageCursor =
+				greatestHistoryId(page.history.map((event) => event.id)) ??
+				(!page.nextPageToken ? page.historyId : null);
+			if (pageCursor)
+				await commitHistoryCursor(
+					env,
+					channelId,
+					claimToken,
+					account.historyId,
+					pageCursor,
+				);
+			pageToken = page.nextPageToken ?? undefined;
+		} while (pageToken);
+		await renewLease(env, channelId, claimToken);
+		await env.DB.prepare(
+			"UPDATE gmail_accounts SET sync_state='idle', last_synced_at=?, last_error=NULL, updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+		)
+			.bind(
+				new Date().toISOString(),
+				new Date().toISOString(),
+				channelId,
+				claimToken,
+			)
+			.run();
+		return { messages, recovered: false };
+	} catch (error) {
+		if (error instanceof GmailApiError && error.kind === "historyExpired") {
+			recover = true;
+			await env.DB.prepare(
+				"UPDATE gmail_accounts SET history_id=NULL, updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+			)
+				.bind(new Date().toISOString(), channelId, claimToken)
+				.run();
+		} else if (!(error instanceof LostGmailSyncLeaseError)) {
+			await env.DB.prepare(
+				"UPDATE gmail_accounts SET sync_state=CASE WHEN sync_state='reconnect_required' THEN sync_state ELSE 'error' END, last_error='Gmail history sync failed', updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+			)
+				.bind(new Date().toISOString(), channelId, claimToken)
+				.run();
+			throw error;
+		}
+		if (!recover) throw error;
+		return { messages: 0, recovered: true };
+	} finally {
+		await env.DB.prepare(
+			"UPDATE gmail_accounts SET sync_claim_token=NULL, sync_claimed_at=NULL, updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+		)
+			.bind(new Date().toISOString(), channelId, claimToken)
+			.run();
+		if (recover) await backfillGmailInbox(env, channelId);
+	}
+}
+
+async function commitHistoryCursor(
+	env: Env,
+	channelId: string,
+	claimToken: string,
+	current: string,
+	candidate: string,
+): Promise<void> {
+	if (compareHistoryIds(candidate, current) <= 0) return;
+	await renewLease(env, channelId, claimToken);
+	const result = await env.DB.prepare(
+		"UPDATE gmail_accounts SET history_id=?, updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+	)
+		.bind(candidate, new Date().toISOString(), channelId, claimToken)
+		.run();
+	if (result.meta.changes !== 1)
+		throw new LostGmailSyncLeaseError("Gmail history cursor was not advanced");
+}
+
+function greatestHistoryId(ids: string[]): string | null {
+	return ids
+		.filter((id) => /^\d+$/.test(id))
+		.reduce<string | null>(
+			(greatest, id) =>
+				!greatest || compareHistoryIds(id, greatest) > 0 ? id : greatest,
+			null,
+		);
+}
+function compareHistoryIds(a: string, b: string): number {
+	if (!/^\d+$/.test(a) || !/^\d+$/.test(b)) return a.localeCompare(b);
+	const left = a.replace(/^0+/, "") || "0";
+	const right = b.replace(/^0+/, "") || "0";
+	return left.length - right.length || left.localeCompare(right);
+}
+
 export async function backfillGmailInbox(
 	env: Env,
 	channelId: string,
@@ -104,74 +264,18 @@ export async function backfillGmailInbox(
 					break;
 				}
 				if (!isGmailId(listed.id)) continue;
-				await renewLease(env, channelId, claimToken);
-				const thread = await gmail.getThread(listed.id);
-				if (thread.id !== listed.id || !isGmailId(thread.id)) continue;
-				threads++;
-				const inbound = thread.messages
-					.filter((message) =>
-						eligibleMessage(message, listed.id, account.email, cutoff),
-					)
-					.sort(compareMessages);
-				const participant =
-					inbound[0] &&
-					normalizeAddress(
-						headersByName(inbound[0].payload.headers ?? []).from,
-					);
-				if (!participant) continue;
-				for (const message of inbound) {
-					const headers = headersByName(message.payload.headers ?? []);
-					if (normalizeAddress(headers.from) !== participant) continue;
-					const existing = await db
-						.select({ id: gmailMessageRefs.gmailMessageId })
-						.from(gmailMessageRefs)
-						.where(
-							and(
-								eq(gmailMessageRefs.channelId, channelId),
-								eq(gmailMessageRefs.gmailMessageId, message.id),
-							),
-						)
-						.get();
-					if (existing) continue;
-					const text = decodeText(message.payload);
-					if (!text) continue;
-					await renewLease(env, channelId, claimToken);
-					const conversationId = `gmail:${channelId}:${thread.id}`;
-					await routeInbound(env, {
-						conversationId,
-						channel: "gmail",
-						providerMessageId: message.id,
-						senderId: participant,
-						text,
-						createdAt: new Date(Number(message.internalDate)).toISOString(),
-						payload: {
-							subject: headers.subject ?? null,
-							gmailThreadId: thread.id,
-							gmailMessageId: message.id,
-						},
-						attachments: [],
-					});
-					await renewLease(env, channelId, claimToken);
-					const inserted = await db
-						.insert(gmailMessageRefs)
-						.values({
-							channelId,
-							gmailMessageId: message.id,
-							gmailThreadId: thread.id,
-							conversationId,
-							direction: "inbound",
-							rfcMessageId: headers["message-id"] ?? null,
-							inReplyTo: headers["in-reply-to"] ?? null,
-							referencesJson: headers.references
-								? JSON.stringify(headers.references.split(/\s+/))
-								: null,
-							labelIdsJson: JSON.stringify(message.labelIds),
-							createdAt: new Date().toISOString(),
-						})
-						.onConflictDoNothing()
-						.run();
-					messages += inserted.meta.changes ?? 0;
-				}
+				const projected = await projectGmailThread({
+					env,
+					db,
+					gmail,
+					channelId,
+					claimToken,
+					threadId: listed.id,
+					accountEmail: account.email,
+					cutoff,
+				});
+				if (projected) threads++;
+				messages += projected?.messages ?? 0;
 			}
 			if (truncated) break;
 			pageToken = page.nextPageToken ?? undefined;
@@ -228,6 +332,94 @@ async function renewLease(
 		.run();
 	if (result.meta.changes !== 1)
 		throw new LostGmailSyncLeaseError("Gmail sync lease was lost");
+}
+
+async function projectGmailThread({
+	env,
+	db,
+	gmail,
+	channelId,
+	claimToken,
+	threadId,
+	accountEmail,
+	cutoff,
+}: {
+	env: Env;
+	db: ReturnType<typeof drizzle>;
+	gmail: GmailApi;
+	channelId: string;
+	claimToken: string;
+	threadId: string;
+	accountEmail: string;
+	cutoff: number;
+}): Promise<{ messages: number } | null> {
+	await renewLease(env, channelId, claimToken);
+	const thread = await gmail.getThread(threadId);
+	if (thread.id !== threadId || !isGmailId(thread.id)) return null;
+	const inbound = thread.messages
+		.filter((message) =>
+			eligibleMessage(message, threadId, accountEmail, cutoff),
+		)
+		.sort(compareMessages);
+	const participant =
+		inbound[0] &&
+		normalizeAddress(headersByName(inbound[0].payload.headers ?? []).from);
+	if (!participant) return { messages: 0 };
+	let messages = 0;
+	for (const message of inbound) {
+		const headers = headersByName(message.payload.headers ?? []);
+		if (normalizeAddress(headers.from) !== participant) continue;
+		const existing = await db
+			.select({ id: gmailMessageRefs.gmailMessageId })
+			.from(gmailMessageRefs)
+			.where(
+				and(
+					eq(gmailMessageRefs.channelId, channelId),
+					eq(gmailMessageRefs.gmailMessageId, message.id),
+				),
+			)
+			.get();
+		if (existing) continue;
+		const text = decodeText(message.payload);
+		if (!text) continue;
+		await renewLease(env, channelId, claimToken);
+		const conversationId = `gmail:${channelId}:${thread.id}`;
+		await routeInbound(env, {
+			conversationId,
+			channel: "gmail",
+			providerMessageId: message.id,
+			senderId: participant,
+			text,
+			createdAt: new Date(Number(message.internalDate)).toISOString(),
+			payload: {
+				subject: headers.subject ?? null,
+				gmailThreadId: thread.id,
+				gmailMessageId: message.id,
+			},
+			attachments: [],
+		});
+		await renewLease(env, channelId, claimToken);
+		const inserted = await db
+			.insert(gmailMessageRefs)
+			.values({
+				channelId,
+				gmailMessageId: message.id,
+				gmailThreadId: thread.id,
+				conversationId,
+				direction: "inbound",
+				rfcMessageId: headers["message-id"] ?? null,
+				inReplyTo: headers["in-reply-to"] ?? null,
+				referencesJson: headers.references
+					? JSON.stringify(headers.references.split(/\s+/))
+					: null,
+				labelIdsJson: JSON.stringify(message.labelIds),
+				createdAt: new Date().toISOString(),
+			})
+			.onConflictDoNothing()
+			.run();
+		messages += inserted.meta.changes ?? 0;
+	}
+	return { messages };
 }
 
 function eligibleMessage(
