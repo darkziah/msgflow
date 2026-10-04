@@ -106,7 +106,7 @@ export async function routeInbound(
 			? "facebook_page"
 			: parsed.channel === "whatsapp"
 				? "whatsapp_phone"
-				: "email";
+				: parsed.channel;
 
 	// Email ingress is authorization-first. Messenger likewise resolves an
 	// explicit Page Channel; neither transport may bootstrap configuration.
@@ -146,16 +146,26 @@ export async function routeInbound(
 		inbox = resolvedInbox;
 	} else {
 		const expectedType =
-			channelType === "whatsapp_phone" ? "whatsapp_phone" : "facebook_page";
+			channelType === "whatsapp_phone"
+				? "whatsapp_phone"
+				: channelType === "gmail"
+					? "gmail"
+					: "facebook_page";
 		const channelLabel =
-			channelType === "whatsapp_phone" ? "WhatsApp phone" : "Facebook Page";
+			channelType === "whatsapp_phone"
+				? "WhatsApp phone"
+				: channelType === "gmail"
+					? "Gmail"
+					: "Facebook Page";
 		const resolvedChannel = await db
 			.select()
 			.from(channels)
 			.where(
 				and(
 					eq(channels.type, expectedType),
-					eq(channels.externalId, parsed.left),
+					channelType === "gmail"
+						? eq(channels.id, parsed.left)
+						: eq(channels.externalId, parsed.left),
 					eq(channels.status, "active"),
 				),
 			)
@@ -228,7 +238,11 @@ export async function routeInbound(
 			inboxId: inbox.id,
 			contactId: contact.id,
 			doBindingId: inbound.conversationId,
-			subject: channelType === "email" ? (emailPayload.subject ?? null) : null,
+			externalThreadId: channelType === "gmail" ? parsed.right : null,
+			subject:
+				channelType === "email" || channelType === "gmail"
+					? (emailPayload.subject ?? null)
+					: null,
 			status: "open",
 			messageCount: 0,
 			createdAt: now,
@@ -341,8 +355,14 @@ export async function routeInbound(
 		assigneeId: null,
 		status: "open",
 		channelType,
-		senderEmail: channelType === "email" ? inbound.senderId : null,
-		subject: channelType === "email" ? (emailPayload.subject ?? null) : null,
+		senderEmail:
+			channelType === "email" || channelType === "gmail"
+				? inbound.senderId
+				: null,
+		subject:
+			channelType === "email" || channelType === "gmail"
+				? (emailPayload.subject ?? null)
+				: null,
 		messageText: inbound.text,
 		conversationTagIds: existingTags.map((row) => row.tagId),
 	});
@@ -512,10 +532,15 @@ async function getOrCreateContact(
 			id: contactId,
 			workspaceId,
 			displayName:
-				channelType === "email" ? null : (profile?.displayName ?? null),
+				channelType === "email" || channelType === "gmail"
+					? null
+					: (profile?.displayName ?? null),
 			avatarUrl:
 				channelType === "facebook_page" ? (profile?.avatarUrl ?? null) : null,
-			primaryEmail: channelType === "email" ? externalUserId : null,
+			primaryEmail:
+				channelType === "email" || channelType === "gmail"
+					? externalUserId
+					: null,
 			createdAt: now,
 			updatedAt: now,
 		})

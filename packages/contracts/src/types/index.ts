@@ -540,6 +540,7 @@ export function parseConversationId(
 		rawChannel !== "facebook" &&
 		rawChannel !== "fb" &&
 		rawChannel !== "email" &&
+		rawChannel !== "gmail" &&
 		rawChannel !== "wa"
 	) {
 		return null;
