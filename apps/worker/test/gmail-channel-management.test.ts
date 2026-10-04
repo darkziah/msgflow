@@ -182,6 +182,57 @@ describe("Gmail channel lifecycle", () => {
 		).rejects.toMatchObject({ status: 400 });
 	});
 
+	test("requires the initiating actor to retain verified lifecycle authority at callback time", async () => {
+		for (const revokeAuthority of [
+			async () =>
+				ctx.db
+					.update(workspaceMembers)
+					.set({ role: "member" })
+					.where(eq(workspaceMembers.id, "membership"))
+					.run(),
+			async () =>
+				ctx.env.DB.prepare(
+					"UPDATE user SET email_verified=0 WHERE id='actor'",
+				).run(),
+		]) {
+			const { env, workspaceId } = await setup();
+			mockGoogle();
+			const { authorizationUrl } = await beginGmailChannelOAuth(
+				env,
+				workspaceId,
+				input(),
+				"actor",
+				"https://msgflow.test",
+			);
+			await seedUser(ctx, "other-owner", "other-owner@example.test");
+			await ctx.db
+				.insert(workspaceMembers)
+				.values({
+					id: "other-owner-membership",
+					workspaceId,
+					userId: "other-owner",
+					role: "owner",
+					createdAt: new Date().toISOString(),
+				})
+				.run();
+			await revokeAuthority();
+			await expect(
+				completeGmailChannelOAuth(
+					env,
+					oauthState(authorizationUrl),
+					"code",
+					"actor",
+				),
+			).rejects.toMatchObject({ status: 403 });
+			const counts = await ctx.env.DB.prepare(
+				"SELECT (SELECT count(*) FROM channels WHERE type='gmail') AS channels, (SELECT count(*) FROM gmail_accounts) AS accounts",
+			).first<{ channels: number; accounts: number }>();
+			expect(counts).toEqual({ channels: 0, accounts: 0 });
+			await ctx.mf.dispose();
+		}
+		ctx = undefined as unknown as TestCtx;
+	});
+
 	test("fails safely when Google does not return an offline refresh token", async () => {
 		const { env, workspaceId } = await setup();
 		globalThis.fetch = async () => Response.json({ access_token: "access" });
@@ -281,6 +332,11 @@ describe("Gmail channel lifecycle", () => {
 		);
 		expect(foreignKey.error).toMatchObject({ status: 500 });
 		expect(String(foreignKey.error)).not.toContain("refresh");
+		const compound = await runWithBatchError(
+			"D1_ERROR: UNIQUE constraint failed: gmail_accounts.google_sub; D1_ERROR: FOREIGN KEY constraint failed",
+		);
+		expect(compound.error).toMatchObject({ status: 500 });
+		expect(String(compound.error)).not.toContain("refresh");
 		await expect(
 			completeGmailChannelOAuth(
 				ctx.env as Env,

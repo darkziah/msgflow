@@ -76,6 +76,14 @@ export async function completeGmailChannelOAuth(
 	actorUserId: string,
 ): Promise<{ callbackOrigin: string; channelId: string }> {
 	const state = await consumeGmailOAuthState(env, stateToken, actorUserId);
+	// OAuth state is one-time and bound to the initiator, but lifecycle authority
+	// may have changed during the authorization window. Consume before checking so
+	// a stale callback cannot be replayed if authority is restored later.
+	await requireOwnerAccess(
+		drizzle(env.DB),
+		state.workspaceId,
+		state.actorUserId,
+	);
 	const tokens = await exchangeGmailAuthorizationCode(
 		env,
 		code,
@@ -204,13 +212,12 @@ export async function disconnectGmailChannel(
 }
 
 function isGoogleSubUniqueConstraint(error: unknown): boolean {
-	// Cloudflare D1 wraps SQLite constraint failures as e.g.
-	// "D1_ERROR: UNIQUE constraint failed: gmail_accounts.google_sub".
+	// Only the standalone D1 SQLite error is a known collision. A compound or
+	// wrapped message may describe a partially failed batch and must be sanitized.
 	return (
 		error instanceof Error &&
-		error.message.includes(
-			"UNIQUE constraint failed: gmail_accounts.google_sub",
-		)
+		error.message ===
+			"D1_ERROR: UNIQUE constraint failed: gmail_accounts.google_sub"
 	);
 }
 
