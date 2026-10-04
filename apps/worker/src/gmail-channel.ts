@@ -143,8 +143,16 @@ export async function completeGmailChannelOAuth(
 				"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
 			).bind(linkId, state.inboxId, channelId),
 		]);
-	} catch {
-		throw new ManageError("this Google account is already connected", 409);
+	} catch (error) {
+		if (isGoogleSubUniqueConstraint(error)) {
+			throw new ManageError("this Google account is already connected", 409);
+		}
+		// State has been consumed, so failures here cannot be retried safely. Do not
+		// expose D1/provider details or misrepresent a storage failure as a collision.
+		throw new ManageError(
+			"Gmail account connection could not be completed",
+			500,
+		);
 	}
 	return { callbackOrigin: state.callbackOrigin, channelId };
 }
@@ -193,6 +201,17 @@ export async function disconnectGmailChannel(
 			"UPDATE gmail_accounts SET sync_state='reconnect_required', sync_claim_token=NULL, sync_claimed_at=NULL, updated_at=? WHERE channel_id=? AND workspace_id=?",
 		).bind(now, channelId, workspaceId),
 	]);
+}
+
+function isGoogleSubUniqueConstraint(error: unknown): boolean {
+	// Cloudflare D1 wraps SQLite constraint failures as e.g.
+	// "D1_ERROR: UNIQUE constraint failed: gmail_accounts.google_sub".
+	return (
+		error instanceof Error &&
+		error.message.includes(
+			"UNIQUE constraint failed: gmail_accounts.google_sub",
+		)
+	);
 }
 
 async function fetchGoogleIdentity(

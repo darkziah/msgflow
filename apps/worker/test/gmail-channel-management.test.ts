@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
 	channels,
+	contacts,
+	conversations,
 	gmailAccounts,
+	gmailMessageRefs,
 	inboxChannels,
 	inboxes,
 	workspaceMembers,
@@ -67,7 +70,7 @@ function oauthState(authorizationUrl: string): string {
 	return state;
 }
 
-function mockGoogle() {
+function mockGoogle(identity: Record<string, unknown> = {}) {
 	globalThis.fetch = async (url) => {
 		if (String(url).includes("/token"))
 			return Response.json({
@@ -80,6 +83,7 @@ function mockGoogle() {
 				sub: "google-sub",
 				email: "Person@Example.Test",
 				email_verified: true,
+				...identity,
 			});
 		return new Response(null, { status: 200 });
 	};
@@ -116,6 +120,30 @@ describe("Gmail channel lifecycle", () => {
 				"https://msgflow.test",
 			),
 		).rejects.toMatchObject({ status: 404 });
+	});
+
+	test("rejects an unverified owner or admin before starting Gmail OAuth", async () => {
+		for (const role of ["owner", "admin"] as const) {
+			const { env, workspaceId } = await setup(role);
+			await ctx.env.DB.prepare(
+				"UPDATE user SET email_verified=0 WHERE id='actor'",
+			).run();
+			await expect(
+				beginGmailChannelOAuth(
+					env,
+					workspaceId,
+					input(),
+					"actor",
+					"https://msgflow.test",
+				),
+			).rejects.toMatchObject({ status: 403 });
+			const sessions = await ctx.env.DB.prepare(
+				"SELECT count(*) AS count FROM gmail_oauth_sessions",
+			).first<{ count: number }>();
+			expect(sessions?.count).toBe(0);
+			await ctx.mf.dispose();
+		}
+		ctx = undefined as unknown as TestCtx;
 	});
 
 	test("rejects absent OAuth configuration before recording request origin", async () => {
@@ -178,6 +206,91 @@ describe("Gmail channel lifecycle", () => {
 		expect(rows?.count).toBe(0);
 	});
 
+	test("rejects malformed Google identities without creating Gmail persistence or exposing secrets", async () => {
+		for (const identity of [
+			{ sub: undefined },
+			{ sub: "" },
+			{ email_verified: false },
+			{ email: "not-an-email" },
+		]) {
+			const { env, workspaceId } = await setup();
+			mockGoogle(identity);
+			const { authorizationUrl } = await beginGmailChannelOAuth(
+				env,
+				workspaceId,
+				input(),
+				"actor",
+				"https://msgflow.test",
+			);
+			const error = await completeGmailChannelOAuth(
+				env,
+				oauthState(authorizationUrl),
+				"code",
+				"actor",
+			).catch((err: unknown) => err);
+			expect(error).toMatchObject({ status: 400 });
+			expect(String(error)).not.toContain("refresh");
+			const counts = await ctx.env.DB.prepare(
+				"SELECT (SELECT count(*) FROM channels WHERE type='gmail') AS channels, (SELECT count(*) FROM gmail_accounts) AS accounts",
+			).first<{ channels: number; accounts: number }>();
+			expect(counts).toEqual({ channels: 0, accounts: 0 });
+			await ctx.mf.dispose();
+		}
+		ctx = undefined as unknown as TestCtx;
+	});
+
+	test("classifies only the D1 Google subject unique constraint as a collision", async () => {
+		const runWithBatchError = async (message: string) => {
+			const { env, workspaceId } = await setup();
+			mockGoogle();
+			const { authorizationUrl } = await beginGmailChannelOAuth(
+				env,
+				workspaceId,
+				input(),
+				"actor",
+				"https://msgflow.test",
+			);
+			const failingDb = new Proxy(env.DB, {
+				get(target, property) {
+					if (property === "batch")
+						return async () => {
+							throw new Error(message);
+						};
+					const value = Reflect.get(target, property, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+			const error = await completeGmailChannelOAuth(
+				{ ...env, DB: failingDb },
+				oauthState(authorizationUrl),
+				"code",
+				"actor",
+			).catch((err: unknown) => err);
+			return { error, state: oauthState(authorizationUrl) };
+		};
+
+		const unique = await runWithBatchError(
+			"D1_ERROR: UNIQUE constraint failed: gmail_accounts.google_sub",
+		);
+		expect(unique.error).toMatchObject({
+			status: 409,
+			message: "this Google account is already connected",
+		});
+		const foreignKey = await runWithBatchError(
+			"D1_ERROR: FOREIGN KEY constraint failed",
+		);
+		expect(foreignKey.error).toMatchObject({ status: 500 });
+		expect(String(foreignKey.error)).not.toContain("refresh");
+		await expect(
+			completeGmailChannelOAuth(
+				ctx.env as Env,
+				foreignKey.state,
+				"code",
+				"actor",
+			),
+		).rejects.toMatchObject({ status: 400 });
+	});
+
 	test("creates Gmail-only persistence and a default inbox link", async () => {
 		const { env, workspaceId } = await setup();
 		mockGoogle();
@@ -233,7 +346,7 @@ describe("Gmail channel lifecycle", () => {
 		expect(link?.isDefault).toBe(true);
 	});
 
-	test("rejects global Google identity collisions and disconnect retains Gmail history rows", async () => {
+	test("disconnect survives revocation failure and retains Gmail history rows", async () => {
 		const { env, workspaceId } = await setup();
 		mockGoogle();
 		const first = await startGmailOAuth(env, {
@@ -253,23 +366,46 @@ describe("Gmail channel lifecycle", () => {
 				"actor",
 			)
 		).channelId;
-		const second = await startGmailOAuth(env, {
-			workspaceId,
-			actorUserId: "actor",
-			inboxId: "inbox",
-			accessMode: "private",
-			teamId: null,
-			backfillDays: 30,
-			callbackOrigin: "https://msgflow.test",
-		});
-		await expect(
-			completeGmailChannelOAuth(
-				env,
-				oauthState(second.authorizationUrl),
-				"code",
-				"actor",
-			),
-		).rejects.toMatchObject({ status: 409 });
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(contacts)
+			.values({
+				id: "contact",
+				workspaceId,
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(conversations)
+			.values({
+				id: "conversation",
+				workspaceId,
+				channelId,
+				inboxId: "inbox",
+				contactId: "contact",
+				doBindingId: "conversation",
+				externalThreadId: "thread",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(gmailMessageRefs)
+			.values({
+				channelId,
+				gmailMessageId: "message",
+				gmailThreadId: "thread",
+				conversationId: "conversation",
+				direction: "inbound",
+				createdAt: now,
+			})
+			.run();
+		globalThis.fetch = async (url) => {
+			if (String(url).includes("revoke"))
+				throw new Error("Google revoke failed for refresh");
+			throw new Error("unexpected request");
+		};
 		await disconnectGmailChannel(env, workspaceId, channelId, "actor");
 		const account = await ctx.db
 			.select()
@@ -283,5 +419,9 @@ describe("Gmail channel lifecycle", () => {
 			.get();
 		expect(account).toMatchObject({ syncState: "reconnect_required" });
 		expect(channel).toMatchObject({ status: "disconnected" });
+		const history = await ctx.env.DB.prepare(
+			"SELECT (SELECT count(*) FROM conversations WHERE id='conversation') AS conversations, (SELECT count(*) FROM gmail_message_refs WHERE gmail_message_id='message') AS refs",
+		).first<{ conversations: number; refs: number }>();
+		expect(history).toEqual({ conversations: 1, refs: 1 });
 	});
 });
