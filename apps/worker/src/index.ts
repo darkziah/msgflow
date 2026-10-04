@@ -538,8 +538,13 @@ app.get("/api/conversations", async (c) => {
 					savedViewFilters?.channel ??
 					(c.req.query("channel") === "facebook" ||
 					c.req.query("channel") === "email" ||
+					c.req.query("channel") === "gmail" ||
 					c.req.query("channel") === "whatsapp"
-						? (c.req.query("channel") as "facebook" | "email" | "whatsapp")
+						? (c.req.query("channel") as
+								| "facebook"
+								| "email"
+								| "gmail"
+								| "whatsapp")
 						: undefined),
 				channelId:
 					savedViewFilters?.channelId ?? c.req.query("channelId") ?? undefined,
@@ -2852,13 +2857,16 @@ async function handleWorkspaceWebSocket(
 ): Promise<Response> {
 	const workspaceId = new URL(request.url).searchParams.get("workspaceId");
 	if (!workspaceId) return new Response("missing workspaceId", { status: 400 });
-	const session = await createAuth(env).api.getSession({ headers: request.headers });
+	const session = await createAuth(env).api.getSession({
+		headers: request.headers,
+	});
 	if (!session) return new Response("unauthorized", { status: 401 });
 	const agentId = session.user.id;
 	try {
 		await requireWorkspaceAccess(drizzle(env.DB), workspaceId, agentId);
 	} catch (error) {
-		if (error instanceof ManageError) return new Response("forbidden", { status: 403 });
+		if (error instanceof ManageError)
+			return new Response("forbidden", { status: 403 });
 		throw error;
 	}
 	const headers = new Headers(request.headers);
@@ -2868,9 +2876,9 @@ async function handleWorkspaceWebSocket(
 	headers.set("x-workspace-id", workspaceId);
 	const dispatchUrl = new URL(request.url);
 	dispatchUrl.pathname = "/ws";
-	return env.WORKSPACE_EVENTS_DO
-		.get(env.WORKSPACE_EVENTS_DO.idFromName(workspaceId))
-		.fetch(new Request(dispatchUrl.toString(), { method: "GET", headers }));
+	return env.WORKSPACE_EVENTS_DO.get(
+		env.WORKSPACE_EVENTS_DO.idFromName(workspaceId),
+	).fetch(new Request(dispatchUrl.toString(), { method: "GET", headers }));
 }
 
 async function handleCallingWebSocket(

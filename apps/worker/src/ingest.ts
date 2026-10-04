@@ -458,7 +458,7 @@ async function getOrCreateContact(
 	db: ReturnType<typeof drizzle>,
 	workspaceId: string,
 	channelId: string,
-	channelType: "facebook_page" | "email" | "whatsapp_phone",
+	channelType: "facebook_page" | "email" | "gmail" | "whatsapp_phone",
 	externalUserId: string,
 	now: string,
 	profile?: FacebookProfile | null,

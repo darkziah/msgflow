@@ -60,7 +60,7 @@ const conversationColumns = {
 interface ConversationRow {
 	id: string;
 	channelId: string;
-	channelType: "facebook_page" | "email" | "whatsapp_phone";
+	channelType: "facebook_page" | "email" | "gmail" | "whatsapp_phone";
 	channelDisplayName: string;
 	channelExternalId: string;
 	inboxId: string;
@@ -91,7 +91,9 @@ function toSummary(
 				? "facebook"
 				: row.channelType === "whatsapp_phone"
 					? "whatsapp"
-					: "email",
+					: row.channelType === "gmail"
+						? "gmail"
+						: "email",
 		channelId: row.channelId,
 		channelDisplayName: row.channelDisplayName,
 		inboxId: row.inboxId,
@@ -133,7 +135,7 @@ export interface ConversationListOptions {
 	unassigned?: boolean;
 	/** Open conversations snoozed until the future (sidebar "Snoozed" queue). */
 	snoozed?: boolean;
-	channel?: "facebook" | "email" | "whatsapp";
+	channel?: "facebook" | "email" | "gmail" | "whatsapp";
 	channelId?: string;
 	tagId?: string;
 	savedViewId?: string;
@@ -155,7 +157,8 @@ export async function listConversations(
 ): Promise<ConversationListResponse> {
 	const db = drizzle(env.DB);
 	const pageSize = validatePageSize(opts.limit);
-	const initialCursor = opts.cursor === undefined ? undefined : decodeCursor(opts.cursor);
+	const initialCursor =
+		opts.cursor === undefined ? undefined : decodeCursor(opts.cursor);
 	if (!workspaceId) return { conversations: [], nextCursor: null };
 	const readableInboxIds = await getReadableInboxIds(db, workspaceId, agentId);
 	const readableInboxSet = new Set(readableInboxIds);
@@ -207,11 +210,14 @@ export async function listConversations(
 		opts.channel
 			? eq(
 					channels.type,
-					({
-						facebook: "facebook_page",
-						email: "email",
-						whatsapp: "whatsapp_phone",
-					} as const)[opts.channel],
+					(
+						{
+							facebook: "facebook_page",
+							email: "email",
+							gmail: "gmail",
+							whatsapp: "whatsapp_phone",
+						} as const
+					)[opts.channel],
 				)
 			: undefined,
 		opts.channelId
@@ -247,30 +253,30 @@ export async function listConversations(
 	];
 
 	const rows = await db
-			.select(conversationColumns)
-			.from(conversations)
-			.innerJoin(channels, eq(conversations.channelId, channels.id))
-			.innerJoin(contacts, eq(conversations.contactId, contacts.id))
-			.leftJoin(
-				conversationReads,
-				and(
-					eq(conversationReads.conversationId, conversations.id),
-					eq(conversationReads.agentId, agentId),
-				),
-			)
-			.where(
-				and(
-					...conditions,
-					initialCursor ? conversationCursorPredicate(initialCursor) : undefined,
-				),
-			)
-			.orderBy(
-				sql`${conversations.lastMessageAt} IS NULL`,
-				desc(conversations.lastMessageAt),
-				desc(conversations.id),
-			)
-			.limit(pageSize + 1)
-			.all();
+		.select(conversationColumns)
+		.from(conversations)
+		.innerJoin(channels, eq(conversations.channelId, channels.id))
+		.innerJoin(contacts, eq(conversations.contactId, contacts.id))
+		.leftJoin(
+			conversationReads,
+			and(
+				eq(conversationReads.conversationId, conversations.id),
+				eq(conversationReads.agentId, agentId),
+			),
+		)
+		.where(
+			and(
+				...conditions,
+				initialCursor ? conversationCursorPredicate(initialCursor) : undefined,
+			),
+		)
+		.orderBy(
+			sql`${conversations.lastMessageAt} IS NULL`,
+			desc(conversations.lastMessageAt),
+			desc(conversations.id),
+		)
+		.limit(pageSize + 1)
+		.all();
 	const hasMore = rows.length > pageSize;
 	const visibleRows = rows.slice(0, pageSize);
 	const tagsByConversation = await loadTagsForConversations(
@@ -297,7 +303,9 @@ function validatePageSize(limit: number | undefined): number {
 	return limit;
 }
 
-function toCursor(row: Pick<ConversationRow, "lastMessageAt" | "id">): ConversationCursor {
+function toCursor(
+	row: Pick<ConversationRow, "lastMessageAt" | "id">,
+): ConversationCursor {
 	return { lastMessageAt: row.lastMessageAt, id: row.id };
 }
 
@@ -305,22 +313,39 @@ function encodeCursor(cursor: ConversationCursor): string {
 	const bytes = new TextEncoder().encode(JSON.stringify(cursor));
 	let binary = "";
 	for (const byte of bytes) binary += String.fromCharCode(byte);
-	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+	return btoa(binary)
+		.replaceAll("+", "-")
+		.replaceAll("/", "_")
+		.replaceAll("=", "");
 }
 
 function decodeCursor(value: string): ConversationCursor {
 	try {
 		if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid base64url");
-		const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+		const padded = value
+			.replaceAll("-", "+")
+			.replaceAll("_", "/")
+			.padEnd(Math.ceil(value.length / 4) * 4, "=");
 		const binary = atob(padded);
-		const parsed: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0))));
+		const parsed: unknown = JSON.parse(
+			new TextDecoder().decode(
+				Uint8Array.from(binary, (char) => char.charCodeAt(0)),
+			),
+		);
 		if (
-			typeof parsed !== "object" || parsed === null ||
+			typeof parsed !== "object" ||
+			parsed === null ||
 			Object.keys(parsed).length !== 2 ||
-			!("id" in parsed) || !("lastMessageAt" in parsed) ||
-			typeof parsed.id !== "string" || parsed.id.length === 0 ||
-			!(typeof parsed.lastMessageAt === "string" || parsed.lastMessageAt === null)
-		) throw new Error("invalid cursor shape");
+			!("id" in parsed) ||
+			!("lastMessageAt" in parsed) ||
+			typeof parsed.id !== "string" ||
+			parsed.id.length === 0 ||
+			!(
+				typeof parsed.lastMessageAt === "string" ||
+				parsed.lastMessageAt === null
+			)
+		)
+			throw new Error("invalid cursor shape");
 		return { id: parsed.id, lastMessageAt: parsed.lastMessageAt };
 	} catch {
 		throw new ManageError("invalid conversation cursor", 400);
@@ -329,10 +354,16 @@ function decodeCursor(value: string): ConversationCursor {
 
 function conversationCursorPredicate(cursor: ConversationCursor) {
 	if (cursor.lastMessageAt === null)
-		return and(isNull(conversations.lastMessageAt), sql`${conversations.id} < ${cursor.id}`);
+		return and(
+			isNull(conversations.lastMessageAt),
+			sql`${conversations.id} < ${cursor.id}`,
+		);
 	return or(
 		and(sql`${conversations.lastMessageAt} < ${cursor.lastMessageAt}`),
-		and(eq(conversations.lastMessageAt, cursor.lastMessageAt), sql`${conversations.id} < ${cursor.id}`),
+		and(
+			eq(conversations.lastMessageAt, cursor.lastMessageAt),
+			sql`${conversations.id} < ${cursor.id}`,
+		),
 		isNull(conversations.lastMessageAt),
 	);
 }
@@ -372,7 +403,6 @@ export async function getConversation(
 	const tagsByConversation = await loadTagsForConversations(db, [row.id]);
 	return toSummary(row, tagsByConversation[row.id] ?? []);
 }
-
 
 /** Tags attached to the given conversations, keyed by conversation id. */
 async function loadTagsForConversations(

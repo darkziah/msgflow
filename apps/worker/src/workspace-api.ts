@@ -307,7 +307,7 @@ export async function getSidebar(
 				}>,
 				[] as Array<{
 					channelId: string;
-					type: "facebook_page" | "email" | "whatsapp_phone";
+					type: "facebook_page" | "email" | "gmail" | "whatsapp_phone";
 					count: number;
 				}>,
 			];
