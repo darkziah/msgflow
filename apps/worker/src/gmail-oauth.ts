@@ -24,17 +24,16 @@ type GmailOAuthState = {
 	teamId: string | null;
 	backfillDays: number;
 	callbackOrigin: string;
-	nonce: string;
 	codeVerifier: string;
 	expiresAt: string;
 };
 
 export type StartGmailOAuthInput = Omit<
 	GmailOAuthState,
-	"sessionId" | "nonce" | "codeVerifier" | "expiresAt"
+	"sessionId" | "codeVerifier" | "expiresAt"
 >;
 
-export type ConsumedGmailOAuthState = Omit<GmailOAuthState, "nonce">;
+export type ConsumedGmailOAuthState = GmailOAuthState;
 
 export type GmailOAuthTokens = {
 	accessToken: string;
@@ -54,7 +53,6 @@ export async function startGmailOAuth(
 	const state: GmailOAuthState = {
 		...input,
 		sessionId: crypto.randomUUID(),
-		nonce: randomBase64Url(32),
 		codeVerifier: randomBase64Url(48),
 		expiresAt: new Date(now.getTime() + SESSION_LIFETIME_MS).toISOString(),
 	};
@@ -218,7 +216,6 @@ function parseState(value: string): GmailOAuthState {
 		backfillDays < 1 ||
 		backfillDays > 90 ||
 		typeof state.callbackOrigin !== "string" ||
-		typeof state.nonce !== "string" ||
 		typeof state.codeVerifier !== "string" ||
 		typeof state.expiresAt !== "string"
 	) {

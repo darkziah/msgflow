@@ -284,6 +284,28 @@ export const api = {
 		);
 	},
 
+	startGmailOAuth(
+		workspaceId: string,
+		body: {
+			inboxId: string;
+			accessMode: "private" | "shared";
+			teamId?: string | null;
+			backfillDays?: number;
+		},
+	) {
+		return request<{ authorizationUrl: string }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/gmail-channels/oauth/start`,
+			{ method: "POST", body: JSON.stringify(body) },
+		);
+	},
+
+	disconnectGmailChannel(workspaceId: string, id: string) {
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/gmail-channels/${encodeURIComponent(id)}/disconnect`,
+			{ method: "POST" },
+		);
+	},
+
 	connectChannel(workspaceId: string, id: string, accessToken: string) {
 		return request<{ success: true }>(
 			`/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(id)}/token`,

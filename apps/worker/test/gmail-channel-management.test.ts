@@ -233,6 +233,60 @@ describe("Gmail channel lifecycle", () => {
 		ctx = undefined as unknown as TestCtx;
 	});
 
+	test("does not persist Gmail credentials when authority changes during callback", async () => {
+		const { env, workspaceId } = await setup();
+		const { authorizationUrl } = await beginGmailChannelOAuth(
+			env,
+			workspaceId,
+			input(),
+			"actor",
+			"https://msgflow.test",
+		);
+		await seedUser(ctx, "other-owner", "other-owner@example.test");
+		await ctx.db
+			.insert(workspaceMembers)
+			.values({
+				id: "other-owner-membership",
+				workspaceId,
+				userId: "other-owner",
+				role: "owner",
+				createdAt: new Date().toISOString(),
+			})
+			.run();
+		globalThis.fetch = async (url) => {
+			if (String(url).includes("/token"))
+				return Response.json({
+					access_token: "access",
+					refresh_token: "refresh",
+				});
+			if (String(url).includes("userinfo")) {
+				await ctx.db
+					.update(workspaceMembers)
+					.set({ role: "member" })
+					.where(eq(workspaceMembers.id, "membership"))
+					.run();
+				return Response.json({
+					sub: "google-sub",
+					email: "person@example.test",
+					email_verified: true,
+				});
+			}
+			throw new Error("unexpected request");
+		};
+		await expect(
+			completeGmailChannelOAuth(
+				env,
+				oauthState(authorizationUrl),
+				"code",
+				"actor",
+			),
+		).rejects.toMatchObject({ status: 403 });
+		const counts = await ctx.env.DB.prepare(
+			"SELECT (SELECT count(*) FROM channels WHERE type='gmail') AS channels, (SELECT count(*) FROM gmail_accounts) AS accounts",
+		).first<{ channels: number; accounts: number }>();
+		expect(counts).toEqual({ channels: 0, accounts: 0 });
+	});
+
 	test("fails safely when Google does not return an offline refresh token", async () => {
 		const { env, workspaceId } = await setup();
 		globalThis.fetch = async () => Response.json({ access_token: "access" });
@@ -475,6 +529,93 @@ describe("Gmail channel lifecycle", () => {
 			.get();
 		expect(account).toMatchObject({ syncState: "reconnect_required" });
 		expect(channel).toMatchObject({ status: "disconnected" });
+		const history = await ctx.env.DB.prepare(
+			"SELECT (SELECT count(*) FROM conversations WHERE id='conversation') AS conversations, (SELECT count(*) FROM gmail_message_refs WHERE gmail_message_id='message') AS refs",
+		).first<{ conversations: number; refs: number }>();
+		expect(history).toEqual({ conversations: 1, refs: 1 });
+	});
+
+	test("reconnects a disconnected account in the same workspace without replacing history", async () => {
+		const { env, workspaceId } = await setup();
+		mockGoogle();
+		const first = await beginGmailChannelOAuth(
+			env,
+			workspaceId,
+			input(),
+			"actor",
+			"https://msgflow.test",
+		);
+		const channelId = (
+			await completeGmailChannelOAuth(
+				env,
+				oauthState(first.authorizationUrl),
+				"code",
+				"actor",
+			)
+		).channelId;
+		const now = new Date().toISOString();
+		await ctx.db
+			.insert(contacts)
+			.values({
+				id: "contact",
+				workspaceId,
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(conversations)
+			.values({
+				id: "conversation",
+				workspaceId,
+				channelId,
+				inboxId: "inbox",
+				contactId: "contact",
+				doBindingId: "conversation",
+				externalThreadId: "thread",
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		await ctx.db
+			.insert(gmailMessageRefs)
+			.values({
+				channelId,
+				gmailMessageId: "message",
+				gmailThreadId: "thread",
+				conversationId: "conversation",
+				direction: "inbound",
+				createdAt: now,
+			})
+			.run();
+		await disconnectGmailChannel(env, workspaceId, channelId, "actor");
+		mockGoogle();
+		const reconnect = await beginGmailChannelOAuth(
+			env,
+			workspaceId,
+			input(),
+			"actor",
+			"https://msgflow.test",
+		);
+		const completed = await completeGmailChannelOAuth(
+			env,
+			oauthState(reconnect.authorizationUrl),
+			"code",
+			"actor",
+		);
+		expect(completed.channelId).toBe(channelId);
+		const account = await ctx.db
+			.select()
+			.from(gmailAccounts)
+			.where(eq(gmailAccounts.channelId, channelId))
+			.get();
+		const channel = await ctx.db
+			.select()
+			.from(channels)
+			.where(eq(channels.id, channelId))
+			.get();
+		expect(account).toMatchObject({ syncState: "idle" });
+		expect(channel).toMatchObject({ status: "active" });
 		const history = await ctx.env.DB.prepare(
 			"SELECT (SELECT count(*) FROM conversations WHERE id='conversation') AS conversations, (SELECT count(*) FROM gmail_message_refs WHERE gmail_message_id='message') AS refs",
 		).first<{ conversations: number; refs: number }>();

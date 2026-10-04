@@ -101,24 +101,57 @@ export async function completeGmailChannelOAuth(
 	}
 
 	const db = drizzle(env.DB);
+	const now = new Date().toISOString();
 	// The global unique google_sub index expresses the provider identity boundary.
 	// Preflight produces a controlled conflict; the batch catch handles races.
 	const existing = await db
-		.select({ id: gmailAccounts.id })
+		.select({
+			workspaceId: gmailAccounts.workspaceId,
+			channelId: gmailAccounts.channelId,
+			channelStatus: channels.status,
+			syncState: gmailAccounts.syncState,
+		})
 		.from(gmailAccounts)
+		.innerJoin(channels, eq(gmailAccounts.channelId, channels.id))
 		.where(eq(gmailAccounts.googleSub, identity.sub))
 		.get();
-	if (existing)
+	if (existing) {
+		if (
+			existing.workspaceId === state.workspaceId &&
+			(existing.channelStatus === "disconnected" ||
+				existing.syncState === "reconnect_required")
+		) {
+			await reactivateGmailAccount(
+				env,
+				state.workspaceId,
+				state.actorUserId,
+				existing.channelId,
+				encryptedRefreshToken,
+				tokens.scope ? tokens.scope.split(" ").filter(Boolean) : [],
+				now,
+			);
+			return {
+				callbackOrigin: state.callbackOrigin,
+				channelId: existing.channelId,
+			};
+		}
 		throw new ManageError("this Google account is already connected", 409);
+	}
 
 	const channelId = crypto.randomUUID();
 	const accountId = crypto.randomUUID();
 	const linkId = crypto.randomUUID();
-	const now = new Date().toISOString();
 	try {
-		await env.DB.batch([
+		const results = await env.DB.batch([
 			env.DB.prepare(
-				"INSERT INTO channels (id,workspace_id,type,display_name,external_id,status,created_at,updated_at) VALUES (?,?,?,?,?,'active',?,?)",
+				`INSERT INTO channels (id,workspace_id,type,display_name,external_id,status,created_at,updated_at)
+				 SELECT ?,?,?,?,?,'active',?,?
+				 WHERE EXISTS (
+					SELECT 1 FROM workspace_members membership
+					JOIN user actor ON actor.id=membership.user_id
+					WHERE membership.workspace_id=? AND membership.user_id=?
+					AND membership.role IN ('owner','admin') AND actor.email_verified=1
+				 )`,
 			).bind(
 				channelId,
 				state.workspaceId,
@@ -127,9 +160,13 @@ export async function completeGmailChannelOAuth(
 				identity.sub,
 				now,
 				now,
+				state.workspaceId,
+				state.actorUserId,
 			),
 			env.DB.prepare(
-				"INSERT INTO gmail_accounts (id,workspace_id,channel_id,owner_user_id,access_mode,team_id,google_sub,email,encrypted_refresh_token,token_key_version,sync_state,backfill_days,scopes_json,archive_removes_inbox_label,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,1,'idle',?,?,0,?,?)",
+				`INSERT INTO gmail_accounts (id,workspace_id,channel_id,owner_user_id,access_mode,team_id,google_sub,email,encrypted_refresh_token,token_key_version,sync_state,backfill_days,scopes_json,archive_removes_inbox_label,created_at,updated_at)
+				 SELECT ?,?,?,?,?,?,?,?,?,1,'idle',?,?,0,?,?
+				 WHERE EXISTS (SELECT 1 FROM channels WHERE id=? AND workspace_id=? AND type='gmail')`,
 			).bind(
 				accountId,
 				state.workspaceId,
@@ -146,12 +183,26 @@ export async function completeGmailChannelOAuth(
 				),
 				now,
 				now,
+				channelId,
+				state.workspaceId,
 			),
 			env.DB.prepare(
-				"INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)",
-			).bind(linkId, state.inboxId, channelId),
+				`INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default)
+				 SELECT ?,?,?,1
+				 WHERE EXISTS (SELECT 1 FROM gmail_accounts WHERE channel_id=? AND workspace_id=?)`,
+			).bind(linkId, state.inboxId, channelId, channelId, state.workspaceId),
 		]);
+		if (results.some((result) => (result.meta.changes ?? 0) !== 1)) {
+			// This check occurs in the same D1 transaction as persistence, closing the
+			// gap between callback authorization and creating provider credentials.
+			await requireOwnerAccess(db, state.workspaceId, state.actorUserId);
+			throw new ManageError(
+				"Gmail account connection could not be completed",
+				500,
+			);
+		}
 	} catch (error) {
+		if (error instanceof ManageError) throw error;
 		if (isGoogleSubUniqueConstraint(error)) {
 			throw new ManageError("this Google account is already connected", 409);
 		}
@@ -163,6 +214,48 @@ export async function completeGmailChannelOAuth(
 		);
 	}
 	return { callbackOrigin: state.callbackOrigin, channelId };
+}
+
+async function reactivateGmailAccount(
+	env: Env,
+	workspaceId: string,
+	actorUserId: string,
+	channelId: string,
+	encryptedRefreshToken: string,
+	scopes: string[],
+	now: string,
+): Promise<void> {
+	const results = await env.DB.batch([
+		env.DB.prepare(
+			`UPDATE channels SET status='active', updated_at=?
+			 WHERE id=? AND workspace_id=? AND type='gmail' AND EXISTS (
+				SELECT 1 FROM workspace_members membership
+				JOIN user actor ON actor.id=membership.user_id
+				WHERE membership.workspace_id=? AND membership.user_id=?
+				AND membership.role IN ('owner','admin') AND actor.email_verified=1
+			 )`,
+		).bind(now, channelId, workspaceId, workspaceId, actorUserId),
+		env.DB.prepare(
+			`UPDATE gmail_accounts
+			 SET encrypted_refresh_token=?, token_key_version=1, sync_state='idle',
+				 sync_claim_token=NULL, sync_claimed_at=NULL, last_error=NULL,
+				 scopes_json=?, updated_at=?
+			 WHERE channel_id=? AND workspace_id=?`,
+		).bind(
+			encryptedRefreshToken,
+			JSON.stringify(scopes),
+			now,
+			channelId,
+			workspaceId,
+		),
+	]);
+	if (results.some((result) => (result.meta.changes ?? 0) !== 1)) {
+		await requireOwnerAccess(drizzle(env.DB), workspaceId, actorUserId);
+		throw new ManageError(
+			"Gmail account reconnection could not be completed",
+			500,
+		);
+	}
 }
 
 export async function disconnectGmailChannel(

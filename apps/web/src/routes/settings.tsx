@@ -166,7 +166,7 @@ function InboxRow({ workspaceId, inbox, channels, onChanged }: { workspaceId: st
 	return <Card><CardHeader><CardTitle>{editing ? <Input aria-label="Inbox name" value={name} onChange={(event) => setName(event.target.value)} /> : inbox.name}</CardTitle><CardDescription>{inbox.conversationCount ?? "restricted"} conversations · {inbox.channels.length} channels · {inbox.memberIds?.length ?? "restricted"} members</CardDescription><CardAction><div className="flex gap-2">{editing ? <><Button size="sm" onClick={() => rename.mutate()} disabled={rename.isPending || !name.trim()}>Save</Button><Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button></> : <><Button size="sm" variant="ghost" onClick={() => setEditing(true)}>Rename</Button><Button size="sm" variant="outline" disabled={remove.isPending} onClick={() => { if (confirm(`Delete inbox "${inbox.name}"? Its conversations move to another inbox.`)) remove.mutate(); }}>Delete</Button></>}</div></CardAction></CardHeader><CardContent className="space-y-3">{inbox.channels.length ? <div className="flex flex-wrap gap-2">{inbox.channels.map((item) => <Button key={item.channelId} variant="secondary" size="sm" onClick={() => unlink.mutate(item.channelId)}>{item.channelDisplayName}{item.isDefault ? " · default" : ""} ×</Button>)}</div> : null}{available.length ? <Field orientation="responsive"><FieldLabel>Link channel</FieldLabel><Select value={linkId} onValueChange={setLinkId}><SelectTrigger><SelectValue placeholder="Choose a channel" /></SelectTrigger><SelectContent>{available.map((channel) => <SelectItem key={channel.id} value={channel.id}>{channel.displayName}</SelectItem>)}</SelectContent></Select><Button size="sm" variant="outline" disabled={!linkId || link.isPending} onClick={() => link.mutate(linkId)}>Link</Button></Field> : null}{error ? <ErrorAlert message={error} /> : null}</CardContent></Card>;
 }
 
-type ChannelWizardType = "facebook" | "whatsapp" | "email";
+type ChannelWizardType = "facebook" | "whatsapp" | "gmail" | "email";
 
 function ChannelsSection({ workspaceId }: { workspaceId?: string }) {
 	const queryClient = useQueryClient();
@@ -179,10 +179,11 @@ function ChannelsSection({ workspaceId }: { workspaceId?: string }) {
 		<div className="flex items-center justify-between gap-3"><div><h3 className="font-semibold">Channels</h3><p className="text-sm text-muted-foreground">Connect Messenger, WhatsApp, and shared email to an inbox.</p></div><Button onClick={() => setDialogOpen(true)} disabled={!workspaceId}>Add channel</Button></div>
 		<Dialog open={dialogOpen} onOpenChange={(open) => { if (!open) closeWizard(); else setDialogOpen(true); }}>
 			<DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-2xl">
-				<DialogHeader><DialogTitle>{selectedType ? `Add ${selectedType === "facebook" ? "Facebook Messenger" : selectedType === "whatsapp" ? "WhatsApp" : "shared email"} channel` : "Add channel"}</DialogTitle><DialogDescription>{selectedType ? "Complete the connection details for this channel." : "Choose the channel type to connect."}</DialogDescription></DialogHeader>
+				<DialogHeader><DialogTitle>{selectedType ? `Add ${selectedType === "facebook" ? "Facebook Messenger" : selectedType === "whatsapp" ? "WhatsApp" : selectedType === "gmail" ? "Gmail" : "shared email"} channel` : "Add channel"}</DialogTitle><DialogDescription>{selectedType ? "Complete the connection details for this channel." : "Choose the channel type to connect."}</DialogDescription></DialogHeader>
 				{selectedType === null ? <ChannelTypePicker onSelect={setSelectedType} /> : null}
 				{selectedType === "facebook" ? <FacebookChannelForm workspaceId={workspaceId} apps={apps.data?.metaApps ?? []} onComplete={closeWizard} /> : null}
 				{selectedType === "whatsapp" ? <WhatsAppChannelForm workspaceId={workspaceId} apps={apps.data?.metaApps ?? []} onComplete={closeWizard} /> : null}
+				{selectedType === "gmail" ? <GmailChannelForm workspaceId={workspaceId} /> : null}
 				{selectedType === "email" ? <SharedEmailChannel workspaceId={workspaceId} onComplete={closeWizard} /> : null}
 			</DialogContent>
 		</Dialog>
@@ -194,11 +195,30 @@ function ChannelsSection({ workspaceId }: { workspaceId?: string }) {
 }
 
 function ChannelTypePicker({ onSelect }: { onSelect: (type: ChannelWizardType) => void }) {
-	return <div className="grid gap-3 sm:grid-cols-3">
+	return <div className="grid gap-3 sm:grid-cols-2">
 		<Button className="h-auto flex-col items-start gap-1 p-4 text-left" variant="outline" onClick={() => onSelect("facebook")}><MessageCircle aria-hidden="true" /><span>Facebook Messenger</span><span className="text-xs font-normal text-muted-foreground">Connect a Page with Facebook Login or a token.</span></Button>
 		<Button className="h-auto flex-col items-start gap-1 p-4 text-left" variant="outline" onClick={() => onSelect("whatsapp")}><Smartphone aria-hidden="true" /><span>WhatsApp</span><span className="text-xs font-normal text-muted-foreground">Connect a WhatsApp Cloud API phone number.</span></Button>
+		<Button className="h-auto flex-col items-start gap-1 p-4 text-left" variant="outline" onClick={() => onSelect("gmail")}><Mail aria-hidden="true" /><span>Gmail</span><span className="text-xs font-normal text-muted-foreground">Authorize a Gmail account with Google OAuth.</span></Button>
 		<Button className="h-auto flex-col items-start gap-1 p-4 text-left" variant="outline" onClick={() => onSelect("email")}><Mail aria-hidden="true" /><span>Shared Email</span><span className="text-xs font-normal text-muted-foreground">Provision an authorized shared mailbox.</span></Button>
 	</div>;
+}
+
+function GmailChannelForm({ workspaceId }: { workspaceId?: string }) {
+	const [inboxId, setInboxId] = useState("");
+	const [backfillDays, setBackfillDays] = useState("30");
+	const [error, setError] = useState<string | null>(null);
+	const inboxes = useQuery({ queryKey: ["inboxes", workspaceId], queryFn: () => workspaceId ? api.workspaceListInboxes(workspaceId) : Promise.resolve({ inboxes: [] }), enabled: Boolean(workspaceId) });
+	const connect = useMutation({
+		mutationFn: async () => {
+			if (!workspaceId) throw new Error("Workspace not found.");
+			const days = Number(backfillDays);
+			if (!Number.isInteger(days) || days < 1 || days > 90) throw new Error("Backfill must be between 1 and 90 days.");
+			return api.startGmailOAuth(workspaceId, { inboxId, accessMode: "private", backfillDays: days });
+		},
+		onSuccess: ({ authorizationUrl }) => window.location.assign(authorizationUrl),
+		onError: (err) => setError(err instanceof Error ? err.message : "Unable to start Gmail authorization."),
+	});
+	return <form onSubmit={(event) => { event.preventDefault(); connect.mutate(); }}><FieldGroup><Field><FieldLabel>Shared inbox</FieldLabel><Select value={inboxId} onValueChange={setInboxId}><SelectTrigger><SelectValue placeholder="Select shared inbox" /></SelectTrigger><SelectContent>{inboxes.data?.inboxes.filter((inbox) => !inbox.isArchived).map((inbox) => <SelectItem key={inbox.id} value={inbox.id}>{inbox.name}</SelectItem>)}</SelectContent></Select></Field><Field><FieldLabel htmlFor="gmail-backfill-days">Backfill days</FieldLabel><Input id="gmail-backfill-days" type="number" min={1} max={90} value={backfillDays} onChange={(event) => setBackfillDays(event.target.value)} /></Field><FieldDescription>Google will redirect you to authorize this account. Reconnecting a disabled account preserves its history.</FieldDescription><Button type="submit" className="w-fit" disabled={connect.isPending || !workspaceId || !inboxId}>{connect.isPending ? "Redirecting…" : "Connect Gmail"}</Button></FieldGroup>{error ? <ErrorAlert message={error} /> : null}</form>;
 }
 
 function MetaAppFields({ onCreated }: { onCreated: (setup: MetaAppWebhookSetup) => void }) {
@@ -255,12 +275,12 @@ function ChannelRow({ channel, workspaceId, onChanged }: { channel: ChannelSumma
 	const [token, setToken] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const connect = useMutation({ mutationFn: () => api.connectChannel(workspaceId, channel.id, token.trim()), onSuccess: () => { setToken(""); onChanged(); }, onError: (err) => setError(err instanceof Error ? err.message : "Connection failed.") });
-	const disconnect = useMutation({ mutationFn: () => api.disconnectChannel(workspaceId, channel.id), onSuccess: onChanged, onError: (err) => setError(err instanceof Error ? err.message : "Unable to disconnect channel.") });
+	const disconnect = useMutation({ mutationFn: () => channel.type === "gmail" ? api.disconnectGmailChannel(workspaceId, channel.id) : api.disconnectChannel(workspaceId, channel.id), onSuccess: onChanged, onError: (err) => setError(err instanceof Error ? err.message : "Unable to disconnect channel.") });
 	const remove = useMutation({ mutationFn: () => api.deleteFacebookChannel(workspaceId, channel.id), onSuccess: onChanged, onError: (err) => setError(err instanceof Error ? err.message : "Unable to remove Page channel.") });
 	const channelMeta = channel.type === "facebook_page" ? { label: "Facebook Messenger", Icon: MessageCircle } : channel.type === "whatsapp_phone" ? { label: "WhatsApp", Icon: Smartphone } : channel.type === "gmail" ? { label: "Gmail", Icon: Mail } : { label: "Email", Icon: Mail };
 	const connected = channel.hasToken || channel.status !== "disconnected";
 
-	return <div className="px-4 py-3"><div className="flex flex-col gap-3 sm:flex-row sm:items-center"><span className="grid size-8 shrink-0 place-items-center rounded-md border bg-muted/40"><channelMeta.Icon className="size-4" aria-hidden="true" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium">{channel.displayName}</p><Badge variant="outline">{channelMeta.label}</Badge><Badge variant={connected ? "secondary" : "outline"}>{connected ? "Connected" : "Disconnected"}</Badge></div><p className="mt-0.5 truncate text-xs text-muted-foreground">{channel.externalId}</p></div><div className="flex shrink-0 gap-2">{channel.hasToken ? <Button size="sm" variant="outline" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>Disconnect</Button> : null}{channel.type === "facebook_page" ? <Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate()}>Delete</Button> : null}</div></div>{channel.type === "facebook_page" ? <form className="mt-3 border-t pt-3" onSubmit={(event) => { event.preventDefault(); connect.mutate(); }}><Field orientation="responsive"><FieldLabel htmlFor={`channel-token-${channel.id}`}>Page token</FieldLabel><Input id={`channel-token-${channel.id}`} type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={channel.hasToken ? "Paste a replacement Page token" : "Paste a Page token"} /><Button type="submit" size="sm" disabled={connect.isPending || !token.trim()}>{connect.isPending ? "Saving…" : channel.hasToken ? "Rotate token" : "Connect"}</Button></Field></form> : null}{error ? <ErrorAlert message={error} /> : null}</div>;
+	return <div className="px-4 py-3"><div className="flex flex-col gap-3 sm:flex-row sm:items-center"><span className="grid size-8 shrink-0 place-items-center rounded-md border bg-muted/40"><channelMeta.Icon className="size-4" aria-hidden="true" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium">{channel.displayName}</p><Badge variant="outline">{channelMeta.label}</Badge><Badge variant={connected ? "secondary" : "outline"}>{connected ? "Connected" : "Disconnected"}</Badge></div><p className="mt-0.5 truncate text-xs text-muted-foreground">{channel.externalId}</p></div><div className="flex shrink-0 gap-2">{channel.hasToken || channel.type === "gmail" ? <Button size="sm" variant="outline" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>Disconnect</Button> : null}{channel.type === "facebook_page" ? <Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate()}>Delete</Button> : null}</div></div>{channel.type === "facebook_page" ? <form className="mt-3 border-t pt-3" onSubmit={(event) => { event.preventDefault(); connect.mutate(); }}><Field orientation="responsive"><FieldLabel htmlFor={`channel-token-${channel.id}`}>Page token</FieldLabel><Input id={`channel-token-${channel.id}`} type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={channel.hasToken ? "Paste a replacement Page token" : "Paste a Page token"} /><Button type="submit" size="sm" disabled={connect.isPending || !token.trim()}>{connect.isPending ? "Saving…" : channel.hasToken ? "Rotate token" : "Connect"}</Button></Field></form> : null}{error ? <ErrorAlert message={error} /> : null}</div>;
 }
 
 function TagsSection({ workspaceId }: { workspaceId: string }) {
