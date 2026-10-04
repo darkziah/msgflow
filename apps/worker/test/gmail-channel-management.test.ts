@@ -16,6 +16,7 @@ import {
 	beginGmailChannelOAuth,
 	completeGmailChannelOAuth,
 	disconnectGmailChannel,
+	gmailOAuthSuccessRedirect,
 } from "../src/gmail-channel";
 import { startGmailOAuth } from "../src/gmail-oauth";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
@@ -285,6 +286,78 @@ describe("Gmail channel lifecycle", () => {
 			"SELECT (SELECT count(*) FROM channels WHERE type='gmail') AS channels, (SELECT count(*) FROM gmail_accounts) AS accounts",
 		).first<{ channels: number; accounts: number }>();
 		expect(counts).toEqual({ channels: 0, accounts: 0 });
+	});
+
+	test("does not reactivate a Gmail account when authority changes during reconnect", async () => {
+		const { env, workspaceId } = await setup();
+		mockGoogle();
+		const first = await beginGmailChannelOAuth(
+			env,
+			workspaceId,
+			input(),
+			"actor",
+			"https://msgflow.test",
+		);
+		const channelId = (
+			await completeGmailChannelOAuth(
+				env,
+				oauthState(first.authorizationUrl),
+				"code",
+				"actor",
+			)
+		).channelId;
+		await disconnectGmailChannel(env, workspaceId, channelId, "actor");
+		const reconnect = await beginGmailChannelOAuth(
+			env,
+			workspaceId,
+			input(),
+			"actor",
+			"https://msgflow.test",
+		);
+		await seedUser(ctx, "other-owner", "other-owner@example.test");
+		await ctx.db
+			.insert(workspaceMembers)
+			.values({
+				id: "other-owner-membership",
+				workspaceId,
+				userId: "other-owner",
+				role: "owner",
+				createdAt: new Date().toISOString(),
+			})
+			.run();
+		await ctx.db
+			.update(workspaceMembers)
+			.set({ role: "member" })
+			.where(eq(workspaceMembers.id, "membership"))
+			.run();
+		await expect(
+			completeGmailChannelOAuth(
+				env,
+				oauthState(reconnect.authorizationUrl),
+				"code",
+				"actor",
+			),
+		).rejects.toMatchObject({ status: 403 });
+		const account = await ctx.db
+			.select()
+			.from(gmailAccounts)
+			.where(eq(gmailAccounts.channelId, channelId))
+			.get();
+		const channel = await ctx.db
+			.select()
+			.from(channels)
+			.where(eq(channels.id, channelId))
+			.get();
+		expect(account).toMatchObject({ syncState: "reconnect_required" });
+		expect(channel).toMatchObject({ status: "disconnected" });
+	});
+
+	test("returns to the originating workspace channels settings after Gmail OAuth", () => {
+		expect(
+			gmailOAuthSuccessRedirect("https://msgflow.test", "workspace-1"),
+		).toBe(
+			"https://msgflow.test/settings?workspace=workspace-1&section=channels",
+		);
 	});
 
 	test("fails safely when Google does not return an offline refresh token", async () => {

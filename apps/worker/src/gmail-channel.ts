@@ -74,7 +74,7 @@ export async function completeGmailChannelOAuth(
 	stateToken: string,
 	code: string,
 	actorUserId: string,
-): Promise<{ callbackOrigin: string; channelId: string }> {
+): Promise<{ callbackOrigin: string; channelId: string; workspaceId: string }> {
 	const state = await consumeGmailOAuthState(env, stateToken, actorUserId);
 	// OAuth state is one-time and bound to the initiator, but lifecycle authority
 	// may have changed during the authorization window. Consume before checking so
@@ -133,6 +133,7 @@ export async function completeGmailChannelOAuth(
 			return {
 				callbackOrigin: state.callbackOrigin,
 				channelId: existing.channelId,
+				workspaceId: state.workspaceId,
 			};
 		}
 		throw new ManageError("this Google account is already connected", 409);
@@ -213,7 +214,22 @@ export async function completeGmailChannelOAuth(
 			500,
 		);
 	}
-	return { callbackOrigin: state.callbackOrigin, channelId };
+	return {
+		callbackOrigin: state.callbackOrigin,
+		channelId,
+		workspaceId: state.workspaceId,
+	};
+}
+
+/** Builds the same-origin Settings destination after a successful OAuth callback. */
+export function gmailOAuthSuccessRedirect(
+	callbackOrigin: string,
+	workspaceId: string,
+): string {
+	const redirect = new URL("/settings", callbackOrigin);
+	redirect.searchParams.set("workspace", workspaceId);
+	redirect.searchParams.set("section", "channels");
+	return redirect.toString();
 }
 
 async function reactivateGmailAccount(
@@ -240,13 +256,20 @@ async function reactivateGmailAccount(
 			 SET encrypted_refresh_token=?, token_key_version=1, sync_state='idle',
 				 sync_claim_token=NULL, sync_claimed_at=NULL, last_error=NULL,
 				 scopes_json=?, updated_at=?
-			 WHERE channel_id=? AND workspace_id=?`,
+			 WHERE channel_id=? AND workspace_id=? AND EXISTS (
+				SELECT 1 FROM workspace_members membership
+				JOIN user actor ON actor.id=membership.user_id
+				WHERE membership.workspace_id=? AND membership.user_id=?
+				AND membership.role IN ('owner','admin') AND actor.email_verified=1
+			 )`,
 		).bind(
 			encryptedRefreshToken,
 			JSON.stringify(scopes),
 			now,
 			channelId,
 			workspaceId,
+			workspaceId,
+			actorUserId,
 		),
 	]);
 	if (results.some((result) => (result.meta.changes ?? 0) !== 1)) {

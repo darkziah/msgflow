@@ -161,6 +161,7 @@ import {
 	beginGmailChannelOAuth,
 	completeGmailChannelOAuth,
 	disconnectGmailChannel,
+	gmailOAuthSuccessRedirect,
 } from "./gmail-channel";
 import { scheduleOutbound, sendOutbound } from "./outbound";
 import { composeEmail } from "./email-compose";
@@ -1453,7 +1454,9 @@ app.get("/api/gmail-oauth/callback", async (c) => {
 			code,
 			session.user.id,
 		);
-		return c.json({ success: true, channelId: result.channelId });
+		return c.redirect(
+			gmailOAuthSuccessRedirect(result.callbackOrigin, result.workspaceId),
+		);
 	} catch (err) {
 		return manageError(c, err);
 	}
