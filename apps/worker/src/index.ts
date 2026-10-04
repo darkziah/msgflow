@@ -169,6 +169,7 @@ import { getConversation, listConversations } from "./queries";
 import { getReadableInboxIds } from "./inbox-tree";
 import { handleInboxTreeMove } from "./inbox-tree-route";
 import { handleScheduled } from "./scheduled";
+import { gmailPubSubApi } from "./gmail-pubsub-route";
 import { verifyFacebookSignatureForSecrets } from "./webhook";
 import { decryptChannelToken } from "./channel-token-crypto";
 import { requireWorkspaceAccess } from "./access";
@@ -2736,6 +2737,10 @@ app.delete("/api/workspaces/:workspaceId/canned-replies/:id", async (c) => {
 		return manageError(c, err);
 	}
 });
+
+// Gmail Pub/Sub is isolated so the public handler cannot accidentally pull Gmail
+// content; it only validates Google OIDC and records cron-owned sync work.
+app.route("/webhooks/gmail", gmailPubSubApi);
 
 // Meta webhook verification is isolated per Meta App. The opaque App id makes
 // the GET handshake deterministic; only a SHA-256 token hash is retained in D1.

@@ -1,5 +1,10 @@
-import { channels, gmailAccounts, gmailMessageRefs } from "@msgflow/db";
-import { and, eq, isNull, or } from "drizzle-orm";
+import {
+	channels,
+	gmailAccounts,
+	gmailMessageRefs,
+	gmailSyncRequests,
+} from "@msgflow/db";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { Env } from "./env";
 import type { GmailMessage } from "./gmail-api";
@@ -46,6 +51,122 @@ export async function backfillPendingGmailInboxes(env: Env): Promise<void> {
 			if (!(error instanceof LostGmailSyncLeaseError))
 				console.error("Gmail initial sync failed");
 		}
+	}
+}
+
+export async function reconcilePendingGmailHistory(env: Env): Promise<void> {
+	const pending = await drizzle(env.DB)
+		.select({
+			channelId: gmailSyncRequests.channelId,
+			requestedHistoryId: gmailSyncRequests.requestedHistoryId,
+		})
+		.from(gmailSyncRequests)
+		.innerJoin(channels, eq(gmailSyncRequests.channelId, channels.id))
+		.where(and(eq(channels.type, "gmail"), eq(channels.status, "active")))
+		.all();
+	for (const request of pending) {
+		try {
+			await reconcileGmailHistory(
+				env,
+				request.channelId,
+				request.requestedHistoryId,
+			);
+			// Delete only the exact request we consumed. A concurrent Pub/Sub delivery
+			// can upsert a newer cursor while Gmail is being reconciled.
+			await env.DB.prepare(
+				"DELETE FROM gmail_sync_requests WHERE channel_id=? AND requested_history_id=?",
+			)
+				.bind(request.channelId, request.requestedHistoryId)
+				.run();
+		} catch (error) {
+			if (!(error instanceof LostGmailSyncLeaseError))
+				console.error("Gmail pending history sync failed");
+		}
+	}
+}
+
+/** Renews active Gmail watches before their seven-day provider expiry. */
+export async function renewExpiringGmailWatches(env: Env): Promise<void> {
+	if (!env.GOOGLE_PUBSUB_TOPIC) return;
+	const threshold = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+	const accounts = await drizzle(env.DB)
+		.select({ channelId: gmailAccounts.channelId })
+		.from(gmailAccounts)
+		.innerJoin(channels, eq(gmailAccounts.channelId, channels.id))
+		.where(
+			and(
+				eq(channels.type, "gmail"),
+				eq(channels.status, "active"),
+				or(
+					isNull(gmailAccounts.watchExpirationAt),
+					sql`${gmailAccounts.watchExpirationAt} < ${threshold}`,
+				),
+			),
+		)
+		.all();
+	for (const account of accounts) {
+		try {
+			await renewGmailWatch(env, account.channelId, env.GOOGLE_PUBSUB_TOPIC);
+		} catch (error) {
+			if (!(error instanceof LostGmailSyncLeaseError))
+				console.error("Gmail watch renewal failed");
+		}
+	}
+}
+
+async function renewGmailWatch(
+	env: Env,
+	channelId: string,
+	topicName: string,
+): Promise<void> {
+	const claimToken = crypto.randomUUID();
+	const now = new Date().toISOString();
+	const expired = new Date(Date.now() - SYNC_LEASE_MS).toISOString();
+	const claim = await env.DB.prepare(
+		`UPDATE gmail_accounts SET sync_claim_token=?, sync_claimed_at=?, sync_state='syncing', updated_at=?
+		 WHERE channel_id=? AND (sync_claim_token IS NULL OR sync_claimed_at < ?)
+		 AND sync_state <> 'reconnect_required'`,
+	)
+		.bind(claimToken, now, now, channelId, expired)
+		.run();
+	if (claim.meta.changes !== 1)
+		throw new LostGmailSyncLeaseError(
+			"Gmail sync is already running or requires reconnection",
+		);
+	try {
+		const gmail = await GmailApi.forChannel(env, channelId, claimToken);
+		const watch = await gmail.watch(topicName);
+		const expirationAt = new Date(Number(watch.expiration)).toISOString();
+		if (Number.isNaN(new Date(expirationAt).valueOf()))
+			throw new GmailApiError("Gmail returned an invalid watch", "definitive");
+		const result = await env.DB.prepare(
+			"UPDATE gmail_accounts SET watch_expiration_at=?, history_id=CASE WHEN history_id IS NULL THEN ? ELSE history_id END, sync_state='idle', last_error=NULL, updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+		)
+			.bind(
+				expirationAt,
+				watch.historyId,
+				new Date().toISOString(),
+				channelId,
+				claimToken,
+			)
+			.run();
+		if (result.meta.changes !== 1)
+			throw new LostGmailSyncLeaseError("Gmail watch lease was lost");
+	} catch (error) {
+		if (!(error instanceof LostGmailSyncLeaseError)) {
+			await env.DB.prepare(
+				"UPDATE gmail_accounts SET sync_state=CASE WHEN sync_state='reconnect_required' THEN sync_state ELSE 'error' END, last_error='Gmail watch renewal failed', updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+			)
+				.bind(new Date().toISOString(), channelId, claimToken)
+				.run();
+			throw error;
+		}
+	} finally {
+		await env.DB.prepare(
+			"UPDATE gmail_accounts SET sync_claim_token=NULL, sync_claimed_at=NULL, updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+		)
+			.bind(new Date().toISOString(), channelId, claimToken)
+			.run();
 	}
 }
 

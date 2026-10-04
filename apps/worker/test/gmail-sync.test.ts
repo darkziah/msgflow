@@ -14,6 +14,8 @@ import {
 	backfillGmailInbox,
 	backfillPendingGmailInboxes,
 	reconcileGmailHistory,
+	reconcilePendingGmailHistory,
+	renewExpiringGmailWatches,
 } from "../src/gmail-sync";
 import { createTestDb, seedWorkspace, type TestCtx } from "./helpers";
 
@@ -367,5 +369,69 @@ describe("Gmail History reconciliation", () => {
 					.get()
 			)?.historyId,
 		).toBe("10");
+	});
+});
+
+describe("Gmail watches and queued Pub/Sub work", () => {
+	test("renews an expiring active watch with the configured topic and INBOX label", async () => {
+		const env = await setup();
+		const requests: { url: string; init?: RequestInit }[] = [];
+		globalThis.fetch = (async (url, init) => {
+			requests.push({ url: String(url), init });
+			if (String(url).includes("/token"))
+				return Response.json({ access_token: "access" });
+			if (String(url).endsWith("/watch"))
+				return Response.json({
+					historyId: "101",
+					expiration: String(Date.now() + 6 * 86_400_000),
+				});
+			throw new Error(`unexpected ${url}`);
+		}) as typeof fetch;
+		await renewExpiringGmailWatches({
+			...env,
+			GOOGLE_PUBSUB_TOPIC: "projects/test/topics/gmail",
+		});
+		const watch = requests.find((request) => request.url.endsWith("/watch"));
+		expect(watch?.init?.method).toBe("POST");
+		expect(watch?.init?.body).toBe(
+			JSON.stringify({
+				topicName: "projects/test/topics/gmail",
+				labelIds: ["INBOX"],
+			}),
+		);
+		expect(
+			(
+				await ctx.db
+					.select()
+					.from(gmailAccounts)
+					.where(eq(gmailAccounts.channelId, "gmail"))
+					.get()
+			)?.watchExpirationAt,
+		).toBeTruthy();
+	});
+
+	test("consumes queued history under reconciliation and removes only completed work", async () => {
+		const env = await setup();
+		await ctx.env.DB.prepare(
+			"UPDATE gmail_accounts SET history_id='10' WHERE channel_id='gmail'",
+		).run();
+		await ctx.env.DB.prepare(
+			"INSERT INTO gmail_sync_requests (channel_id,requested_history_id,requested_at) VALUES ('gmail','11',?)",
+		)
+			.bind(new Date().toISOString())
+			.run();
+		globalThis.fetch = (async (url) => {
+			if (String(url).includes("/token"))
+				return Response.json({ access_token: "access" });
+			if (String(url).includes("/history?"))
+				return Response.json({ history: [], historyId: "11" });
+			throw new Error(`unexpected ${url}`);
+		}) as typeof fetch;
+		await reconcilePendingGmailHistory(env);
+		expect(
+			await ctx.env.DB.prepare(
+				"SELECT channel_id FROM gmail_sync_requests",
+			).all(),
+		).toMatchObject({ results: [] });
 	});
 });

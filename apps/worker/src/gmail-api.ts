@@ -147,6 +147,24 @@ export class GmailApi {
 		};
 	}
 
+	async watch(
+		topicName: string,
+	): Promise<{ historyId: string; expiration: string }> {
+		const value = await this.post("/watch", {
+			topicName,
+			labelIds: ["INBOX"],
+		});
+		if (typeof value.historyId !== "string" || !/^\d+$/.test(value.historyId))
+			throw new GmailApiError("Gmail returned an invalid watch", "definitive");
+		const expiration =
+			typeof value.expiration === "string"
+				? value.expiration
+				: String(value.expiration);
+		if (!/^\d+$/.test(expiration) || !Number.isSafeInteger(Number(expiration)))
+			throw new GmailApiError("Gmail returned an invalid watch", "definitive");
+		return { historyId: value.historyId, expiration };
+	}
+
 	async listHistory(
 		startHistoryId: string,
 		pageToken?: string,
@@ -185,6 +203,43 @@ export class GmailApi {
 				typeof value.nextPageToken === "string" ? value.nextPageToken : null,
 			historyId: typeof value.historyId === "string" ? value.historyId : null,
 		};
+	}
+
+	private async post(
+		path: string,
+		body: Record<string, unknown>,
+	): Promise<Record<string, unknown>> {
+		const accessToken = await this.refreshAccessToken();
+		let response: Response;
+		try {
+			response = await fetch(`${GMAIL_API_BASE}${path}`, {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${accessToken}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify(body),
+				signal: AbortSignal.timeout(15_000),
+			});
+		} catch {
+			throw new GmailApiError(
+				"Gmail request could not be completed",
+				"retryable",
+			);
+		}
+		if (!response.ok) {
+			if (response.status === 401 || response.status === 403)
+				await this.markReconnectRequired();
+			throw this.requestError(response.status);
+		}
+		try {
+			return (await response.json()) as Record<string, unknown>;
+		} catch {
+			throw new GmailApiError(
+				"Gmail returned an invalid response",
+				"definitive",
+			);
+		}
 	}
 
 	private async get(

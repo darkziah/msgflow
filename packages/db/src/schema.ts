@@ -337,6 +337,21 @@ export const gmailAccounts = sqliteTable(
 	],
 );
 
+/** Coalesced Gmail Pub/Sub work; cron owns the provider reconciliation. */
+export const gmailSyncRequests = sqliteTable(
+	"gmail_sync_requests",
+	{
+		channelId: text("channel_id")
+			.primaryKey()
+			.references(() => gmailAccounts.channelId, { onDelete: "cascade" }),
+		requestedHistoryId: text("requested_history_id").notNull(),
+		requestedAt: text("requested_at").notNull(),
+	},
+	(table) => [
+		index("idx_gmail_sync_requests_requested_at").on(table.requestedAt),
+	],
+);
+
 export const gmailAccountDelegates = sqliteTable(
 	"gmail_account_delegates",
 	// Migration 0036 requires every delegate to be a member of the account workspace.
