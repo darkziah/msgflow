@@ -1004,8 +1004,15 @@ async function validateFilters(
 				out.status = value;
 				break;
 			case "channel":
-				if (value !== "facebook" && value !== "email" && value !== "whatsapp") {
-					throw new ManageError("channel must be facebook, email or whatsapp");
+				if (
+					value !== "facebook" &&
+					value !== "email" &&
+					value !== "gmail" &&
+					value !== "whatsapp"
+				) {
+					throw new ManageError(
+						"channel must be facebook, email, gmail or whatsapp",
+					);
 				}
 				out.channel = value;
 				break;

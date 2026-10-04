@@ -29,8 +29,12 @@ interface Props {
 const channelPresentation = {
 	facebook: { Icon: MessageCircle, label: "Facebook" },
 	email: { Icon: Mail, label: "Email" },
+	gmail: { Icon: Mail, label: "Gmail" },
 	whatsapp: { Icon: MessageCircleMore, label: "WhatsApp" },
-} satisfies Record<ConversationSummary["channel"], { Icon: typeof Mail; label: string }>;
+} satisfies Record<
+	ConversationSummary["channel"],
+	{ Icon: typeof Mail; label: string }
+>;
 
 export function ConversationList({
 	conversations,
@@ -151,8 +155,15 @@ export function ConversationList({
 									</span>
 								) : null}
 							</span>
-							<span className="mt-1 shrink-0 text-muted-foreground" title={channelLabel}>
-								<ChannelIcon aria-label={channelLabel} role="img" className="size-3.5" />
+							<span
+								className="mt-1 shrink-0 text-muted-foreground"
+								title={channelLabel}
+							>
+								<ChannelIcon
+									aria-label={channelLabel}
+									role="img"
+									className="size-3.5"
+								/>
 							</span>
 						</button>
 					</li>
