@@ -1,12 +1,13 @@
 import { SCHEDULED_MAX_ATTEMPTS, scheduledMessages } from "@msgflow/db";
 import { and, eq, lte } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import { maintainEmail } from "./email-maintenance";
 import type { Env } from "./env";
+import { backfillPendingGmailInboxes } from "./gmail-sync";
 import { type SendParams, sendOutbound } from "./outbound";
 import { parseStoredAttachments } from "./persistence";
 import { claimScheduledMessage } from "./scheduled-claim";
 import { reviveDueSnoozes } from "./snooze";
-import { maintainEmail } from "./email-maintenance";
 
 export {
 	claimScheduledMessage,
@@ -19,6 +20,7 @@ export async function handleScheduled(env: Env): Promise<void> {
 	const now = new Date().toISOString();
 	await reviveDueSnoozes(env, now);
 	await maintainEmail(env);
+	await backfillPendingGmailInboxes(env);
 	await deliverScheduledMessages(env, now);
 }
 

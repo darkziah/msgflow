@@ -47,10 +47,15 @@ export class GmailApi {
 	private constructor(
 		private readonly env: Env,
 		private readonly channelId: string,
+		private readonly claimToken: string,
 		private readonly refreshToken: string,
 	) {}
 
-	static async forChannel(env: Env, channelId: string): Promise<GmailApi> {
+	static async forChannel(
+		env: Env,
+		channelId: string,
+		claimToken: string,
+	): Promise<GmailApi> {
 		const account = await drizzle(env.DB)
 			.select({ encryptedRefreshToken: gmailAccounts.encryptedRefreshToken })
 			.from(gmailAccounts)
@@ -62,6 +67,7 @@ export class GmailApi {
 			return new GmailApi(
 				env,
 				channelId,
+				claimToken,
 				await decryptChannelToken(
 					account.encryptedRefreshToken,
 					env.CHANNEL_TOKEN_ENCRYPTION_KEY,
@@ -142,7 +148,11 @@ export class GmailApi {
 				"retryable",
 			);
 		}
-		if (!response.ok) throw this.requestError(response.status);
+		if (!response.ok) {
+			if (response.status === 401 || response.status === 403)
+				await this.markReconnectRequired();
+			throw this.requestError(response.status);
+		}
 		try {
 			return (await response.json()) as Record<string, unknown>;
 		} catch {
@@ -176,12 +186,11 @@ export class GmailApi {
 			);
 		}
 		if (!response.ok) {
-			if (response.status === 400 || response.status === 401) {
-				await this.env.DB.prepare(
-					"UPDATE gmail_accounts SET sync_state='reconnect_required', last_error='Gmail authorization must be reconnected', updated_at=? WHERE channel_id=?",
-				)
-					.bind(new Date().toISOString(), this.channelId)
-					.run();
+			const body = (await response.json().catch(() => ({}))) as {
+				error?: unknown;
+			};
+			if (body.error === "invalid_grant") {
+				await this.markReconnectRequired();
 				throw new GmailApiError(
 					"Gmail account requires reconnection",
 					"authentication",
@@ -193,6 +202,14 @@ export class GmailApi {
 		if (typeof body.access_token !== "string" || !body.access_token)
 			throw new GmailApiError("Gmail token refresh failed", "definitive");
 		return body.access_token;
+	}
+
+	private async markReconnectRequired(): Promise<void> {
+		await this.env.DB.prepare(
+			"UPDATE gmail_accounts SET sync_state='reconnect_required', last_error='Gmail authorization must be reconnected', updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+		)
+			.bind(new Date().toISOString(), this.channelId, this.claimToken)
+			.run();
 	}
 
 	private requestError(status: number): GmailApiError {

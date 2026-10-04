@@ -317,7 +317,7 @@ export async function routeInbound(
 	// a conflict means it was already routed and we stop here. The DO also
 	// dedups the append by providerMessageId, so messages stay single even if
 	// this guard and the DO race.
-	const messageId = crypto.randomUUID();
+	let messageId = crypto.randomUUID();
 	const dedupKey =
 		inbound.providerMessageId ??
 		syntheticMessageKey(
@@ -331,56 +331,73 @@ export async function routeInbound(
 			conversationId: inbound.conversationId,
 			providerMessageId: dedupKey,
 			messageId,
-			processedAt: Date.now(),
+			// A negative timestamp is a durable append-pending marker. Existing rows
+			// are completed (positive), so a failed DO append can be replayed without
+			// re-running pre-append rules and their external side effects.
+			processedAt: -Date.now(),
 		})
 		.onConflictDoNothing()
 		.run();
-	if ((claimed.meta?.changes ?? 1) === 0) {
-		return; // duplicate event — already routed (rules + append ran before)
+	const appendPending = (claimed.meta?.changes ?? 1) === 0;
+	if (appendPending) {
+		const prior = await db
+			.select()
+			.from(processedMessages)
+			.where(
+				and(
+					eq(processedMessages.conversationId, inbound.conversationId),
+					eq(processedMessages.providerMessageId, dedupKey),
+				),
+			)
+			.get();
+		if (!prior || prior.processedAt > 0) return;
+		messageId = prior.messageId;
 	}
 
 	// 6. Rules (ADR 0009 + routing spec): synchronous pre-append evaluation.
 	//    May re-route the conversation (inbox/assignee/status) and apply tags
 	//    before the message reaches the DO. stop_processing and skipped logging
 	//    are handled inside evaluateRules.
-	const existingTags = await db
-		.select({ tagId: conversationTags.tagId })
-		.from(conversationTags)
-		.where(eq(conversationTags.conversationId, inbound.conversationId))
-		.all();
-	const outcome = await evaluateRules(env, {
-		conversationId: inbound.conversationId,
-		workspaceId,
-		inboxId: inbox.id,
-		assigneeId: null,
-		status: "open",
-		channelType,
-		senderEmail:
-			channelType === "email" || channelType === "gmail"
-				? inbound.senderId
-				: null,
-		subject:
-			channelType === "email" || channelType === "gmail"
-				? (emailPayload.subject ?? null)
-				: null,
-		messageText: inbound.text,
-		conversationTagIds: existingTags.map((row) => row.tagId),
-	});
-	if (
-		outcome.inboxId !== inbox.id ||
-		outcome.assigneeId !== null ||
-		outcome.status !== "open"
-	) {
-		await db
-			.update(conversations)
-			.set({
-				inboxId: outcome.inboxId,
-				assigneeId: outcome.assigneeId,
-				status: outcome.status,
-				updatedAt: now,
-			})
-			.where(eq(conversations.id, inbound.conversationId))
-			.run();
+	if (!appendPending) {
+		const existingTags = await db
+			.select({ tagId: conversationTags.tagId })
+			.from(conversationTags)
+			.where(eq(conversationTags.conversationId, inbound.conversationId))
+			.all();
+		const outcome = await evaluateRules(env, {
+			conversationId: inbound.conversationId,
+			workspaceId,
+			inboxId: inbox.id,
+			assigneeId: null,
+			status: "open",
+			channelType,
+			senderEmail:
+				channelType === "email" || channelType === "gmail"
+					? inbound.senderId
+					: null,
+			subject:
+				channelType === "email" || channelType === "gmail"
+					? (emailPayload.subject ?? null)
+					: null,
+			messageText: inbound.text,
+			conversationTagIds: existingTags.map((row) => row.tagId),
+		});
+		if (
+			outcome.inboxId !== inbox.id ||
+			outcome.assigneeId !== null ||
+			outcome.status !== "open"
+		) {
+			await db
+				.update(conversations)
+				.set({
+					inboxId: outcome.inboxId,
+					assigneeId: outcome.assigneeId,
+					status: outcome.status,
+					updatedAt: now,
+				})
+				.where(eq(conversations.id, inbound.conversationId))
+				.run();
+		}
 	}
 
 	// 7. Build the canonical message and forward to the Conversation DO
@@ -407,6 +424,17 @@ export async function routeInbound(
 	});
 	if (!response.ok)
 		throw new Error(`Conversation DO append failed (${response.status})`);
+	await db
+		.update(processedMessages)
+		.set({ processedAt: Date.now() })
+		.where(
+			and(
+				eq(processedMessages.conversationId, inbound.conversationId),
+				eq(processedMessages.providerMessageId, dedupKey),
+				eq(processedMessages.messageId, messageId),
+			),
+		)
+		.run();
 }
 
 /**
@@ -545,7 +573,7 @@ async function getOrCreateContact(
 			updatedAt: now,
 		})
 		.run();
-	await db
+	const identityInsert = await db
 		.insert(contactIdentities)
 		.values({
 			id: crypto.randomUUID(),
@@ -557,6 +585,27 @@ async function getOrCreateContact(
 		})
 		.onConflictDoNothing()
 		.run();
+	if ((identityInsert.meta.changes ?? 1) === 0) {
+		const winner = await db
+			.select({ contactId: contactIdentities.contactId })
+			.from(contactIdentities)
+			.where(
+				and(
+					eq(contactIdentities.channelId, channelId),
+					eq(contactIdentities.externalUserId, externalUserId),
+				),
+			)
+			.get();
+		if (winner && winner.contactId !== contactId) {
+			await db.delete(contacts).where(eq(contacts.id, contactId)).run();
+			const existing = await db
+				.select()
+				.from(contacts)
+				.where(eq(contacts.id, winner.contactId))
+				.get();
+			if (existing) return existing;
+		}
+	}
 	const created = await db
 		.select()
 		.from(contacts)
