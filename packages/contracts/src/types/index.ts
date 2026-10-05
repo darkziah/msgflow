@@ -386,6 +386,17 @@ export interface ChannelSummary {
 	tokenExpiresAt: string | null;
 	createdAt: string;
 	updatedAt: string;
+	/** Gmail lifecycle state; returned only for Gmail channels and never includes credentials. */
+	gmail?: {
+		email: string;
+		inboxId: string;
+		accessMode: "private" | "shared";
+		teamId: string | null;
+		syncState: "idle" | "syncing" | "error" | "reconnect_required";
+		lastSyncedAt: string | null;
+		lastError: string | null;
+		backfillDays: number;
+	};
 }
 
 /** Installation-level Meta App metadata. The App secret never leaves the Worker. */

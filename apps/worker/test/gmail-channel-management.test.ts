@@ -19,6 +19,7 @@ import {
 	gmailOAuthSuccessRedirect,
 } from "../src/gmail-channel";
 import { startGmailOAuth } from "../src/gmail-oauth";
+import { listChannels } from "../src/manage";
 import { createTestDb, seedUser, seedWorkspace, type TestCtx } from "./helpers";
 
 let ctx: TestCtx;
@@ -527,6 +528,36 @@ describe("Gmail channel lifecycle", () => {
 			),
 		).toBe("refresh");
 		expect(link?.isDefault).toBe(true);
+	});
+
+	test("lists Gmail lifecycle metadata without exposing credentials", async () => {
+		const { env, workspaceId } = await setup();
+		mockGoogle();
+		const started = await beginGmailChannelOAuth(
+			env,
+			workspaceId,
+			input(),
+			"actor",
+			"https://msgflow.test",
+		);
+		const { channelId } = await completeGmailChannelOAuth(
+			env,
+			oauthState(started.authorizationUrl),
+			"code",
+			"actor",
+		);
+		const [channel] = await listChannels(env, workspaceId, "actor");
+		expect(channel).toMatchObject({
+			id: channelId,
+			gmail: {
+				email: "person@example.test",
+				inboxId: "inbox",
+				accessMode: "private",
+				syncState: "idle",
+				backfillDays: 30,
+			},
+		});
+		expect(JSON.stringify(channel)).not.toContain("refresh");
 	});
 
 	test("disconnect survives revocation failure and retains Gmail history rows", async () => {

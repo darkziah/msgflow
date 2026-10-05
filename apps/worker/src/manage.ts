@@ -22,6 +22,7 @@ import {
 	cannedReplies,
 	channels,
 	conversations,
+	gmailAccounts,
 	inboxChannels,
 	inboxes,
 	inboxMembers,
@@ -706,8 +707,24 @@ export async function listChannels(
 			tokenExpiresAt: channels.tokenExpiresAt,
 			createdAt: channels.createdAt,
 			updatedAt: channels.updatedAt,
+			gmailEmail: gmailAccounts.email,
+			gmailAccessMode: gmailAccounts.accessMode,
+			gmailTeamId: gmailAccounts.teamId,
+			gmailSyncState: gmailAccounts.syncState,
+			gmailLastSyncedAt: gmailAccounts.lastSyncedAt,
+			gmailLastError: gmailAccounts.lastError,
+			gmailBackfillDays: gmailAccounts.backfillDays,
+			gmailInboxId: inboxChannels.inboxId,
 		})
 		.from(channels)
+		.leftJoin(gmailAccounts, eq(gmailAccounts.channelId, channels.id))
+		.leftJoin(
+			inboxChannels,
+			and(
+				eq(inboxChannels.channelId, channels.id),
+				eq(inboxChannels.isDefault, true),
+			),
+		)
 		.where(
 			and(
 				eq(channels.workspaceId, workspaceId),
@@ -725,6 +742,25 @@ export async function listChannels(
 		tokenExpiresAt: row.tokenExpiresAt,
 		createdAt: row.createdAt,
 		updatedAt: row.updatedAt,
+		...(row.type === "gmail" &&
+		row.gmailEmail &&
+		row.gmailInboxId &&
+		row.gmailAccessMode &&
+		row.gmailSyncState &&
+		row.gmailBackfillDays !== null
+			? {
+					gmail: {
+						email: row.gmailEmail,
+						inboxId: row.gmailInboxId,
+						accessMode: row.gmailAccessMode,
+						teamId: row.gmailTeamId,
+						syncState: row.gmailSyncState,
+						lastSyncedAt: row.gmailLastSyncedAt,
+						lastError: row.gmailLastError,
+						backfillDays: row.gmailBackfillDays,
+					},
+				}
+			: {}),
 	}));
 }
 
