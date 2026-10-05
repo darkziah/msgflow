@@ -27,6 +27,7 @@
 | P1 | Durable Object commands/events: `conversation-do.ts` | `request.json()` assertions; persisted JSON.parse casts | Versioned command/event envelopes and Message/Comment/Activity schemas | Decode Worker-to-DO commands and persisted payload/attachments/details on read; provide compatibility defaults or migrations for existing DO rows. |
 | P1 | D1 flexible JSON: sidebar preferences, saved filters, scheduled/outbound attachments | `JSON.parse` plus manual filtering/fallbacks | Versioned persistence schemas | Decode on read, retain safe defaults for legacy/corrupt UI state, reject/quarantine security-sensitive invalid rows without logging contents. |
 | P2 | Provider responses and callbacks: Graph profile/send response | Assertions/casts | Narrow response schemas | Treat response extensions as allowed; validate only data used for state transitions. |
+| P2 | Gmail OAuth, Gmail API, and Pub/Sub envelopes | Narrow Gmail OAuth and Pub/Sub schemas | Gmail channel contracts | OAuth state, push envelopes, and identifiers are bounded at the Worker boundary; provider tokens and decoded Google errors never enter contracts or logs. |
 | P2 | Public response encoding | Interfaces/casts | Selective response schemas | Add only where wire compatibility is material; avoid unexpected transforms for existing clients. |
 
 ## Rollout rules

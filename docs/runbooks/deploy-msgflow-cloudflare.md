@@ -54,6 +54,10 @@ bunx wrangler secret put MESSENGER_VERIFY_TOKEN --config wrangler.deploy.toml
 bunx wrangler secret put CHANNEL_TOKEN_ENCRYPTION_KEY --config wrangler.deploy.toml
 ```
 
+For Gmail Channels, configure the Google OAuth and authenticated Pub/Sub push
+secrets from `gmail-channel-operator.md` before connecting an account. Gmail is
+a separate transport; do not configure Cloudflare Email Routing for it.
+
 Verify only secret names:
 
 ```sh

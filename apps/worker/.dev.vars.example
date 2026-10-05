@@ -5,3 +5,11 @@ BETTER_AUTH_SECRET=
 BETTER_AUTH_URL=http://localhost:8787
 # Comma-separated origins allowed to authenticate (web app dev origin, prod domain).
 BETTER_AUTH_TRUSTED_ORIGINS=http://localhost:5174
+# Gmail Channel: OAuth client values and Pub/Sub authenticated-push identity.
+# Keep real values only in .dev.vars or Worker secrets, never in wrangler.toml.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8787/api/gmail-oauth/callback
+GOOGLE_PUBSUB_AUDIENCE=http://localhost:8787/webhooks/gmail/pubsub
+GOOGLE_PUBSUB_SERVICE_ACCOUNT_EMAIL=
+GOOGLE_PUBSUB_TOPIC=
