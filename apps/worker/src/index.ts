@@ -160,6 +160,7 @@ import {
 import {
 	beginGmailChannelOAuth,
 	completeGmailChannelOAuth,
+	deleteGmailChannel,
 	disconnectGmailChannel,
 	gmailOAuthSuccessRedirect,
 } from "./gmail-channel";
@@ -1470,6 +1471,26 @@ app.post(
 		if (!session) return unauthorized(c);
 		try {
 			await disconnectGmailChannel(
+				c.env,
+				c.req.param("workspaceId"),
+				c.req.param("channelId"),
+				session.user.id,
+			);
+			return c.json({ success: true });
+		} catch (err) {
+			return manageError(c, err);
+		}
+	},
+);
+
+// DELETE removes Google credentials/provider mappings but retains conversations.
+app.delete(
+	"/api/workspaces/:workspaceId/gmail-channels/:channelId",
+	async (c) => {
+		const session = await getSession(c);
+		if (!session) return unauthorized(c);
+		try {
+			await deleteGmailChannel(
 				c.env,
 				c.req.param("workspaceId"),
 				c.req.param("channelId"),

@@ -306,6 +306,13 @@ export const api = {
 		);
 	},
 
+	deleteGmailChannel(workspaceId: string, id: string) {
+		return request<{ success: true }>(
+			`/api/workspaces/${encodeURIComponent(workspaceId)}/gmail-channels/${encodeURIComponent(id)}`,
+			{ method: "DELETE" },
+		);
+	},
+
 	connectChannel(workspaceId: string, id: string, accessToken: string) {
 		return request<{ success: true }>(
 			`/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(id)}/token`,

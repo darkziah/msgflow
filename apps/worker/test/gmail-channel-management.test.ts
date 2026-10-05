@@ -15,6 +15,7 @@ import type { Env } from "../src/env";
 import {
 	beginGmailChannelOAuth,
 	completeGmailChannelOAuth,
+	deleteGmailChannel,
 	disconnectGmailChannel,
 	gmailOAuthSuccessRedirect,
 } from "../src/gmail-channel";
@@ -560,7 +561,7 @@ describe("Gmail channel lifecycle", () => {
 		expect(JSON.stringify(channel)).not.toContain("refresh");
 	});
 
-	test("disconnect survives revocation failure and retains Gmail history rows", async () => {
+	test("disconnect retains history while delete removes Gmail provider data", async () => {
 		const { env, workspaceId } = await setup();
 		mockGoogle();
 		const first = await startGmailOAuth(env, {
@@ -637,6 +638,26 @@ describe("Gmail channel lifecycle", () => {
 			"SELECT (SELECT count(*) FROM conversations WHERE id='conversation') AS conversations, (SELECT count(*) FROM gmail_message_refs WHERE gmail_message_id='message') AS refs",
 		).first<{ conversations: number; refs: number }>();
 		expect(history).toEqual({ conversations: 1, refs: 1 });
+
+		await deleteGmailChannel(env, workspaceId, channelId, "actor");
+		const deletedAccount = await ctx.db
+			.select()
+			.from(gmailAccounts)
+			.where(eq(gmailAccounts.channelId, channelId))
+			.get();
+		const deletedChannel = await ctx.db
+			.select()
+			.from(channels)
+			.where(eq(channels.id, channelId))
+			.get();
+		const deletedHistory = await ctx.env.DB.prepare(
+			"SELECT (SELECT count(*) FROM conversations WHERE id='conversation') AS conversations, (SELECT count(*) FROM gmail_message_refs WHERE gmail_message_id='message') AS refs, (SELECT count(*) FROM inbox_channels WHERE channel_id=?) AS links",
+		)
+			.bind(channelId)
+			.first<{ conversations: number; refs: number; links: number }>();
+		expect(deletedAccount).toBeUndefined();
+		expect(deletedChannel).toMatchObject({ status: "deleted" });
+		expect(deletedHistory).toEqual({ conversations: 1, refs: 0, links: 0 });
 	});
 
 	test("reconnects a disconnected account in the same workspace without replacing history", async () => {

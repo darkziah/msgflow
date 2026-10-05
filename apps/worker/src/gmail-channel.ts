@@ -1,6 +1,13 @@
 import type { GmailOAuthStartRequest } from "@msgflow/contracts";
-import { channels, gmailAccounts, inboxes, teams } from "@msgflow/db";
-import { and, eq } from "drizzle-orm";
+import {
+	channels,
+	gmailAccounts,
+	gmailMessageRefs,
+	inboxChannels,
+	inboxes,
+	teams,
+} from "@msgflow/db";
+import { and, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { requireOwnerAccess } from "./access";
 import {
@@ -324,6 +331,75 @@ export async function disconnectGmailChannel(
 		env.DB.prepare(
 			"UPDATE gmail_accounts SET sync_state='reconnect_required', sync_claim_token=NULL, sync_claimed_at=NULL, updated_at=? WHERE channel_id=? AND workspace_id=?",
 		).bind(now, channelId, workspaceId),
+	]);
+}
+
+/**
+ * Removes Gmail provider configuration while retaining MsgFlow conversations.
+ * The channel row remains a tombstone because historical conversations still
+ * reference it; all Gmail credentials and provider mappings are removed.
+ */
+export async function deleteGmailChannel(
+	env: Env,
+	workspaceId: string,
+	channelId: string,
+	actorUserId: string,
+): Promise<void> {
+	const db = drizzle(env.DB);
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const account = await db
+		.select({ encryptedRefreshToken: gmailAccounts.encryptedRefreshToken })
+		.from(gmailAccounts)
+		.innerJoin(channels, eq(gmailAccounts.channelId, channels.id))
+		.where(
+			and(
+				eq(channels.id, channelId),
+				eq(channels.workspaceId, workspaceId),
+				eq(channels.type, "gmail"),
+				ne(channels.status, "deleted"),
+			),
+		)
+		.get();
+	if (!account) throw new ManageError("Gmail channel not found", 404);
+	try {
+		const refreshToken = await decryptChannelToken(
+			account.encryptedRefreshToken,
+			env.CHANNEL_TOKEN_ENCRYPTION_KEY,
+		);
+		await fetch(GOOGLE_REVOKE_URL, {
+			method: "POST",
+			headers: { "content-type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams({ token: refreshToken }).toString(),
+			signal: AbortSignal.timeout(10_000),
+		});
+	} catch {
+		// Local credential destruction must not depend on Google's revoke endpoint.
+	}
+	await requireOwnerAccess(db, workspaceId, actorUserId);
+	const now = new Date().toISOString();
+	await db.batch([
+		db
+			.delete(gmailMessageRefs)
+			.where(eq(gmailMessageRefs.channelId, channelId)),
+		db.delete(inboxChannels).where(eq(inboxChannels.channelId, channelId)),
+		db
+			.delete(gmailAccounts)
+			.where(
+				and(
+					eq(gmailAccounts.channelId, channelId),
+					eq(gmailAccounts.workspaceId, workspaceId),
+				),
+			),
+		db
+			.update(channels)
+			.set({ status: "deleted", updatedAt: now })
+			.where(
+				and(
+					eq(channels.id, channelId),
+					eq(channels.workspaceId, workspaceId),
+					eq(channels.type, "gmail"),
+				),
+			),
 	]);
 }
 

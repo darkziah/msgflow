@@ -34,6 +34,7 @@ vi.mock("@/lib/api", () => ({
 		listChannels: vi.fn(),
 		workspaceListInboxes: vi.fn(),
 		startGmailOAuth: vi.fn(),
+		deleteGmailChannel: vi.fn(),
 		disconnectGmailChannel: vi.fn(),
 	},
 }));
@@ -65,6 +66,7 @@ describe("settings UI contracts", () => {
 		vi.mocked(api.listChannels).mockResolvedValue({ channels: [] });
 		vi.mocked(api.workspaceListInboxes).mockResolvedValue({ inboxes: [] });
 		vi.mocked(api.startGmailOAuth).mockResolvedValue({ authorizationUrl: "https://accounts.google.test/authorize" });
+		vi.mocked(api.deleteGmailChannel).mockResolvedValue({ success: true });
 		vi.mocked(api.disconnectGmailChannel).mockResolvedValue({ success: true });
 	});
 
@@ -216,5 +218,8 @@ describe("settings UI contracts", () => {
 		fireEvent.click(await screen.findByRole("button", { name: "Disconnect Gmail" }));
 		expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Existing conversations remain"));
 		await waitFor(() => expect(api.disconnectGmailChannel).toHaveBeenCalledWith("workspace-1", "gmail-1"));
+		fireEvent.click(screen.getByRole("button", { name: "Delete Gmail" }));
+		expect(window.confirm).toHaveBeenLastCalledWith(expect.stringContaining("cannot be reconnected"));
+		await waitFor(() => expect(api.deleteGmailChannel).toHaveBeenCalledWith("workspace-1", "gmail-1"));
 	});
 });
