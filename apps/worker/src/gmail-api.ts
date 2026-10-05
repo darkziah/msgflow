@@ -14,6 +14,7 @@ export class GmailApiError extends Error {
 			| "authentication"
 			| "retryable"
 			| "definitive"
+			| "uncertain"
 			| "historyExpired",
 	) {
 		super(message);
@@ -60,14 +61,15 @@ export class GmailApi {
 	private constructor(
 		private readonly env: Env,
 		private readonly channelId: string,
-		private readonly claimToken: string,
+		private readonly claimToken: string | null,
 		private readonly refreshToken: string,
+		private readonly encryptedRefreshToken: string,
 	) {}
 
 	static async forChannel(
 		env: Env,
 		channelId: string,
-		claimToken: string,
+		claimToken: string | null = null,
 	): Promise<GmailApi> {
 		const account = await drizzle(env.DB)
 			.select({ encryptedRefreshToken: gmailAccounts.encryptedRefreshToken })
@@ -85,6 +87,7 @@ export class GmailApi {
 					account.encryptedRefreshToken,
 					env.CHANNEL_TOKEN_ENCRYPTION_KEY,
 				),
+				account.encryptedRefreshToken,
 			);
 		} catch {
 			throw new GmailApiError(
@@ -205,6 +208,41 @@ export class GmailApi {
 		};
 	}
 
+	/** A send transport failure is ambiguous, unlike ordinary sync GET/POST work. */
+	async sendMessage(
+		raw: string,
+		threadId: string,
+	): Promise<{ id: string; threadId: string }> {
+		const accessToken = await this.refreshAccessToken();
+		let response: Response;
+		try {
+			response = await fetch(`${GMAIL_API_BASE}/messages/send`, {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${accessToken}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({ raw: base64Url(raw), threadId }),
+				signal: AbortSignal.timeout(15_000),
+			});
+		} catch {
+			throw new GmailApiError("Gmail send outcome is uncertain", "uncertain");
+		}
+		if (!response.ok) {
+			if (response.status === 401 || response.status === 403)
+				await this.markReconnectRequired();
+			throw this.requestError(response.status);
+		}
+		try {
+			const value = (await response.json()) as Record<string, unknown>;
+			if (typeof value.id !== "string" || typeof value.threadId !== "string")
+				throw new Error("invalid response");
+			return { id: value.id, threadId: value.threadId };
+		} catch {
+			throw new GmailApiError("Gmail send outcome is uncertain", "uncertain");
+		}
+	}
+
 	private async post(
 		path: string,
 		body: Record<string, unknown>,
@@ -321,10 +359,17 @@ export class GmailApi {
 	}
 
 	private async markReconnectRequired(): Promise<void> {
+		const guard = this.claimToken
+			? "sync_claim_token=?"
+			: "encrypted_refresh_token=?";
 		await this.env.DB.prepare(
-			"UPDATE gmail_accounts SET sync_state='reconnect_required', last_error='Gmail authorization must be reconnected', updated_at=? WHERE channel_id=? AND sync_claim_token=?",
+			`UPDATE gmail_accounts SET sync_state='reconnect_required', last_error='Gmail authorization must be reconnected', updated_at=? WHERE channel_id=? AND ${guard}`,
 		)
-			.bind(new Date().toISOString(), this.channelId, this.claimToken)
+			.bind(
+				new Date().toISOString(),
+				this.channelId,
+				this.claimToken ?? this.encryptedRefreshToken,
+			)
 			.run();
 	}
 
@@ -341,6 +386,17 @@ export class GmailApi {
 			);
 		return new GmailApiError("Gmail rejected the request", "definitive");
 	}
+}
+
+function base64Url(value: string): string {
+	const bytes = new TextEncoder().encode(value);
+	let binary = "";
+	for (let offset = 0; offset < bytes.length; offset += 0x8000)
+		binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+	return btoa(binary)
+		.replaceAll("+", "-")
+		.replaceAll("/", "_")
+		.replace(/=+$/, "");
 }
 
 function isGmailMessage(value: unknown): value is GmailMessage {
