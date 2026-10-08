@@ -16,6 +16,29 @@ test("call ingress claims a signed-normalized connect event before contact/activ
 		ctx.env.DB.prepare("INSERT INTO inbox_channels (id,inbox_id,channel_id,is_default) VALUES (?,?,?,1)").bind("link", "inbox", "page"),
 	]);
 	const starts: unknown[] = [];
+	const order: string[] = [];
+	const workspaceNotifications: string[] = [];
+	ctx.env.CONVERSATION_DO = {
+		idFromName: (name: string) => name,
+		get: () => ({
+			fetch: async () => {
+				order.push("activity");
+				return new Response("ok");
+			},
+		}),
+	} as unknown as typeof ctx.env.CONVERSATION_DO;
+	ctx.env.WORKSPACE_EVENTS_DO = {
+		idFromName: (name: string) => name,
+		get: () => ({
+			fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+				order.push("workspace");
+				workspaceNotifications.push(
+					new Headers(init?.headers).get("x-workspace-id") ?? "",
+				);
+				return new Response("ok");
+			},
+		}),
+	} as unknown as typeof ctx.env.WORKSPACE_EVENTS_DO;
 	ctx.env.CALL_SESSION_DO = { idFromName: (name: string) => name, get: () => ({ fetch: async (request: Request) => { starts.push(await request.json()); return new Response("ok"); } }) } as unknown as typeof ctx.env.CALL_SESSION_DO;
 	const call = { id: "fb-call:page-id:call-1:connect:1:entry-0:call-0", pageId: "page-id", providerCallId: "call-1", event: "connect" as const, endpointPsid: "psid-1", direction: "user_initiated" as const, timestamp: now };
 	await routeInboundFacebookCall(ctx.env, "app", call);
@@ -23,7 +46,8 @@ test("call ingress claims a signed-normalized connect event before contact/activ
 	expect(await ctx.env.DB.prepare("SELECT count(*) AS count FROM call_events").first()).toEqual({ count: 1 });
 	expect(await ctx.env.DB.prepare("SELECT count(*) AS count FROM conversations").first()).toEqual({ count: 1 });
 	expect(await ctx.env.DB.prepare("SELECT count(*) AS count FROM messages_summary").first()).toEqual({ count: 0 });
-	expect(ctx.activityRequests).toHaveLength(2); // received + no-agent, with no enabled queue
+	expect(workspaceNotifications).toEqual([workspaceId]);
+	expect(order).toEqual(["workspace", "activity", "activity"]);
 	expect(starts).toHaveLength(0);
 });
 

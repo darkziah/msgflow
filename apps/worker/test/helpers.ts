@@ -50,6 +50,7 @@ export async function createTestDb(
 					CONVERSATION_DO: { className: "ConversationDO", useSQLite: true },
 					CALL_DISPATCH_DO: { className: "CallDispatchDO", useSQLite: true },
 					CALL_SESSION_DO: { className: "CallSessionDO", useSQLite: true },
+					WORKSPACE_EVENTS_DO: { className: "WorkspaceEventsDO", useSQLite: true },
 				}
 				: undefined,
 			d1Databases: {
@@ -87,6 +88,7 @@ export async function createTestDb(
 			CONVERSATION_DO: conversationDo,
 			CALL_DISPATCH_DO: conversationDo as unknown as Env["CALL_DISPATCH_DO"],
 			CALL_SESSION_DO: conversationDo as unknown as Env["CALL_SESSION_DO"],
+			WORKSPACE_EVENTS_DO: conversationDo as unknown as Env["WORKSPACE_EVENTS_DO"],
 			ATTACHMENTS: attachments as unknown as Env["ATTACHMENTS"],
 			EMAIL_ARCHIVE: emailArchive as unknown as Env["EMAIL_ARCHIVE"],
 			ATTACHMENT_PUBLIC_BASE_URL: "https://attachments.test",

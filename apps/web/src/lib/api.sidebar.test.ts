@@ -57,4 +57,16 @@ describe("sidebar tree API", () => {
 		});
 		expect(fetch.mock.calls[0]?.[0]).toContain("channel=whatsapp");
 	});
+
+	test("serializes cursor and limit and returns the cursor page unchanged", async () => {
+		const page = { conversations: [], nextCursor: "next-cursor" };
+		const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(page), { status: 200 }));
+		vi.stubGlobal("fetch", fetch);
+		expect(
+			await api.listConversations({ workspaceId: "workspace", cursor: "prior-cursor", limit: 25 }),
+		).toEqual(page);
+		expect(fetch.mock.calls[0]?.[0]).toBe(
+			"/api/conversations?workspaceId=workspace&cursor=prior-cursor&limit=25",
+		);
+	});
 });

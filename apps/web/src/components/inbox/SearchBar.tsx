@@ -24,7 +24,7 @@ import { api } from "@/lib/api";
 export interface SearchFilters {
 	q?: string;
 	assigneeId?: string;
-	channel?: "facebook" | "email" | "whatsapp";
+	channel?: "facebook" | "email" | "gmail" | "whatsapp";
 	tagId?: string;
 	dateFrom?: string;
 	dateTo?: string;
@@ -114,16 +114,24 @@ export function SearchBar({
 					<Button type="button" variant="outline" size="sm">
 						<Filter aria-hidden="true" data-icon="inline-start" />
 						Filters
-						{activeCount > 0 ? <Badge variant="secondary">{activeCount}</Badge> : null}
+						{activeCount > 0 ? (
+							<Badge variant="secondary">{activeCount}</Badge>
+						) : null}
 					</Button>
 				</PopoverTrigger>
-				<PopoverContent aria-label="Advanced filters" align="end" className="w-80">
+				<PopoverContent
+					aria-label="Advanced filters"
+					align="end"
+					className="w-80"
+				>
 					<FieldGroup className="gap-4">
 						<Field>
 							<FieldLabel htmlFor="assignee-filter">Assignee</FieldLabel>
 							<Select
 								value={filters.assigneeId ?? "all"}
-								onValueChange={(value) => set("assigneeId", value === "all" ? undefined : value)}
+								onValueChange={(value) =>
+									set("assigneeId", value === "all" ? undefined : value)
+								}
 							>
 								<SelectTrigger id="assignee-filter" className="w-full">
 									<SelectValue placeholder="Any assignee" />
@@ -149,7 +157,7 @@ export function SearchBar({
 										"channel",
 										value === "all"
 											? undefined
-											: (value as "facebook" | "email" | "whatsapp"),
+											: (value as "facebook" | "email" | "gmail" | "whatsapp"),
 									)
 								}
 							>
@@ -161,6 +169,7 @@ export function SearchBar({
 										<SelectItem value="all">Any channel</SelectItem>
 										<SelectItem value="facebook">Facebook</SelectItem>
 										<SelectItem value="email">Email</SelectItem>
+										<SelectItem value="gmail">Gmail</SelectItem>
 										<SelectItem value="whatsapp">WhatsApp</SelectItem>
 									</SelectGroup>
 								</SelectContent>
@@ -170,7 +179,9 @@ export function SearchBar({
 							<FieldLabel htmlFor="tag-filter">Tag</FieldLabel>
 							<Select
 								value={filters.tagId ?? "all"}
-								onValueChange={(value) => set("tagId", value === "all" ? undefined : value)}
+								onValueChange={(value) =>
+									set("tagId", value === "all" ? undefined : value)
+								}
 							>
 								<SelectTrigger id="tag-filter" className="w-full">
 									<SelectValue placeholder="Any tag" />
@@ -194,13 +205,17 @@ export function SearchBar({
 									id="date-from-filter"
 									type="date"
 									value={filters.dateFrom ?? ""}
-									onChange={(event) => set("dateFrom", event.target.value || undefined)}
+									onChange={(event) =>
+										set("dateFrom", event.target.value || undefined)
+									}
 									aria-label="From date"
 								/>
 								<Input
 									type="date"
 									value={filters.dateTo ?? ""}
-									onChange={(event) => set("dateTo", event.target.value || undefined)}
+									onChange={(event) =>
+										set("dateTo", event.target.value || undefined)
+									}
 									aria-label="To date"
 								/>
 							</div>

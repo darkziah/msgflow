@@ -1,12 +1,13 @@
 import type { WorkspaceSummary } from "@msgflow/contracts";
 import {
 	type QueryClient,
+	useInfiniteQuery,
 	useMutation,
 	useQuery,
 	useQueryClient,
 } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
 	ConversationList,
 	ConversationListSkeleton,
@@ -23,10 +24,12 @@ import { AppShell } from "@/components/layout/AppShell";
 import { AppTopBar } from "@/components/layout/AppTopBar";
 import { type ListFilters, Sidebar } from "@/components/sidebar/Sidebar";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api } from "@/lib/api";
+import { api, workspaceSocketUrl } from "@/lib/api";
 import { useSession } from "@/lib/auth-client";
+import { invalidateWorkspaceConversationViews } from "@/lib/sidebar-live-update";
 
 export const Route = createFileRoute("/")({
 	validateSearch: (
@@ -93,6 +96,29 @@ export function clearWorkspaceSensitiveQueries(queryClient: QueryClient): void {
 	});
 }
 
+export function handleWorkspaceConversationSocketEvent(
+	queryClient: QueryClient,
+	workspaceId: string,
+	event: MessageEvent,
+): void {
+	if (typeof event.data !== "string") return;
+	let payload: unknown;
+	try {
+		payload = JSON.parse(event.data);
+	} catch {
+		return;
+	}
+	if (
+		typeof payload !== "object" ||
+		payload === null ||
+		Object.keys(payload).length !== 1 ||
+		(payload as { type?: unknown }).type !== "workspace:conversations-changed"
+	) {
+		return;
+	}
+	invalidateWorkspaceConversationViews(queryClient, workspaceId);
+}
+
 export function resolveAuthorizedWorkspaceId(
 	requestedWorkspaceId: string | undefined,
 	workspaces: WorkspaceSummary[],
@@ -108,6 +134,78 @@ export function resolveAuthorizedWorkspaceId(
 
 export function workspaceSearch(workspace: string): { workspace: string } {
 	return { workspace };
+}
+
+const WORKSPACE_SOCKET_RECONNECT_BASE_MS = 250;
+const WORKSPACE_SOCKET_RECONNECT_MAX_MS = 10_000;
+
+interface WorkspaceSocket {
+	onopen: ((event: Event) => void) | null;
+	onclose: ((event: CloseEvent) => void) | null;
+	onerror: ((event: Event) => void) | null;
+	onmessage: ((event: MessageEvent) => void) | null;
+	close(): void;
+}
+
+/** One bounded reconnect loop; its owner must stop it when workspace changes. */
+export function createWorkspaceSocketReconnector(
+	workspaceId: string,
+	onMessage: (event: MessageEvent) => void,
+	createSocket: (url: string) => WorkspaceSocket = (url) => new WebSocket(url),
+): { start: () => void; stop: () => void } {
+	let socket: WorkspaceSocket | undefined;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let stopped = false;
+	let retry = 0;
+
+	const scheduleReconnect = () => {
+		if (stopped || timer) return;
+		const delay = Math.min(
+			WORKSPACE_SOCKET_RECONNECT_BASE_MS * 2 ** retry,
+			WORKSPACE_SOCKET_RECONNECT_MAX_MS,
+		);
+		retry += 1;
+		timer = setTimeout(() => {
+			timer = undefined;
+			connect();
+		}, delay);
+	};
+
+	const connect = () => {
+		if (stopped || socket) return;
+		const next = createSocket(workspaceSocketUrl(workspaceId));
+		socket = next;
+		next.onopen = () => {
+			if (socket === next) retry = 0;
+		};
+		next.onmessage = onMessage;
+		next.onclose = () => {
+			if (socket !== next) return;
+			socket = undefined;
+			scheduleReconnect();
+		};
+		next.onerror = () => {
+			if (socket !== next) return;
+			// Browsers normally follow an error with close, but do not rely on it:
+			// retire this socket first so the scheduled connect cannot be blocked by
+			// an orphan. Its later close sees a stale socket and cannot retry twice.
+			socket = undefined;
+			next.close();
+			scheduleReconnect();
+		};
+	};
+
+	return {
+		start: connect,
+		stop: () => {
+			stopped = true;
+			if (timer) clearTimeout(timer);
+			timer = undefined;
+			const current = socket;
+			socket = undefined;
+			current?.close();
+		},
+	};
 }
 
 export function reconcileWorkspaceSelection({
@@ -241,9 +339,19 @@ function InboxContent() {
 		});
 	}
 
-	const { data, isPending } = useQuery({
+	const {
+		data,
+		isPending,
+		isError,
+		hasNextPage,
+		isFetchingNextPage,
+		isFetchNextPageError,
+		fetchNextPage,
+		refetch,
+	} = useInfiniteQuery({
 		queryKey: ["conversations", activeWorkspaceId, status, filters],
-		queryFn: () =>
+		initialPageParam: undefined as string | undefined,
+		queryFn: ({ pageParam }) =>
 			api.listConversations({
 				workspaceId: activeWorkspaceId,
 				mailboxId: filters.mailboxId,
@@ -260,12 +368,29 @@ function InboxContent() {
 				savedViewId: filters.savedViewId,
 				dateFrom: filters.dateFrom,
 				dateTo: filters.dateTo,
+				cursor: pageParam,
+				limit: 50,
 			}),
+		getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
 		enabled: Boolean(activeWorkspaceId),
-		refetchInterval: 5000,
 	});
 
-	const conversations = data?.conversations ?? [];
+	useEffect(() => {
+		if (!activeWorkspaceId) return;
+		const reconnect = createWorkspaceSocketReconnector(
+			activeWorkspaceId,
+			(event) =>
+				handleWorkspaceConversationSocketEvent(
+					queryClient,
+					activeWorkspaceId,
+					event,
+				),
+		);
+		reconnect.start();
+		return reconnect.stop;
+	}, [activeWorkspaceId, queryClient]);
+
+	const conversations = data?.pages.flatMap((page) => page.conversations) ?? [];
 
 	useKeyboardShortcut("focus-search", () => {
 		const input = searchInputRef.current;
@@ -336,7 +461,7 @@ function InboxContent() {
 						aria-live="polite"
 					>
 						<span>{queueLabel}</span>
-						<Badge variant="secondary">{data?.conversations.length ?? 0}</Badge>
+						<Badge variant="secondary">{conversations.length}</Badge>
 					</div>
 				</div>
 				<Button size="sm" onClick={() => setNewEmailOpen(true)}>
@@ -353,12 +478,28 @@ function InboxContent() {
 					)
 				}
 			/>
-			<div className="min-h-0 flex-1 overflow-y-auto">
+			<div className="min-h-0 flex-1">
 				{isPending ? (
 					<ConversationListSkeleton />
+				) : isError && conversations.length === 0 ? (
+					<Alert className="m-3 w-auto" variant="destructive">
+						<AlertTitle>Conversations could not be loaded</AlertTitle>
+						<AlertDescription className="flex items-center justify-between gap-3">
+							<span>Check your connection and try again.</span>
+							<Button size="sm" variant="outline" onClick={() => void refetch()}>
+								Retry
+							</Button>
+						</AlertDescription>
+					</Alert>
 				) : (
 					<ConversationList
-						conversations={data?.conversations ?? []}
+						conversations={conversations}
+						hasNextPage={hasNextPage}
+						isFetchingNextPage={isFetchingNextPage}
+						isLoadMoreError={isFetchNextPageError}
+						onLoadMore={() => {
+							void fetchNextPage();
+						}}
 						selectedId={conversationId}
 						onSelect={(id) =>
 							navigate({
@@ -431,9 +572,7 @@ function InboxContent() {
 				open={newEmailOpen}
 				onOpenChange={setNewEmailOpen}
 				onSent={(id) => {
-					queryClient.invalidateQueries({
-						queryKey: ["conversations", activeWorkspaceId],
-					});
+					invalidateWorkspaceConversationViews(queryClient, activeWorkspaceId);
 					navigate({
 						to: "/",
 						search: { workspace: activeWorkspaceId, c: id },

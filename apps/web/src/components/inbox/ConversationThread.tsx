@@ -4,10 +4,17 @@ import type {
 	ConversationEvent,
 	Message,
 	PresenceEntry,
+	TimelineItem,
 } from "@msgflow/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronUp } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -64,15 +71,41 @@ export function ConversationThread({
 	const [expandedEmailIds, setExpandedEmailIds] = useState<Set<string>>(
 		() => new Set(),
 	);
+	const timelineScrollerRef = useRef<HTMLDivElement | null>(null);
+	const prependAnchorRef = useRef<{ scrollTop: number; scrollHeight: number } | null>(
+		null,
+	);
+	const shouldAutoScrollRef = useRef(false);
+	const didInitialScrollRef = useRef(false);
+	const maxMarkedReadSeqRef = useRef(0);
+	const isNearTimelineBottom = useCallback(() => {
+		const scroller = timelineScrollerRef.current;
+		return !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 48;
+	}, []);
 
 	const { data: conversation, isPending: conversationPending } = useQuery({
 		queryKey: ["conversation", workspaceId, conversationId],
 		queryFn: () => api.getConversation(conversationId, workspaceId),
 	});
 
-	const { data: timeline, isPending: messagesPending } = useQuery({
+	const {
+		data: timeline,
+		isPending: messagesPending,
+		isError: messagesError,
+		fetchNextPage,
+		hasNextPage,
+		isFetchingNextPage,
+		isFetchNextPageError,
+		refetch: refetchTimeline,
+	} = useInfiniteQuery({
 		queryKey: ["messages", workspaceId, conversationId],
-		queryFn: () => api.getMessages(conversationId, workspaceId),
+		initialPageParam: undefined as string | undefined,
+		queryFn: ({ pageParam }) =>
+			api.getMessages(conversationId, workspaceId, {
+				cursor: pageParam,
+				limit: 50,
+			}),
+		getNextPageParam: (page) => page.nextCursor ?? undefined,
 	});
 	const emailContext = useQuery({
 		queryKey: ["email-context", workspaceId, conversationId],
@@ -148,10 +181,20 @@ export function ConversationThread({
 	// Real-time: WebSocket to the Conversation DO (authenticated via session cookie).
 	useEffect(() => {
 		const ws = new WebSocket(conversationSocketUrl(conversationId, workspaceId));
+		// A successful socket subscription is also the hand-off from the initial
+		// HTTP page to live state. Refetch the exact timeline so events appended
+		// between the initial request and the subscription are not missed.
+		ws.onopen = () => {
+			queryClient.resetQueries({
+				queryKey: ["messages", workspaceId, conversationId],
+				exact: true,
+			});
+		};
 		ws.onmessage = (event) => {
 			const parsed = JSON.parse(event.data) as ConversationEvent;
 			switch (parsed.type) {
 				case "message:new":
+					shouldAutoScrollRef.current ||= isNearTimelineBottom();
 					setLiveMessages((prev) =>
 						prev.some((message) => message.id === parsed.message.id)
 							? prev
@@ -159,6 +202,7 @@ export function ConversationThread({
 					);
 					break;
 				case "comment:new":
+					shouldAutoScrollRef.current ||= isNearTimelineBottom();
 					setLiveComments((prev) =>
 						prev.some((comment) => comment.id === parsed.comment.id)
 							? prev
@@ -166,6 +210,7 @@ export function ConversationThread({
 					);
 					break;
 				case "activity:new":
+					shouldAutoScrollRef.current ||= isNearTimelineBottom();
 					setLiveActivities((prev) =>
 						prev.some((activity) => activity.id === parsed.activity.id)
 							? prev
@@ -186,37 +231,44 @@ export function ConversationThread({
 			}
 		};
 		return () => ws.close();
-	}, [conversationId, queryClient, workspaceId]);
+	}, [conversationId, isNearTimelineBottom, queryClient, workspaceId]);
 
 	const timelineItems = useMemo(() => {
-		const messages = [...(timeline?.messages ?? [])];
-		for (const message of liveMessages) {
-			if (!messages.some((item) => item.id === message.id))
-				messages.push(message);
+		const items = new Map<string, TimelineItem>();
+		for (const page of timeline?.pages ?? []) {
+			for (const item of page.items) items.set(`${item.type}:${item.item.id}`, item);
 		}
-		const comments = [...(timeline?.comments ?? [])];
-		for (const comment of liveComments) {
-			if (!comments.some((item) => item.id === comment.id))
-				comments.push(comment);
-		}
-		return [...messages, ...comments].sort(
+		for (const message of liveMessages)
+			items.set(`message:${message.id}`, { type: "message", item: message });
+		for (const comment of liveComments)
+			items.set(`comment:${comment.id}`, { type: "comment", item: comment });
+		for (const activity of liveActivities)
+			items.set(`activity:${activity.id}`, { type: "activity", item: activity });
+		return [...items.values()].sort(
 			(a, b) =>
-				a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+				a.item.createdAt.localeCompare(b.item.createdAt) ||
+				a.item.id.localeCompare(b.item.id),
 		);
-	}, [timeline, liveMessages, liveComments]);
-	const activities = useMemo(() => {
-		const items = [...(timeline?.activities ?? [])];
-		for (const activity of liveActivities) {
-			if (!items.some((item) => item.id === activity.id)) items.push(activity);
-		}
-		return items
-			.sort(
-				(a, b) =>
-					b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id),
-			)
-			.slice(0, ACTIVITY_DISPLAY_LIMIT)
-			.reverse();
-	}, [timeline, liveActivities]);
+	}, [timeline, liveMessages, liveComments, liveActivities]);
+	const messageAndCommentItems = useMemo(
+		() => timelineItems.filter((item) => item.type !== "activity"),
+		[timelineItems],
+	);
+	const activities = useMemo(
+		() =>
+			timelineItems
+				.filter((item): item is Extract<TimelineItem, { type: "activity" }> =>
+					item.type === "activity",
+				)
+				.map((item) => item.item)
+				.sort(
+					(a, b) =>
+						b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id),
+				)
+				.slice(0, ACTIVITY_DISPLAY_LIMIT)
+				.reverse(),
+		[timelineItems],
+	);
 	const agentNames = useMemo(
 		() => new Map((usersData?.users ?? []).map((user) => [user.id, user.name])),
 		[usersData],
@@ -225,31 +277,74 @@ export function ConversationThread({
 		() =>
 			[...timelineItems]
 				.reverse()
-				.find((item): item is Message => "kind" in item)?.id,
+				.find((item): item is Extract<TimelineItem, { type: "message" }> =>
+					item.type === "message",
+				)?.item.id,
 		[timelineItems],
 	);
 
-	// Advance the read cursor to the latest message seq (ADR 0015); comments do
-	// not participate in unread counts.
+	// Advance monotonically to the maximum fetched or live message seq; comments
+	// and older pages must never move the server cursor backwards.
 	useEffect(() => {
-		const lastMessage = [...timelineItems]
-			.reverse()
-			.find((item): item is Message => "kind" in item);
-		if (!lastMessage || typeof lastMessage.seq !== "number") return;
+		const maxSeq = Math.max(
+			0,
+			...timelineItems
+				.filter((item): item is Extract<TimelineItem, { type: "message" }> =>
+					item.type === "message",
+				)
+				.map((item) => item.item.seq ?? 0),
+		);
+		if (maxSeq <= maxMarkedReadSeqRef.current) return;
+		maxMarkedReadSeqRef.current = maxSeq;
 		api
-			.markRead(conversationId, workspaceId, lastMessage.seq)
+			.markRead(conversationId, workspaceId, maxSeq)
 			.then(() =>
 				invalidateWorkspaceConversationViews(queryClient, workspaceId),
 			)
 			.catch(() => {});
 	}, [conversationId, timelineItems, queryClient, workspaceId]);
 
-	// Keep the newest timeline item in view whenever the timeline grows.
-	const bottomRef = useRef<HTMLDivElement | null>(null);
+
 	useEffect(() => {
-		if (timelineItems.length === 0) return;
-		bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+		const scroller = timelineScrollerRef.current;
+		if (!scroller || timelineItems.length === 0) return;
+		if (!didInitialScrollRef.current) {
+			didInitialScrollRef.current = true;
+			scroller.scrollTop = scroller.scrollHeight;
+			return;
+		}
+		if (shouldAutoScrollRef.current) {
+			shouldAutoScrollRef.current = false;
+			scroller.scrollTop = scroller.scrollHeight;
+		}
 	}, [timelineItems]);
+
+	const loadOlderHistory = useCallback(() => {
+		const scroller = timelineScrollerRef.current;
+		if (!hasNextPage || isFetchingNextPage) return;
+		if (scroller) {
+			prependAnchorRef.current = {
+				scrollTop: scroller.scrollTop,
+				scrollHeight: scroller.scrollHeight,
+			};
+		}
+		void fetchNextPage().then(() => {
+			requestAnimationFrame(() => {
+				const anchor = prependAnchorRef.current;
+				const updatedScroller = timelineScrollerRef.current;
+				if (!anchor || !updatedScroller) return;
+				updatedScroller.scrollTop =
+					anchor.scrollTop + (updatedScroller.scrollHeight - anchor.scrollHeight);
+				prependAnchorRef.current = null;
+			});
+		});
+	}, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+
+	const handleTimelineScroll = useCallback(() => {
+		const scroller = timelineScrollerRef.current;
+		if (!scroller || scroller.scrollTop > 24) return;
+		loadOlderHistory();
+	}, [loadOlderHistory]);
 
 	if (conversationPending) {
 		return (
@@ -337,8 +432,39 @@ export function ConversationThread({
 				</div>
 			</header>
 
-			<div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
-				{messagesPending && timelineItems.length === 0 ? (
+			<section
+				ref={timelineScrollerRef}
+				onScroll={handleTimelineScroll}
+				aria-label="Conversation timeline"
+				className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4"
+			>
+				{hasNextPage ? (
+					<Button
+						type="button"
+						variant="outline"
+						className="shrink-0 self-center"
+						disabled={isFetchingNextPage}
+						onClick={loadOlderHistory}
+					>
+						{isFetchingNextPage
+							? "Loading older history…"
+							: isFetchNextPageError
+								? "Retry loading older history"
+								: "Load older history"}
+					</Button>
+				) : null}
+				{messagesError && messageAndCommentItems.length === 0 ? (
+					<Alert variant="destructive">
+						<AlertTitle>Messages could not be loaded</AlertTitle>
+						<AlertDescription className="flex items-center justify-between gap-3">
+							<span>Check your connection and try again.</span>
+							<Button size="sm" variant="outline" onClick={() => void refetchTimeline()}>
+								Retry
+							</Button>
+						</AlertDescription>
+					</Alert>
+				) : null}
+				{messagesPending && messageAndCommentItems.length === 0 ? (
 					<div
 						className="flex flex-col gap-3"
 						role="status"
@@ -347,7 +473,7 @@ export function ConversationThread({
 						<Skeleton className="h-20 w-3/4" />
 						<Skeleton className="h-16 w-2/3 self-end" />
 					</div>
-				) : timelineItems.length === 0 ? (
+				) : !messagesError && messageAndCommentItems.length === 0 ? (
 					<Alert>
 						<AlertTitle>No messages yet</AlertTitle>
 						<AlertDescription>
@@ -355,29 +481,29 @@ export function ConversationThread({
 						</AlertDescription>
 					</Alert>
 				) : (
-					timelineItems.map((item) =>
-						"kind" in item ? (
+					messageAndCommentItems.map((item) =>
+						item.type === "message" ? (
 							<MessageBubble
-								key={item.id}
-								message={item}
+								key={item.item.id}
+								message={item.item}
 								isEmail={conversation.channel === "email"}
 								workspaceId={workspaceId}
 								collapsed={
 									conversation.channel === "email" &&
-									item.id !== newestEmailId &&
-									!expandedEmailIds.has(item.id)
+									item.item.id !== newestEmailId &&
+									!expandedEmailIds.has(item.item.id)
 								}
 								onCollapsedChange={() =>
 									setExpandedEmailIds((current) => {
 										const next = new Set(current);
-										if (next.has(item.id)) next.delete(item.id);
-										else next.add(item.id);
+										if (next.has(item.item.id)) next.delete(item.item.id);
+										else next.add(item.item.id);
 										return next;
 									})
 								}
 							/>
 						) : (
-							<CommentBubble key={item.id} comment={item} />
+							<CommentBubble key={item.item.id} comment={item.item} />
 						),
 					)
 				)}
@@ -422,8 +548,7 @@ export function ConversationThread({
 						</ul>
 					</section>
 				) : null}
-				<div ref={bottomRef} />
-			</div>
+			</section>
 
 			<div className="border-t px-4 py-3">
 				<ReplyComposer
@@ -431,18 +556,20 @@ export function ConversationThread({
 					workspaceId={workspaceId}
 					showSubject={conversation.channel === "email"}
 					attachmentUnavailable={conversation.channel === "whatsapp"}
-					onSent={() =>
-						queryClient.invalidateQueries({
+					onSent={() => {
+						shouldAutoScrollRef.current ||= isNearTimelineBottom();
+						queryClient.resetQueries({
 							queryKey: ["messages", workspaceId, conversationId],
-						})
-					}
-					onCommentCreated={(comment) =>
+						});
+					}}
+					onCommentCreated={(comment) => {
+						shouldAutoScrollRef.current ||= isNearTimelineBottom();
 						setLiveComments((prev) =>
 							prev.some((item) => item.id === comment.id)
 								? prev
 								: [...prev, comment],
-						)
-					}
+						);
+					}}
 					onShortcutRequestChange={onComposerShortcutRequestChange}
 				/>
 			</div>

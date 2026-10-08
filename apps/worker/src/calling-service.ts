@@ -3,6 +3,7 @@ import type { Env } from "./env";
 import { appendActivity } from "./activity";
 import { rejectMessengerInboundCall } from "./facebook-calling-provider";
 import { callDispatchInternalHeaders } from "./call-dispatch-client";
+import { notifyWorkspaceConversationChange } from "./workspace-events";
 
 /** Route a signed, normalized inbound Page call without treating it as a message. */
 export async function routeInboundFacebookCall(env: Env, metaAppId: string, call: NormalizedFacebookCallingWebhook): Promise<void> {
@@ -22,6 +23,11 @@ export async function routeInboundFacebookCall(env: Env, metaAppId: string, call
 	const conversationId = existingConversation?.id ?? crypto.randomUUID();
 	if (!existingConversation) {
 		await env.DB.prepare("INSERT INTO conversations (id,workspace_id,channel_id,inbox_id,contact_id,do_binding_id,status,message_count,created_at,updated_at) VALUES (?,?,?,?,?,?, 'open',0,?,?)").bind(conversationId, channel.workspaceId, channel.id, inbox.id, contact.id, conversationId, now, now).run();
+		// This INSERT has no conflict clause, so reaching here means the new
+		// conversation persisted successfully.
+		// The call may take a no-agent path next; expose its persisted conversation
+		// before that provider outcome is attempted.
+		await notifyWorkspaceConversationChange(env, channel.workspaceId);
 	}
 	const queue = await env.DB.prepare("SELECT id FROM call_queues WHERE channel_id=? AND workspace_id=? AND is_enabled=1").bind(channel.id, channel.workspaceId).first<{ id: string }>();
 	await env.DB.prepare("UPDATE call_events SET conversation_id=?, queue_id=?, updated_at=? WHERE channel_id=? AND provider_call_id=? AND provider_event_id=?").bind(conversationId, queue?.id ?? null, now, channel.id, call.providerCallId, call.id).run();

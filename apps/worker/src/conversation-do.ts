@@ -5,6 +5,8 @@ import type {
 	ConversationEvent,
 	Message,
 	PresenceEntry,
+	TimelineItem,
+	TimelinePageResponse,
 } from "@msgflow/contracts";
 import {
 	CallActivityDetailsSchema,
@@ -26,6 +28,7 @@ import { isCallActivity, isCallActivityAction } from "./activity";
 import { canReadConversation } from "./conversation-permissions";
 import type { Env } from "./env";
 import { decodeJsonBody } from "./validation";
+import { notifyWorkspaceConversationChange } from "./workspace-events";
 
 interface WebSocketAttachment {
 	agentId: string;
@@ -59,6 +62,7 @@ export class ConversationDO extends DurableObject<Env> {
       );
       CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider_message_id);
       CREATE INDEX IF NOT EXISTS idx_messages_seq ON messages(seq);
+      CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at, id);
       CREATE TABLE IF NOT EXISTS comments (
         id TEXT PRIMARY KEY,
         author_id TEXT NOT NULL,
@@ -66,6 +70,7 @@ export class ConversationDO extends DurableObject<Env> {
         mentions TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS idx_comments_created_at ON comments(created_at, id);
       CREATE TABLE IF NOT EXISTS activities (
         id TEXT PRIMARY KEY,
         action TEXT NOT NULL,
@@ -133,6 +138,9 @@ export class ConversationDO extends DurableObject<Env> {
 				: 50;
 			return this.listActivities(limit);
 		}
+		if (request.method === "GET" && url.pathname === "/timeline") {
+			return this.listTimeline(url);
+		}
 		if (request.method === "POST" && url.pathname === "/broadcast") {
 			return this.broadcastEvent(request);
 		}
@@ -189,8 +197,9 @@ export class ConversationDO extends DurableObject<Env> {
 					...this.rowToMessage(existing),
 					conversationId: message.conversationId,
 				};
+				// A replay repairs an interrupted D1 projection, but must not reset
+				// every workspace list or rebroadcast a duplicate message frame.
 				await this.syncProjection(stored);
-				await this.broadcast({ type: "message:new", message: stored });
 				return new Response("duplicate", { status: 200 });
 			}
 		}
@@ -215,6 +224,7 @@ export class ConversationDO extends DurableObject<Env> {
 		);
 
 		await this.syncProjection(message);
+		void this.notifyWorkspaceConversationChange(message.conversationId);
 		await this.broadcast({ type: "message:new", message });
 		return new Response("ok", { status: 200 });
 	}
@@ -252,6 +262,18 @@ export class ConversationDO extends DurableObject<Env> {
 					),
 				),
 		]);
+	}
+
+	private async notifyWorkspaceConversationChange(
+		conversationId: string,
+	): Promise<void> {
+		const conversation = await drizzle(this.env.DB)
+			.select({ workspaceId: conversations.workspaceId })
+			.from(conversations)
+			.where(eq(conversations.id, conversationId))
+			.get();
+		if (!conversation) return;
+		await notifyWorkspaceConversationChange(this.env, conversation.workspaceId);
 	}
 
 	private async appendComment(request: Request): Promise<Response> {
@@ -324,6 +346,62 @@ export class ConversationDO extends DurableObject<Env> {
 			JSON.stringify({ activities: rows.map((r) => this.rowToActivity(r)) }),
 			{ headers: { "content-type": "application/json" } },
 		);
+	}
+
+	/** A newest-first, mixed timeline page. The cursor is exclusive. */
+	private listTimeline(url: URL): Response {
+		let limit: number;
+		let cursor: TimelineCursor | undefined;
+		try {
+			limit = parseTimelineLimit(url.searchParams);
+			cursor = parseTimelineCursor(url.searchParams);
+		} catch (error) {
+			return new Response(
+				error instanceof Error ? error.message : "invalid timeline parameters",
+				{ status: 400 },
+			);
+		}
+
+		const rows = this.sql
+			.exec(
+				`SELECT * FROM (
+					SELECT 'message' AS timeline_type, id, created_at, seq, provider_message_id, kind, channel, sender_id, text, payload, attachments, NULL AS author_id, NULL AS mentions, NULL AS action, NULL AS actor_id, NULL AS details FROM messages
+					UNION ALL
+					SELECT 'comment' AS timeline_type, id, created_at, NULL AS seq, NULL AS provider_message_id, NULL AS kind, NULL AS channel, NULL AS sender_id, text, NULL AS payload, NULL AS attachments, author_id, mentions, NULL AS action, NULL AS actor_id, NULL AS details FROM comments
+					UNION ALL
+					SELECT 'activity' AS timeline_type, id, created_at, NULL AS seq, NULL AS provider_message_id, NULL AS kind, NULL AS channel, NULL AS sender_id, NULL AS text, NULL AS payload, NULL AS attachments, NULL AS author_id, NULL AS mentions, action, actor_id, details FROM activities
+				) WHERE (? IS NULL OR created_at < ? OR (created_at = ? AND (id < ? OR (id = ? AND timeline_type < ?))))
+				ORDER BY created_at DESC, id DESC, timeline_type DESC LIMIT ?`,
+				cursor?.createdAt ?? null,
+				cursor?.createdAt ?? null,
+				cursor?.createdAt ?? null,
+				cursor?.id ?? null,
+				cursor?.id ?? null,
+				cursor?.timelineType ?? null,
+				limit + 1,
+			)
+			.toArray();
+		const hasMore = rows.length > limit;
+		const visibleRows = rows.slice(0, limit);
+		const items = visibleRows.map((row) => this.rowToTimelineItem(row));
+		const last = visibleRows.at(-1);
+		return Response.json({
+			items,
+			nextCursor: hasMore && last ? encodeTimelineCursor(last) : null,
+		} satisfies TimelinePageResponse);
+	}
+
+	private rowToTimelineItem(row: Record<string, unknown>): TimelineItem {
+		switch (row.timeline_type) {
+			case "message":
+				return { type: "message", item: this.rowToMessage(row) };
+			case "comment":
+				return { type: "comment", item: this.rowToComment(row) };
+			case "activity":
+				return { type: "activity", item: this.rowToActivity(row) };
+			default:
+				throw new Error("invalid timeline row");
+		}
 	}
 
 	/**
@@ -524,6 +602,106 @@ export class ConversationDO extends DurableObject<Env> {
 	async webSocketError(_ws: WebSocket, _error: unknown): Promise<void> {
 		// no-op for the skeleton
 	}
+}
+
+interface TimelineCursor {
+	createdAt: string;
+	id: string;
+	timelineType: "message" | "comment" | "activity";
+}
+
+function parseTimelineLimit(params: URLSearchParams): number {
+	const values = params.getAll("limit");
+	if (values.length === 0) return 50;
+	const value = values[0];
+	if (values.length !== 1 || value === undefined || !/^[1-9]\d*$/.test(value))
+		throw new Error("limit must be an integer between 1 and 100");
+	const limit = Number(value);
+	if (!Number.isSafeInteger(limit) || limit > 100)
+		throw new Error("limit must be an integer between 1 and 100");
+	return limit;
+}
+
+function parseTimelineCursor(
+	params: URLSearchParams,
+): TimelineCursor | undefined {
+	const values = params.getAll("cursor");
+	if (values.length === 0) return undefined;
+	const value = values[0];
+	if (values.length !== 1 || value === undefined)
+		throw new Error("invalid timeline cursor");
+	return decodeTimelineCursor(value);
+}
+
+function encodeTimelineCursor(row: Record<string, unknown>): string {
+	return encodeBase64Url(
+		JSON.stringify({
+			createdAt: row.created_at,
+			id: row.id,
+			timelineType: row.timeline_type,
+		}),
+	);
+}
+
+function decodeTimelineCursor(value: string): TimelineCursor {
+	try {
+		if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid base64url");
+		const parsed: unknown = JSON.parse(decodeBase64Url(value));
+		if (
+			typeof parsed !== "object" ||
+			parsed === null ||
+			Object.keys(parsed).length !== 3 ||
+			!("createdAt" in parsed) ||
+			!("id" in parsed) ||
+			!("timelineType" in parsed) ||
+			typeof parsed.createdAt !== "string" ||
+			parsed.createdAt.length === 0 ||
+			typeof parsed.id !== "string" ||
+			parsed.id.length === 0 ||
+			(parsed.timelineType !== "message" &&
+				parsed.timelineType !== "comment" &&
+				parsed.timelineType !== "activity")
+		)
+			throw new Error("invalid cursor shape");
+		if (
+			encodeBase64Url(
+				JSON.stringify({
+					createdAt: parsed.createdAt,
+					id: parsed.id,
+					timelineType: parsed.timelineType,
+				}),
+			) !== value
+		)
+			throw new Error("non-canonical cursor");
+		return {
+			createdAt: parsed.createdAt,
+			id: parsed.id,
+			timelineType: parsed.timelineType,
+		};
+	} catch {
+		throw new Error("invalid timeline cursor");
+	}
+}
+
+function encodeBase64Url(value: string): string {
+	const bytes = new TextEncoder().encode(value);
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary)
+		.replaceAll("+", "-")
+		.replaceAll("/", "_")
+		.replaceAll("=", "");
+}
+
+function decodeBase64Url(value: string): string {
+	const padded = value
+		.replaceAll("-", "+")
+		.replaceAll("_", "/")
+		.padEnd(Math.ceil(value.length / 4) * 4, "=");
+	const binary = atob(padded);
+	return new TextDecoder().decode(
+		Uint8Array.from(binary, (char) => char.charCodeAt(0)),
+	);
 }
 
 function decodeStoredJson<A, I>(

@@ -27,6 +27,7 @@ import {
 import { readPrivateEmailAttachment } from "./email-storage";
 import { canAccessMailbox } from "./email-transport";
 import type { Env } from "./env";
+import { resolveGmailOutboundContext } from "./gmail-outbound";
 import { recordProviderAccepted } from "./outbound-state";
 import { parseStoredAttachments } from "./persistence";
 
@@ -97,6 +98,12 @@ export async function sendOutbound(
 			error: "WhatsApp attachments are not supported",
 			retryable: false,
 		};
+	if (parsed.channel === "gmail" && attachments.length > 0)
+		return {
+			ok: false,
+			error: "Gmail attachments are not supported",
+			retryable: false,
+		};
 	// The From address is derived from the durable conversation/channel mapping,
 	// never supplied by the client. Email sends are gated before an intent is
 	// persisted so private/delegated and team permissions cannot be bypassed by
@@ -120,6 +127,14 @@ export async function sendOutbound(
 			await auditEmailDenial(env, params);
 			return { ok: false, error: errorMessage(error), retryable: false };
 		}
+	}
+	if (parsed.channel === "gmail") {
+		const gmail = await resolveGmailOutboundContext(
+			env,
+			params.conversationId,
+			params.senderId,
+		);
+		if (!gmail.ok) return { ok: false, error: gmail.error, retryable: false };
 	}
 
 	const db = drizzle(env.DB);
@@ -546,6 +561,9 @@ async function resolveProviderContext(
 		} catch {
 			return { ok: false, error: "channel access token cannot be decrypted" };
 		}
+	}
+	if (channel.type === "gmail") {
+		return resolveGmailOutboundContext(env, conversationId, actorId);
 	}
 	const metadata = await getEmailOutboundMetadata(env, intentId);
 	if (!metadata)

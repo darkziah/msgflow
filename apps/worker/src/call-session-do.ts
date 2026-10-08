@@ -3,6 +3,7 @@ import type { Env } from "./env";
 import { offerCallToEligibleAgents, callDispatchInternalHeaders, CALL_DISPATCH_NONCE_HEADER, CALL_DISPATCH_SIGNATURE_HEADER, CALL_DISPATCH_TIMESTAMP_HEADER } from "./call-dispatch-client";
 import { acceptMessengerInboundCall, terminateMessengerCall } from "./facebook-calling-provider";
 import { appendActivity } from "./activity";
+import { notifyWorkspaceConversationChange } from "./workspace-events";
 
 const QUEUE_BUDGET_MS = 50_000;
 const META_DEADLINE_MS = 60_000;
@@ -94,6 +95,7 @@ export class CallSessionDO extends DurableObject<Env> {
 			this.env.DB.prepare("UPDATE call_events SET state='accepted', accepted_by_user_id=?, updated_at=? WHERE channel_id=? AND provider_call_id=? AND state='ringing'").bind(body.actorId, new Date().toISOString(), state.channelId, state.callId),
 			this.env.DB.prepare("UPDATE conversations SET assignee_id=?, updated_at=? WHERE id=? AND workspace_id=?").bind(body.actorId, new Date().toISOString(), state.conversationId, state.workspaceId),
 		]);
+		await notifyWorkspaceConversationChange(this.env, state.workspaceId);
 		await appendActivity(this.env, { conversationId: state.conversationId, action: "call.accepted", actorId: body.actorId, details: {} });
 		return Response.json({ won: true, state: state.state, answerSdp });
 	}

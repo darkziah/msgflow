@@ -1,6 +1,8 @@
 import type { ConversationSummary } from "@msgflow/contracts";
 import { Inbox, Mail, MessageCircle, MessageCircleMore } from "lucide-react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
 	Empty,
 	EmptyDescription,
@@ -18,19 +20,63 @@ interface Props {
 	conversations: ConversationSummary[];
 	selectedId?: string;
 	onSelect: (id: string) => void;
+	hasNextPage?: boolean;
+	isFetchingNextPage?: boolean;
+	isLoadMoreError?: boolean;
+	onLoadMore?: () => void;
 }
 
 const channelPresentation = {
 	facebook: { Icon: MessageCircle, label: "Facebook" },
 	email: { Icon: Mail, label: "Email" },
+	gmail: { Icon: Mail, label: "Gmail" },
 	whatsapp: { Icon: MessageCircleMore, label: "WhatsApp" },
-} satisfies Record<ConversationSummary["channel"], { Icon: typeof Mail; label: string }>;
+} satisfies Record<
+	ConversationSummary["channel"],
+	{ Icon: typeof Mail; label: string }
+>;
 
 export function ConversationList({
 	conversations,
 	selectedId,
 	onSelect,
+	hasNextPage = false,
+	isFetchingNextPage = false,
+	isLoadMoreError = false,
+	onLoadMore,
 }: Props) {
+	const listRef = useRef<HTMLUListElement>(null);
+	const loadMoreInFlightRef = useRef(false);
+	const loadMore = useCallback(() => {
+		if (
+			!hasNextPage ||
+			isFetchingNextPage ||
+			!onLoadMore ||
+			loadMoreInFlightRef.current
+		) {
+			return;
+		}
+		loadMoreInFlightRef.current = true;
+		onLoadMore();
+	}, [hasNextPage, isFetchingNextPage, onLoadMore]);
+
+	useLayoutEffect(() => {
+		if (isFetchingNextPage) return;
+		loadMoreInFlightRef.current = false;
+
+		const list = listRef.current;
+		if (
+			!list ||
+			!hasNextPage ||
+			!onLoadMore ||
+			list.clientHeight === 0 ||
+			list.scrollHeight > list.clientHeight
+		) {
+			return;
+		}
+		loadMore();
+	}, [hasNextPage, isFetchingNextPage, loadMore, onLoadMore]);
+
 	if (conversations.length === 0) {
 		return (
 			<Empty className="h-full border-0">
@@ -48,7 +94,15 @@ export function ConversationList({
 	}
 
 	return (
-		<ul className="h-full divide-y overflow-y-auto" aria-label="Conversations">
+		<ul
+			ref={listRef}
+			className="h-full divide-y overflow-y-auto"
+			aria-label="Conversations"
+			onScroll={(event) => {
+				const { clientHeight, scrollHeight, scrollTop } = event.currentTarget;
+				if (scrollHeight - scrollTop - clientHeight <= 24) loadMore();
+			}}
+		>
 			{conversations.map((conversation) => {
 				const name = contactName(conversation.contact);
 				const selected = conversation.id === selectedId;
@@ -101,13 +155,39 @@ export function ConversationList({
 									</span>
 								) : null}
 							</span>
-							<span className="mt-1 shrink-0 text-muted-foreground" title={channelLabel}>
-								<ChannelIcon aria-label={channelLabel} role="img" className="size-3.5" />
+							<span
+								className="mt-1 shrink-0 text-muted-foreground"
+								title={channelLabel}
+							>
+								<ChannelIcon
+									aria-label={channelLabel}
+									role="img"
+									className="size-3.5"
+								/>
 							</span>
 						</button>
 					</li>
 				);
 			})}
+			{hasNextPage ? (
+				<li className="px-3 py-2 text-center">
+					<Button
+						type="button"
+						variant="ghost"
+						size="sm"
+						className="w-full"
+						disabled={isFetchingNextPage}
+						aria-busy={isFetchingNextPage}
+						onClick={loadMore}
+					>
+						{isFetchingNextPage
+							? "Loading more conversations…"
+							: isLoadMoreError
+								? "Retry loading conversations"
+								: "Load more conversations"}
+					</Button>
+				</li>
+			) : null}
 		</ul>
 	);
 }

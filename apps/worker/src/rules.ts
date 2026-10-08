@@ -1,9 +1,9 @@
-import { and, asc, eq, isNull, or } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
 import {
 	cannedReplies,
 	conversationTags,
 	inboxes,
+	type RuleAction,
+	type RuleCondition,
 	ruleActions,
 	ruleConditions,
 	ruleExecutionLog,
@@ -12,11 +12,11 @@ import {
 	tags,
 	teamMembers,
 	teams,
-	type RuleAction,
-	type RuleCondition,
 } from "@msgflow/db";
-import type { Env } from "./env";
+import { and, asc, eq, isNull, or } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
 import { userBelongsToWorkspace } from "./access";
+import type { Env } from "./env";
 
 /**
  * Rules engine (ADR 0009 + routing spec): synchronous pre-append evaluation in
@@ -49,7 +49,7 @@ export interface RuleEvaluationContext {
 	inboxId: string;
 	assigneeId: string | null;
 	status: "open" | "archived";
-	channelType: "facebook_page" | "email" | "whatsapp_phone";
+	channelType: "facebook_page" | "email" | "gmail" | "whatsapp_phone";
 	/** Email sender address; null on Facebook. */
 	senderEmail: string | null;
 	/** Email subject; null on Facebook. */

@@ -33,6 +33,9 @@ vi.mock("@/lib/api", () => ({
 		listMetaApps: vi.fn(),
 		listChannels: vi.fn(),
 		workspaceListInboxes: vi.fn(),
+		startGmailOAuth: vi.fn(),
+		deleteGmailChannel: vi.fn(),
+		disconnectGmailChannel: vi.fn(),
 	},
 }));
 
@@ -62,6 +65,9 @@ describe("settings UI contracts", () => {
 		vi.mocked(api.listMetaApps).mockResolvedValue({ metaApps: [] });
 		vi.mocked(api.listChannels).mockResolvedValue({ channels: [] });
 		vi.mocked(api.workspaceListInboxes).mockResolvedValue({ inboxes: [] });
+		vi.mocked(api.startGmailOAuth).mockResolvedValue({ authorizationUrl: "https://accounts.google.test/authorize" });
+		vi.mocked(api.deleteGmailChannel).mockResolvedValue({ success: true });
+		vi.mocked(api.disconnectGmailChannel).mockResolvedValue({ success: true });
 	});
 
 	afterEach(() => {
@@ -160,5 +166,60 @@ describe("settings UI contracts", () => {
 
 		expect(await screen.findByLabelText("Email address")).toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Add email channel" })).not.toBeInTheDocument();
+	});
+
+	it("offers private and shared Gmail access with a team picker", async () => {
+		vi.mocked(api.workspaceListInboxes).mockResolvedValue({
+			inboxes: [{ id: "inbox-1", name: "Support", isArchived: false }],
+		} as never);
+		vi.mocked(api.listTeams).mockResolvedValue({ teams: [{ id: "team-1", name: "Support" }] } as never);
+		renderSettings();
+		fireEvent.click(screen.getByRole("tab", { name: "Channels" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Add channel" }));
+		fireEvent.click(screen.getByRole("button", { name: /Gmail/ }));
+
+		expect(await screen.findByText("Private")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "Shared" }));
+		expect(screen.getAllByText("Team")).toHaveLength(2);
+		expect(api.listTeams).toHaveBeenCalledWith("workspace-1");
+		expect(screen.getByLabelText("Backfill days")).toHaveAttribute("min", "1");
+		expect(screen.getByLabelText("Backfill days")).toHaveAttribute("max", "90");
+	});
+
+	it("shows Gmail identity and sync state and starts a reconnect flow", async () => {
+		vi.mocked(api.listChannels).mockResolvedValue({
+			channels: [{
+				id: "gmail-1", type: "gmail", displayName: "person@example.test", externalId: "google-sub", status: "disconnected", hasToken: false, tokenExpiresAt: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+				gmail: { email: "person@example.test", inboxId: "inbox-1", accessMode: "shared", teamId: "team-1", syncState: "reconnect_required", lastSyncedAt: null, lastError: "Gmail authorization must be reconnected", backfillDays: 30 },
+			}],
+		} as never);
+		vi.mocked(api.workspaceListInboxes).mockResolvedValue({ inboxes: [{ id: "inbox-1", name: "Support", isArchived: false }] } as never);
+		vi.mocked(api.listTeams).mockResolvedValue({ teams: [{ id: "team-1", name: "Support" }] } as never);
+		renderSettings();
+		fireEvent.click(screen.getByRole("tab", { name: "Channels" }));
+
+		expect(await screen.findByText("person@example.test")).toBeInTheDocument();
+		expect(screen.getByText("Sync: reconnect required")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+		expect(await screen.findByText("Reconnect person@example.test")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Reconnect Gmail" })).toBeInTheDocument();
+	});
+
+	it("labels Gmail disconnect clearly and preserves local history", async () => {
+		vi.mocked(api.listChannels).mockResolvedValue({
+			channels: [{
+				id: "gmail-1", type: "gmail", displayName: "person@example.test", externalId: "google-sub", status: "active", hasToken: false, tokenExpiresAt: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+				gmail: { email: "person@example.test", inboxId: "inbox-1", accessMode: "private", teamId: null, syncState: "idle", lastSyncedAt: null, lastError: null, backfillDays: 30 },
+			}],
+		} as never);
+		vi.spyOn(window, "confirm").mockReturnValue(true);
+		renderSettings();
+		fireEvent.click(screen.getByRole("tab", { name: "Channels" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Disconnect Gmail" }));
+		expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Existing conversations remain"));
+		await waitFor(() => expect(api.disconnectGmailChannel).toHaveBeenCalledWith("workspace-1", "gmail-1"));
+		fireEvent.click(screen.getByRole("button", { name: "Delete Gmail" }));
+		expect(window.confirm).toHaveBeenLastCalledWith(expect.stringContaining("cannot be reconnected"));
+		await waitFor(() => expect(api.deleteGmailChannel).toHaveBeenCalledWith("workspace-1", "gmail-1"));
 	});
 });

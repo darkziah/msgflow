@@ -2,7 +2,7 @@
 
 import type { InboxAssignmentStrategy, InboxIconKey } from "../inbox-schema";
 
-export type Channel = "facebook" | "email" | "whatsapp";
+export type Channel = "facebook" | "email" | "gmail" | "whatsapp";
 
 export type MessageKind = "inbound" | "outbound";
 
@@ -310,16 +310,34 @@ export interface CannedReplyWriteRequest {
 	body: string;
 }
 
-// GET /api/conversations/:id/messages — complete internal timeline from the
-// Conversation DO. Each sibling collection preserves its own semantics:
-// customer-facing messages, team-only comments, and system Activities.
+export interface PageInfo {
+	nextCursor: string | null;
+}
+
+// GET /api/conversations — cursor page for the inbox list.
+export interface ConversationListResponse extends PageInfo {
+	conversations: ConversationSummary[];
+}
+
+export type TimelineItem =
+	| { type: "message"; item: Message }
+	| { type: "comment"; item: Comment }
+	| { type: "activity"; item: Activity };
+
+// GET /api/conversations/:id/messages — cursor page for a mixed timeline.
+export interface TimelinePageResponse extends PageInfo {
+	items: TimelineItem[];
+}
+
+// Legacy internal Conversation DO responses. These endpoints remain available
+// for non-browser consumers; the browser API is TimelinePageResponse.
 export interface TimelineResponse {
 	messages: Message[];
 	comments: Comment[];
 	activities: Activity[];
 }
 
-/** @deprecated Use TimelineResponse. Kept for callers of the existing endpoint. */
+/** @deprecated Browser callers should use TimelinePageResponse. */
 export type MessagesResponse = TimelineResponse;
 
 // POST /api/conversations/:id/read
@@ -360,7 +378,7 @@ export interface UserSummary {
 // state. Access tokens never leave the Worker; only hasToken is exposed.
 export interface ChannelSummary {
 	id: string;
-	type: "facebook_page" | "email" | "whatsapp_phone";
+	type: "facebook_page" | "email" | "gmail" | "whatsapp_phone";
 	displayName: string;
 	externalId: string;
 	status: "active" | "disconnected" | "error" | "deleted";
@@ -368,6 +386,17 @@ export interface ChannelSummary {
 	tokenExpiresAt: string | null;
 	createdAt: string;
 	updatedAt: string;
+	/** Gmail lifecycle state; returned only for Gmail channels and never includes credentials. */
+	gmail?: {
+		email: string;
+		inboxId: string;
+		accessMode: "private" | "shared";
+		teamId: string | null;
+		syncState: "idle" | "syncing" | "error" | "reconnect_required";
+		lastSyncedAt: string | null;
+		lastError: string | null;
+		backfillDays: number;
+	};
 }
 
 /** Installation-level Meta App metadata. The App secret never leaves the Worker. */
@@ -430,7 +459,7 @@ export interface InboxSummary {
 export interface InboxChannelLink {
 	channelId: string;
 	channelDisplayName: string;
-	channelType: "facebook_page" | "email" | "whatsapp_phone";
+	channelType: "facebook_page" | "email" | "gmail" | "whatsapp_phone";
 	/** True when this channel's default inbox is this inbox. */
 	isDefault: boolean;
 }
@@ -522,6 +551,7 @@ export function parseConversationId(
 		rawChannel !== "facebook" &&
 		rawChannel !== "fb" &&
 		rawChannel !== "email" &&
+		rawChannel !== "gmail" &&
 		rawChannel !== "wa"
 	) {
 		return null;
@@ -630,7 +660,7 @@ export interface SavedFilterFilters {
 	assigneeId?: string;
 	unassigned?: boolean;
 	snoozed?: boolean;
-	channel?: "facebook" | "email" | "whatsapp";
+	channel?: "facebook" | "email" | "gmail" | "whatsapp";
 	/** Exact authorized channel selection from a sidebar leaf. */
 	channelId?: string;
 	tagId?: string;

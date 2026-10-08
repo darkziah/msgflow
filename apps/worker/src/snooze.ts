@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { conversations } from "@msgflow/db";
 import { appendActivity } from "./activity";
 import type { Env } from "./env";
+import { notifyWorkspaceConversationChange } from "./workspace-events";
 
 /**
  * Clear due snoozes from D1. Snooze is conversation metadata, so revival is a
@@ -11,7 +12,7 @@ import type { Env } from "./env";
 export async function reviveDueSnoozes(env: Env, now: string): Promise<number> {
 	const db = drizzle(env.DB);
 	const due = await db
-		.select({ id: conversations.id, snoozedUntil: conversations.snoozedUntil })
+		.select({ id: conversations.id, workspaceId: conversations.workspaceId, snoozedUntil: conversations.snoozedUntil })
 		.from(conversations)
 		.where(
 			and(
@@ -34,12 +35,15 @@ export async function reviveDueSnoozes(env: Env, now: string): Promise<number> {
 		.run();
 	await Promise.all(
 		due.map((conversation) =>
-			appendActivity(env, {
-				conversationId: conversation.id,
-				action: "snooze.expired",
-				actorId: null,
-				details: { snoozedUntil: conversation.snoozedUntil },
-			}),
+			Promise.all([
+				appendActivity(env, {
+					conversationId: conversation.id,
+					action: "snooze.expired",
+					actorId: null,
+					details: { snoozedUntil: conversation.snoozedUntil },
+				}),
+				notifyWorkspaceConversationChange(env, conversation.workspaceId),
+			]),
 		),
 	);
 	return due.length;

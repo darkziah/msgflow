@@ -218,6 +218,55 @@
 			"when": 1791331200004,
 			"tag": "0030_first_sign_in_walkthrough",
 			"breakpoints": true
+		},
+		{
+			"idx": 31,
+			"version": "6",
+			"when": 1791042305782,
+			"tag": "0031_gmail_channel",
+			"breakpoints": true
+		},
+		{
+			"idx": 32,
+			"version": "6",
+			"when": 1791042658812,
+			"tag": "0032_gmail_message_refs_thread_lookup",
+			"breakpoints": true
+		},
+		{
+			"idx": 33,
+			"version": "6",
+			"when": 1791043006833,
+			"tag": "0033_gmail_message_refs_conversation_thread_integrity",
+			"breakpoints": true
+		},
+		{
+			"idx": 34,
+			"version": "6",
+			"when": 1791052727303,
+			"tag": "0034_gmail_channel_mapping_update_integrity",
+			"breakpoints": true
+		},
+		{
+			"idx": 35,
+			"version": "6",
+			"when": 1791052727304,
+			"tag": "0035_gmail_tenant_boundaries",
+			"breakpoints": true
+		},
+		{
+			"idx": 36,
+			"version": "6",
+			"when": 1791052727305,
+			"tag": "0036_gmail_cross_tenant_integrity",
+			"breakpoints": true
+		},
+		{
+			"idx": 37,
+			"version": "6",
+			"when": 1791131628744,
+			"tag": "0037_gmail_sync_requests",
+			"breakpoints": true
 		}
 	]
 }

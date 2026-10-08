@@ -1,12 +1,14 @@
-import type { ConversationDO } from "./conversation-do";
 import type { CallDispatchDO } from "./call-dispatch-do";
 import type { CallSessionDO } from "./call-session-do";
+import type { ConversationDO } from "./conversation-do";
+import type { WorkspaceEventsDO } from "./workspace-events-do";
 
 export interface Env {
 	DB: D1Database;
 	CONVERSATION_DO: DurableObjectNamespace<ConversationDO>;
 	CALL_DISPATCH_DO: DurableObjectNamespace<CallDispatchDO>;
 	CALL_SESSION_DO: DurableObjectNamespace<CallSessionDO>;
+	WORKSPACE_EVENTS_DO: DurableObjectNamespace<WorkspaceEventsDO>;
 	EMAIL: SendEmail;
 	/** Verified provider sender for recovery and invitation email. */
 	AUTH_EMAIL_FROM?: string;
@@ -18,6 +20,13 @@ export interface Env {
 	MESSENGER_APP_SECRET: string;
 	/** 32-byte base64url AES-GCM key; never stored in D1. ADR 0018. */
 	CHANNEL_TOKEN_ENCRYPTION_KEY: string;
+	/** Google OAuth and Gmail Pub/Sub configuration; provisioned as Worker secrets/vars. */
+	GOOGLE_CLIENT_ID?: string;
+	GOOGLE_CLIENT_SECRET?: string;
+	GOOGLE_OAUTH_REDIRECT_URI?: string;
+	GOOGLE_PUBSUB_AUDIENCE?: string;
+	GOOGLE_PUBSUB_SERVICE_ACCOUNT_EMAIL?: string;
+	GOOGLE_PUBSUB_TOPIC?: string;
 	BETTER_AUTH_SECRET: string;
 	BETTER_AUTH_URL?: string;
 	BETTER_AUTH_TRUSTED_ORIGINS?: string;
